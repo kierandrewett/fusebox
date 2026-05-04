@@ -41,6 +41,7 @@ struct Settings {
     refresh_seconds: u64,
     scan_seconds: u64,
     discovery_timeout_seconds: u64,
+    discovery_targets: Vec<String>,
     energy_price_pence_per_kwh: f64,
     state_path: PathBuf,
 }
@@ -53,6 +54,7 @@ struct AppState {
     device_locks: Arc<RwLock<BTreeMap<IpAddr, Arc<Mutex<()>>>>>,
     device_events: watch::Sender<DeviceListResponse>,
     discovery_timeout_seconds: u64,
+    discovery_targets: Vec<String>,
     refresh_seconds: u64,
     scan_seconds: u64,
     energy_price_pence_per_kwh: f64,
@@ -286,6 +288,7 @@ impl Settings {
         let refresh_seconds = optional_u64_env("FUSEBOX_REFRESH_SECONDS", 10)?;
         let scan_seconds = optional_u64_env("FUSEBOX_SCAN_SECONDS", 60)?;
         let discovery_timeout_seconds = optional_u64_env("FUSEBOX_DISCOVERY_TIMEOUT_SECONDS", 5)?;
+        let discovery_targets = optional_string_list_env("FUSEBOX_DISCOVERY_TARGETS")?;
         let energy_price_pence_per_kwh = optional_f64_env(
             "FUSEBOX_ENERGY_PRICE_PENCE_PER_KWH",
             DEFAULT_ENERGY_PRICE_PENCE_PER_KWH,
@@ -297,6 +300,11 @@ impl Settings {
             return Err(anyhow!(
                 "FUSEBOX_DISCOVERY_TIMEOUT_SECONDS must be between 1 and 60"
             ));
+        }
+
+        if !discovery_targets.is_empty() {
+            discovery_scan_targets_with_auto(&discovery_targets, &[], Vec::new())
+                .context("FUSEBOX_DISCOVERY_TARGETS must contain IPv4 addresses or CIDRs")?;
         }
 
         if !(10..=3600).contains(&scan_seconds) {
@@ -318,6 +326,7 @@ impl Settings {
             refresh_seconds,
             scan_seconds,
             discovery_timeout_seconds,
+            discovery_targets,
             energy_price_pence_per_kwh,
             state_path,
         })
@@ -345,6 +354,7 @@ impl AppState {
             device_locks: Arc::new(RwLock::new(BTreeMap::new())),
             device_events,
             discovery_timeout_seconds: settings.discovery_timeout_seconds,
+            discovery_targets: settings.discovery_targets.clone(),
             refresh_seconds: settings.refresh_seconds,
             scan_seconds: settings.scan_seconds,
             energy_price_pence_per_kwh: settings.energy_price_pence_per_kwh,
@@ -591,16 +601,30 @@ async fn scan_and_refresh(state: &AppState) -> Result<()> {
 }
 
 async fn discover_devices(state: &AppState) -> Result<()> {
-    let auto_targets = match automatic_discovery_targets() {
-        Ok(targets) => targets,
-        Err(error) => {
-            warn!(%error, "failed to inspect local IPv4 networks for discovery targets");
-            Vec::new()
-        }
-    };
-    let targets = discovery_scan_targets_with_auto(&[], &[], auto_targets)?;
+    let (targets, target_source) = if state.discovery_targets.is_empty() {
+        let auto_targets = match automatic_discovery_targets() {
+            Ok(targets) => targets,
+            Err(error) => {
+                warn!(%error, "failed to inspect local IPv4 networks for discovery targets");
+                Vec::new()
+            }
+        };
 
-    info!(target_count = targets.len(), "discovery targets selected");
+        (
+            discovery_scan_targets_with_auto(&[], &[], auto_targets)?,
+            "auto",
+        )
+    } else {
+        (
+            discovery_scan_targets_with_auto(&state.discovery_targets, &[], Vec::new())?,
+            "explicit",
+        )
+    };
+
+    info!(
+        target_count = targets.len(),
+        target_source, "discovery targets selected"
+    );
     for target in &targets {
         info!(
             requested = %target.requested,
@@ -897,6 +921,22 @@ fn optional_f64_env(name: &str, default: f64) -> Result<f64> {
         Err(std::env::VarError::NotPresent) => Ok(default),
         Err(error) => Err(error).with_context(|| format!("failed to read {name}")),
     }
+}
+
+fn optional_string_list_env(name: &str) -> Result<Vec<String>> {
+    match std::env::var(name) {
+        Ok(value) => Ok(parse_string_list(&value)),
+        Err(std::env::VarError::NotPresent) => Ok(Vec::new()),
+        Err(error) => Err(error).with_context(|| format!("failed to read {name}")),
+    }
+}
+
+fn parse_string_list(value: &str) -> Vec<String> {
+    value
+        .split(|character: char| character == ',' || character.is_whitespace())
+        .filter(|part| !part.is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
 }
 
 fn estimate_energy_cost_pence(energy_wh: u64, price_pence_per_kwh: f64) -> f64 {
@@ -2752,6 +2792,20 @@ mod tests {
     }
 
     #[test]
+    fn parses_comma_or_space_separated_string_lists() {
+        let targets = parse_string_list("192.168.0.0/24, 10.10.0.255\n172.18.0.0/16");
+
+        assert_eq!(
+            targets,
+            vec![
+                "192.168.0.0/24".to_string(),
+                "10.10.0.255".to_string(),
+                "172.18.0.0/16".to_string(),
+            ],
+        );
+    }
+
+    #[test]
     fn renders_snapshot_backed_device_view() {
         let device = ManagedDevice {
             name: "lights".to_string(),
@@ -2831,6 +2885,7 @@ mod tests {
             refresh_seconds: 10,
             scan_seconds: 60,
             discovery_timeout_seconds: 5,
+            discovery_targets: Vec::new(),
             energy_price_pence_per_kwh: DEFAULT_ENERGY_PRICE_PENCE_PER_KWH,
             state_path: state_path.clone(),
         };
@@ -2911,6 +2966,7 @@ mod tests {
             refresh_seconds: 10,
             scan_seconds: 60,
             discovery_timeout_seconds: 5,
+            discovery_targets: Vec::new(),
             energy_price_pence_per_kwh: DEFAULT_ENERGY_PRICE_PENCE_PER_KWH,
             state_path,
         }
