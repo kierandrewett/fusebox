@@ -200,6 +200,8 @@ POST /api/devices/{name}/toggle
 POST /api/devices/{name}/power
 ```
 
+The usage history API accepts `5m`, `30m`, `1h`, `6h`, `12h`, `1d`, `3d`, `7d`, `30d`, `3m`, `6m`, `1y`, `ytd`, and `all`. Short ranges return power readings in W. Longer calendar ranges return energy readings in kWh so the graph stays readable.
+
 Set a device explicitly with JSON:
 
 ```bash

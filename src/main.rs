@@ -31,6 +31,7 @@ use tracing_subscriber::EnvFilter;
 
 const STATE_VERSION: u32 = 1;
 const DEFAULT_ENERGY_PRICE_PENCE_PER_KWH: f64 = 27.03;
+const ALL_TIME_USAGE_START_YEAR: i32 = 2020;
 const SWITCH_SOUND_BYTES: &[u8] = include_bytes!("../assets/348224__tbrook__switch-light-06.wav");
 
 #[derive(Debug, Clone)]
@@ -130,7 +131,7 @@ struct UsageHistorySeries {
 #[derive(Debug, Clone, Serialize)]
 struct UsageHistoryPoint {
     timestamp_ms: i64,
-    power_w: f64,
+    value: f64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -149,9 +150,26 @@ struct UsageHistoryRange {
     key: &'static str,
     label: &'static str,
     interval_label: &'static str,
-    duration: ChronoDuration,
-    range_limit: ChronoDuration,
-    interval: PowerExportInterval,
+    unit: &'static str,
+    start: UsageHistoryStart,
+    kind: UsageHistoryKind,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum UsageHistoryStart {
+    Duration(ChronoDuration),
+    YearToDate,
+    AllTime,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum UsageHistoryKind {
+    Power {
+        interval: PowerExportInterval,
+        range_limit: ChronoDuration,
+    },
+    EnergyDaily,
+    EnergyMonthly,
 }
 
 #[derive(Debug, Clone)]
@@ -966,24 +984,23 @@ async fn build_usage_history(state: &AppState, range_key: Option<&str>) -> Usage
     let range = usage_history_range(range_key);
     let devices = export_devices(state).await;
     let now = Utc::now();
-    let start = now.checked_sub_signed(range.duration).unwrap_or(now);
-    let ranges = split_datetime_ranges(start, now, range.range_limit);
+    let start = usage_history_start_datetime(range.start, now);
     let mut series = Vec::with_capacity(devices.len());
     let mut totals_by_timestamp: BTreeMap<DateTime<Utc>, f64> = BTreeMap::new();
     let mut errors = Vec::new();
 
     for device in devices {
-        match read_power_entries(state, &device.config, &ranges, range.interval).await {
+        match read_usage_history_entries(state, &device.config, &range, start, now).await {
             Ok(entries) => {
                 let mut points = Vec::new();
 
-                for (timestamp, power) in entries {
-                    if let Some(power_w) = power {
+                for (timestamp, value) in entries {
+                    if let Some(value) = value {
                         points.push(UsageHistoryPoint {
                             timestamp_ms: timestamp.timestamp_millis(),
-                            power_w,
+                            value,
                         });
-                        *totals_by_timestamp.entry(timestamp).or_default() += power_w;
+                        *totals_by_timestamp.entry(timestamp).or_default() += value;
                     }
                 }
 
@@ -1001,9 +1018,9 @@ async fn build_usage_history(state: &AppState, range_key: Option<&str>) -> Usage
 
     let totals = totals_by_timestamp
         .into_iter()
-        .map(|(timestamp, power_w)| UsageHistoryPoint {
+        .map(|(timestamp, value)| UsageHistoryPoint {
             timestamp_ms: timestamp.timestamp_millis(),
-            power_w,
+            value,
         })
         .collect();
 
@@ -1017,8 +1034,68 @@ async fn build_usage_history(state: &AppState, range_key: Option<&str>) -> Usage
         interval: range.interval_label,
         start_date: start.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
         end_date: now.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
-        unit: "W",
+        unit: range.unit,
     }
+}
+
+async fn read_usage_history_entries(
+    state: &AppState,
+    device: &DeviceConfig,
+    range: &UsageHistoryRange,
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+) -> Result<Vec<(DateTime<Utc>, Option<f64>)>> {
+    match range.kind {
+        UsageHistoryKind::Power {
+            interval,
+            range_limit,
+        } => {
+            let ranges = split_datetime_ranges(start, end, range_limit);
+
+            read_power_entries(state, device, &ranges, interval).await
+        }
+        UsageHistoryKind::EnergyDaily => {
+            read_energy_entries(
+                state,
+                device,
+                EnergyDataInterval::Daily {
+                    start_date: start.date_naive(),
+                },
+            )
+            .await
+        }
+        UsageHistoryKind::EnergyMonthly => {
+            read_energy_entries(
+                state,
+                device,
+                EnergyDataInterval::Monthly {
+                    start_date: start.date_naive(),
+                },
+            )
+            .await
+        }
+    }
+}
+
+fn usage_history_start_datetime(start: UsageHistoryStart, now: DateTime<Utc>) -> DateTime<Utc> {
+    match start {
+        UsageHistoryStart::Duration(duration) => now.checked_sub_signed(duration).unwrap_or(now),
+        UsageHistoryStart::YearToDate => date_start_datetime(current_year_start(now.date_naive())),
+        UsageHistoryStart::AllTime => {
+            let start_date = NaiveDate::from_ymd_opt(ALL_TIME_USAGE_START_YEAR, 1, 1)
+                .unwrap_or_else(|| current_year_start(now.date_naive()));
+
+            date_start_datetime(start_date)
+        }
+    }
+}
+
+fn current_year_start(date: NaiveDate) -> NaiveDate {
+    NaiveDate::from_ymd_opt(date.year(), 1, 1).unwrap_or(date)
+}
+
+fn date_start_datetime(date: NaiveDate) -> DateTime<Utc> {
+    DateTime::from_naive_utc_and_offset(date.and_hms_opt(0, 0, 0).unwrap_or_default(), Utc)
 }
 
 fn usage_history_range(range_key: Option<&str>) -> UsageHistoryRange {
@@ -1027,73 +1104,140 @@ fn usage_history_range(range_key: Option<&str>) -> UsageHistoryRange {
             key: "5m",
             label: "5 minutes",
             interval_label: "5-minute",
-            duration: ChronoDuration::minutes(5),
-            range_limit: ChronoDuration::hours(12),
-            interval: PowerExportInterval::Every5Minutes,
+            unit: "W",
+            start: UsageHistoryStart::Duration(ChronoDuration::minutes(5)),
+            kind: UsageHistoryKind::Power {
+                interval: PowerExportInterval::Every5Minutes,
+                range_limit: ChronoDuration::hours(12),
+            },
         },
         Some("30m") => UsageHistoryRange {
             key: "30m",
             label: "30 minutes",
             interval_label: "5-minute",
-            duration: ChronoDuration::minutes(30),
-            range_limit: ChronoDuration::hours(12),
-            interval: PowerExportInterval::Every5Minutes,
+            unit: "W",
+            start: UsageHistoryStart::Duration(ChronoDuration::minutes(30)),
+            kind: UsageHistoryKind::Power {
+                interval: PowerExportInterval::Every5Minutes,
+                range_limit: ChronoDuration::hours(12),
+            },
         },
         Some("1h") => UsageHistoryRange {
             key: "1h",
             label: "1 hour",
             interval_label: "5-minute",
-            duration: ChronoDuration::hours(1),
-            range_limit: ChronoDuration::hours(12),
-            interval: PowerExportInterval::Every5Minutes,
+            unit: "W",
+            start: UsageHistoryStart::Duration(ChronoDuration::hours(1)),
+            kind: UsageHistoryKind::Power {
+                interval: PowerExportInterval::Every5Minutes,
+                range_limit: ChronoDuration::hours(12),
+            },
         },
         Some("6h") => UsageHistoryRange {
             key: "6h",
             label: "6 hours",
             interval_label: "5-minute",
-            duration: ChronoDuration::hours(6),
-            range_limit: ChronoDuration::hours(12),
-            interval: PowerExportInterval::Every5Minutes,
+            unit: "W",
+            start: UsageHistoryStart::Duration(ChronoDuration::hours(6)),
+            kind: UsageHistoryKind::Power {
+                interval: PowerExportInterval::Every5Minutes,
+                range_limit: ChronoDuration::hours(12),
+            },
         },
         Some("12h") => UsageHistoryRange {
             key: "12h",
             label: "12 hours",
             interval_label: "5-minute",
-            duration: ChronoDuration::hours(12),
-            range_limit: ChronoDuration::hours(12),
-            interval: PowerExportInterval::Every5Minutes,
+            unit: "W",
+            start: UsageHistoryStart::Duration(ChronoDuration::hours(12)),
+            kind: UsageHistoryKind::Power {
+                interval: PowerExportInterval::Every5Minutes,
+                range_limit: ChronoDuration::hours(12),
+            },
         },
         Some("1d") => UsageHistoryRange {
             key: "1d",
             label: "1 day",
             interval_label: "5-minute",
-            duration: ChronoDuration::days(1),
-            range_limit: ChronoDuration::hours(12),
-            interval: PowerExportInterval::Every5Minutes,
+            unit: "W",
+            start: UsageHistoryStart::Duration(ChronoDuration::days(1)),
+            kind: UsageHistoryKind::Power {
+                interval: PowerExportInterval::Every5Minutes,
+                range_limit: ChronoDuration::hours(12),
+            },
         },
         Some("3d") => UsageHistoryRange {
             key: "3d",
             label: "3 days",
             interval_label: "hourly",
-            duration: ChronoDuration::days(3),
-            range_limit: ChronoDuration::days(6),
-            interval: PowerExportInterval::Hourly,
+            unit: "W",
+            start: UsageHistoryStart::Duration(ChronoDuration::days(3)),
+            kind: UsageHistoryKind::Power {
+                interval: PowerExportInterval::Hourly,
+                range_limit: ChronoDuration::days(6),
+            },
         },
         Some("30d") => UsageHistoryRange {
             key: "30d",
             label: "30 days",
             interval_label: "hourly",
-            duration: ChronoDuration::days(30),
-            range_limit: ChronoDuration::days(6),
-            interval: PowerExportInterval::Hourly,
+            unit: "W",
+            start: UsageHistoryStart::Duration(ChronoDuration::days(30)),
+            kind: UsageHistoryKind::Power {
+                interval: PowerExportInterval::Hourly,
+                range_limit: ChronoDuration::days(6),
+            },
+        },
+        Some("3m") => UsageHistoryRange {
+            key: "3m",
+            label: "3 months",
+            interval_label: "daily energy",
+            unit: "kWh",
+            start: UsageHistoryStart::Duration(ChronoDuration::days(92)),
+            kind: UsageHistoryKind::EnergyDaily,
+        },
+        Some("6m") => UsageHistoryRange {
+            key: "6m",
+            label: "6 months",
+            interval_label: "daily energy",
+            unit: "kWh",
+            start: UsageHistoryStart::Duration(ChronoDuration::days(183)),
+            kind: UsageHistoryKind::EnergyDaily,
+        },
+        Some("1y") => UsageHistoryRange {
+            key: "1y",
+            label: "1 year",
+            interval_label: "daily energy",
+            unit: "kWh",
+            start: UsageHistoryStart::Duration(ChronoDuration::days(365)),
+            kind: UsageHistoryKind::EnergyDaily,
+        },
+        Some("ytd") => UsageHistoryRange {
+            key: "ytd",
+            label: "year to date",
+            interval_label: "daily energy",
+            unit: "kWh",
+            start: UsageHistoryStart::YearToDate,
+            kind: UsageHistoryKind::EnergyDaily,
+        },
+        Some("all") => UsageHistoryRange {
+            key: "all",
+            label: "all time",
+            interval_label: "monthly energy",
+            unit: "kWh",
+            start: UsageHistoryStart::AllTime,
+            kind: UsageHistoryKind::EnergyMonthly,
         },
         _ => UsageHistoryRange {
             key: "7d",
             label: "7 days",
             interval_label: "hourly",
-            duration: ChronoDuration::days(7),
-            range_limit: ChronoDuration::days(6),
-            interval: PowerExportInterval::Hourly,
+            unit: "W",
+            start: UsageHistoryStart::Duration(ChronoDuration::days(7)),
+            kind: UsageHistoryKind::Power {
+                interval: PowerExportInterval::Hourly,
+                range_limit: ChronoDuration::days(6),
+            },
         },
     }
 }
@@ -1583,9 +1727,10 @@ const INDEX_HTML: &str = r##"<!doctype html>
             --green: #66d18c;
             --red: #de5e4b;
             --amber: #e5b75b;
-            --graph-line: #66d18c;
-            --graph-fill: rgba(102, 209, 140, 0.16);
-            --graph-grid: rgba(34, 29, 23, 0.18);
+            --graph-line: #126c43;
+            --graph-fill: rgba(18, 108, 67, 0.18);
+            --graph-grid: rgba(34, 29, 23, 0.3);
+            --graph-surface: rgba(255, 255, 255, 0.16);
             --muted: #9b907d;
         }
 
@@ -1627,6 +1772,7 @@ const INDEX_HTML: &str = r##"<!doctype html>
             --graph-line: #71e09b;
             --graph-fill: rgba(113, 224, 155, 0.12);
             --graph-grid: rgba(239, 231, 215, 0.14);
+            --graph-surface: rgba(0, 0, 0, 0.08);
             --muted: #a79d8b;
         }
 
@@ -1885,7 +2031,7 @@ const INDEX_HTML: &str = r##"<!doctype html>
             background:
                 linear-gradient(var(--graph-grid) 1px, transparent 1px),
                 linear-gradient(90deg, var(--graph-grid) 1px, transparent 1px),
-                rgba(0, 0, 0, 0.08);
+                var(--graph-surface);
             background-size: 100% 25%, 12.5% 100%, auto;
         }
 
@@ -2201,9 +2347,14 @@ const INDEX_HTML: &str = r##"<!doctype html>
                     <button class="range-button" type="button" data-history-range="3d">3d</button>
                     <button class="range-button" type="button" data-history-range="7d">7d</button>
                     <button class="range-button" type="button" data-history-range="30d">30d</button>
+                    <button class="range-button" type="button" data-history-range="3m">3m</button>
+                    <button class="range-button" type="button" data-history-range="6m">6m</button>
+                    <button class="range-button" type="button" data-history-range="1y">1y</button>
+                    <button class="range-button" type="button" data-history-range="ytd">YTD</button>
+                    <button class="range-button" type="button" data-history-range="all">All</button>
                 </div>
                 <div class="usage-chart-container">
-                    <canvas class="usage-chart" id="usage-chart" aria-label="Power draw in watts for each energy-monitoring plug over the selected history range." role="img"></canvas>
+                    <canvas class="usage-chart" id="usage-chart" aria-label="Usage history for each energy-monitoring plug over the selected range." role="img"></canvas>
                 </div>
                 <p class="usage-empty" id="usage-empty">Loading power history from Tapo.</p>
             </section>
@@ -2229,7 +2380,10 @@ const INDEX_HTML: &str = r##"<!doctype html>
         const usageRangeControlsEl = document.querySelector("#usage-range-controls");
         const deviceStreamReconnectMs = 2000;
         const switchSoundUrl = "/assets/switch.wav";
-        const chartPalette = ["#e5b75b", "#7bb7ff", "#f06b5c", "#c99cff", "#62d6d1", "#ff9d66", "#b6e36a", "#f38ad3"];
+        const chartPalettes = {
+            classic: ["#8a5a00", "#005ea8", "#b2352b", "#6f4dbf", "#00746f", "#a14500", "#4f7500", "#a43778"],
+            dark: ["#e5b75b", "#7bb7ff", "#f06b5c", "#c99cff", "#62d6d1", "#ff9d66", "#b6e36a", "#f38ad3"],
+        };
         const defaultHistoryRange = "7d";
         let selectedHistoryRange = defaultHistoryRange;
         let powerChart = null;
@@ -2548,13 +2702,14 @@ const INDEX_HTML: &str = r##"<!doctype html>
             usageEmptyEl.hidden = true;
             usageEmptyEl.textContent = "";
 
-            const labels = totals.map((point) => formatHistoryLabel(point.timestamp_ms));
+            const unit = history.unit ?? "W";
+            const labels = totals.map((point) => formatHistoryLabel(point.timestamp_ms, history.range, unit));
             const timestamps = totals.map((point) => point.timestamp_ms);
-            const maxWatts = Math.max(...totals.map((point) => point.power_w), 1);
+            const maxValue = Math.max(...totals.map((point) => point.value ?? 0), 1);
             const chartTheme = powerChartTheme();
             const datasets = [{
                 label: "Total",
-                data: totals.map((point) => point.power_w),
+                data: totals.map((point) => point.value),
                 borderColor: chartTheme.graphLine,
                 backgroundColor: chartTheme.graphFill,
                 borderWidth: 3,
@@ -2566,8 +2721,8 @@ const INDEX_HTML: &str = r##"<!doctype html>
             }];
 
             for (const [index, series] of (history.series ?? []).entries()) {
-                const pointsByTimestamp = new Map((series.points ?? []).map((point) => [point.timestamp_ms, point.power_w]));
-                const color = chartPalette[index % chartPalette.length];
+                const pointsByTimestamp = new Map((series.points ?? []).map((point) => [point.timestamp_ms, point.value]));
+                const color = chartSeriesColor(index, chartTheme);
                 datasets.push({
                     label: series.device_name,
                     data: timestamps.map((timestamp) => pointsByTimestamp.get(timestamp) ?? null),
@@ -2580,15 +2735,18 @@ const INDEX_HTML: &str = r##"<!doctype html>
                     pointHoverRadius: 4,
                     spanGaps: true,
                     tension: 0.24,
+                    themeSeriesIndex: index,
                 });
             }
 
             powerChart.data.labels = labels;
             powerChart.data.datasets = datasets;
-            powerChart.options.scales.y.suggestedMax = Math.ceil(maxWatts * 1.15);
+            powerChart.options.scales.y.suggestedMax = Math.ceil(maxValue * 1.15);
+            powerChart.options.scales.y.ticks.callback = (value) => formatUsageValue(value, unit);
+            powerChart.options.plugins.tooltip.callbacks.label = (context) => ` ${formatUsageValue(context.parsed.y, unit)}`;
             powerChart.update("none");
             usageTitleEl.textContent = `${history.range_label ?? selectedHistoryRange} usage`;
-            usageRangeEl.textContent = `${history.interval ?? "power"} readings / ${formatPower(maxWatts)} peak`;
+            usageRangeEl.textContent = `${history.interval ?? "usage"} readings / ${formatUsageValue(maxValue, unit)} peak`;
 
             if ((history.errors ?? []).length > 0) {
                 usageEmptyEl.hidden = false;
@@ -2641,7 +2799,7 @@ const INDEX_HTML: &str = r##"<!doctype html>
                         tooltip: {
                             callbacks: {
                                 title: (items) => items.length > 0 ? items[0].label : "",
-                                label: (context) => ` ${formatPower(context.parsed.y)}`,
+                                label: (context) => ` ${formatUsageValue(context.parsed.y, "W")}`,
                             },
                         },
                     },
@@ -2662,7 +2820,7 @@ const INDEX_HTML: &str = r##"<!doctype html>
                             },
                             ticks: {
                                 color: chartTheme.ink,
-                                callback: (value) => `${value} W`,
+                                callback: (value) => formatUsageValue(value, "W"),
                             },
                         },
                     },
@@ -2677,6 +2835,9 @@ const INDEX_HTML: &str = r##"<!doctype html>
             const dataset = powerChart.data.datasets[0];
             dataset.borderColor = chartTheme.graphLine;
             dataset.backgroundColor = chartTheme.graphFill;
+            for (const [index, dataset] of powerChart.data.datasets.slice(1).entries()) {
+                dataset.borderColor = chartSeriesColor(dataset.themeSeriesIndex ?? index, chartTheme);
+            }
             powerChart.options.scales.x.grid.color = chartTheme.graphGrid;
             powerChart.options.scales.x.ticks.color = chartTheme.ink;
             powerChart.options.scales.y.grid.color = chartTheme.graphGrid;
@@ -2692,11 +2853,32 @@ const INDEX_HTML: &str = r##"<!doctype html>
                 graphFill: styles.getPropertyValue("--graph-fill").trim(),
                 graphGrid: styles.getPropertyValue("--graph-grid").trim(),
                 ink: styles.getPropertyValue("--ink").trim(),
+                series: document.documentElement.dataset.theme === "dark" ? chartPalettes.dark : chartPalettes.classic,
             };
         }
 
-        function formatHistoryLabel(timestampMs) {
-            return new Date(timestampMs).toLocaleString([], {
+        function chartSeriesColor(index, chartTheme) {
+            return chartTheme.series[index % chartTheme.series.length];
+        }
+
+        function formatHistoryLabel(timestampMs, range, unit) {
+            const date = new Date(timestampMs);
+            if (range === "all") {
+                return date.toLocaleDateString([], {
+                    month: "short",
+                    year: "numeric",
+                });
+            }
+
+            if (unit === "kWh") {
+                return date.toLocaleDateString([], {
+                    weekday: "short",
+                    day: "2-digit",
+                    month: "short",
+                });
+            }
+
+            return date.toLocaleString([], {
                 weekday: "short",
                 day: "2-digit",
                 month: "short",
@@ -2780,6 +2962,11 @@ const INDEX_HTML: &str = r##"<!doctype html>
         function formatPower(watts) {
             if (watts >= 1000) return `${(watts / 1000).toFixed(2)} kW`;
             return `${Math.round(watts)} W`;
+        }
+
+        function formatUsageValue(value, unit) {
+            if (unit === "kWh") return `${Number(value).toFixed(2)} kWh`;
+            return formatPower(value);
         }
 
         function escapeHtml(value) {
@@ -2871,6 +3058,35 @@ mod tests {
         assert_eq!(ranges.len(), 2);
         assert_eq!(ranges[0], (start, start + ChronoDuration::hours(12)));
         assert_eq!(ranges[1], (start + ChronoDuration::hours(12), end));
+    }
+
+    #[test]
+    fn maps_long_usage_ranges_to_energy_history() {
+        let three_months = usage_history_range(Some("3m"));
+        let ytd = usage_history_range(Some("ytd"));
+        let all_time = usage_history_range(Some("all"));
+
+        assert_eq!(three_months.key, "3m");
+        assert_eq!(three_months.unit, "kWh");
+        assert!(matches!(three_months.kind, UsageHistoryKind::EnergyDaily));
+        assert!(matches!(ytd.start, UsageHistoryStart::YearToDate));
+        assert!(matches!(all_time.kind, UsageHistoryKind::EnergyMonthly));
+    }
+
+    #[test]
+    fn calculates_calendar_usage_range_starts() {
+        let now = DateTime::from_timestamp(1_771_588_800, 0).unwrap();
+        let ytd_start = usage_history_start_datetime(UsageHistoryStart::YearToDate, now);
+        let all_time_start = usage_history_start_datetime(UsageHistoryStart::AllTime, now);
+
+        assert_eq!(
+            ytd_start.date_naive(),
+            NaiveDate::from_ymd_opt(2026, 1, 1).unwrap()
+        );
+        assert_eq!(
+            all_time_start.date_naive(),
+            NaiveDate::from_ymd_opt(ALL_TIME_USAGE_START_YEAR, 1, 1).unwrap(),
+        );
     }
 
     #[test]
