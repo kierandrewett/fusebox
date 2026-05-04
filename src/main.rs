@@ -9,11 +9,14 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow};
 use axum::extract::{Path, State};
-use axum::http::StatusCode;
+use axum::http::{StatusCode, header};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use chrono::{DateTime, Datelike, Days, Duration as ChronoDuration, NaiveDate, Utc};
+use rust_xlsxwriter::{Format, FormatAlign, FormatBorder, Workbook};
 use serde::{Deserialize, Serialize};
+use tapo::{ApiClient, requests::EnergyDataInterval, requests::PowerDataInterval};
 use tapoctl::{
     Config as TapoConfig, DeviceConfig, DeviceModel, DeviceSnapshot, TapoController,
     TapoCredentials, discovery_add_candidates,
@@ -24,6 +27,7 @@ use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
 const STATE_VERSION: u32 = 1;
+const DEFAULT_ENERGY_PRICE_PENCE_PER_KWH: f64 = 27.03;
 
 #[derive(Debug, Clone)]
 struct Settings {
@@ -33,16 +37,19 @@ struct Settings {
     refresh_seconds: u64,
     scan_seconds: u64,
     discovery_timeout_seconds: u64,
+    energy_price_pence_per_kwh: f64,
     state_path: PathBuf,
 }
 
 #[derive(Debug, Clone)]
 struct AppState {
     controller: TapoController,
+    credentials: TapoCredentials,
     devices: Arc<RwLock<BTreeMap<String, ManagedDevice>>>,
     discovery_timeout_seconds: u64,
     refresh_seconds: u64,
     scan_seconds: u64,
+    energy_price_pence_per_kwh: f64,
     state_path: PathBuf,
 }
 
@@ -60,6 +67,7 @@ struct ManagedDevice {
 struct DeviceListResponse {
     devices: Vec<DeviceView>,
     updated_at_ms: u128,
+    energy_price_pence_per_kwh: f64,
     scan_error: Option<String>,
 }
 
@@ -85,8 +93,63 @@ struct EnergyView {
     current_power_w: Option<u64>,
     today_energy_wh: u64,
     month_energy_wh: u64,
+    today_cost_pence: f64,
+    month_cost_pence: f64,
     today_runtime_minutes: u64,
     month_runtime_minutes: u64,
+}
+
+#[derive(Debug, Clone)]
+struct ExportDevice {
+    name: String,
+    config: DeviceConfig,
+}
+
+#[derive(Debug, Clone)]
+struct ExportSpec {
+    sheet_name: &'static str,
+    value_format: &'static str,
+    kind: ExportKind,
+}
+
+#[derive(Debug, Clone)]
+enum ExportKind {
+    EnergyHourly {
+        start_date: NaiveDate,
+        end_date: NaiveDate,
+    },
+    EnergyDaily {
+        start_date: NaiveDate,
+    },
+    EnergyMonthly {
+        start_date: NaiveDate,
+    },
+    PowerEvery5Minutes {
+        ranges: Vec<(DateTime<Utc>, DateTime<Utc>)>,
+    },
+    PowerHourly {
+        ranges: Vec<(DateTime<Utc>, DateTime<Utc>)>,
+    },
+}
+
+#[derive(Debug, Clone)]
+struct ExportTable {
+    sheet_name: &'static str,
+    value_format: &'static str,
+    rows: Vec<ExportRow>,
+}
+
+#[derive(Debug, Clone)]
+struct ExportRow {
+    timestamp: DateTime<Utc>,
+    values: BTreeMap<String, f64>,
+}
+
+#[derive(Debug, Clone)]
+struct ExportError {
+    sheet_name: &'static str,
+    device_name: String,
+    message: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -133,6 +196,7 @@ async fn main() -> Result<()> {
         .route("/favicon.ico", get(favicon))
         .route("/health", get(health))
         .route("/api/devices", get(list_devices))
+        .route("/api/energy/export.xlsx", get(export_energy_workbook))
         .route("/api/scan", post(scan_devices))
         .route("/api/devices/{name}/toggle", post(toggle_device))
         .route("/api/devices/{name}/power", post(set_device_power))
@@ -165,6 +229,10 @@ impl Settings {
         let refresh_seconds = optional_u64_env("FUSEBOX_REFRESH_SECONDS", 10)?;
         let scan_seconds = optional_u64_env("FUSEBOX_SCAN_SECONDS", 60)?;
         let discovery_timeout_seconds = optional_u64_env("FUSEBOX_DISCOVERY_TIMEOUT_SECONDS", 5)?;
+        let energy_price_pence_per_kwh = optional_f64_env(
+            "FUSEBOX_ENERGY_PRICE_PENCE_PER_KWH",
+            DEFAULT_ENERGY_PRICE_PENCE_PER_KWH,
+        )?;
         let state_path = optional_path_env("FUSEBOX_STATE_PATH")
             .unwrap_or(default_state_path().context("failed to resolve default state path")?);
 
@@ -178,6 +246,14 @@ impl Settings {
             return Err(anyhow!("FUSEBOX_SCAN_SECONDS must be between 10 and 3600"));
         }
 
+        if !energy_price_pence_per_kwh.is_finite()
+            || !(0.0..=1000.0).contains(&energy_price_pence_per_kwh)
+        {
+            return Err(anyhow!(
+                "FUSEBOX_ENERGY_PRICE_PENCE_PER_KWH must be between 0 and 1000",
+            ));
+        }
+
         Ok(Self {
             bind_address,
             username,
@@ -185,6 +261,7 @@ impl Settings {
             refresh_seconds,
             scan_seconds,
             discovery_timeout_seconds,
+            energy_price_pence_per_kwh,
             state_path,
         })
     }
@@ -192,24 +269,27 @@ impl Settings {
 
 impl AppState {
     fn new(settings: &Settings) -> Self {
-        let controller = TapoController::new(TapoCredentials {
+        let credentials = TapoCredentials {
             username: settings.username.clone(),
             password: settings.password.clone(),
-        });
+        };
+        let controller = TapoController::new(credentials.clone());
 
         Self {
             controller,
+            credentials,
             devices: Arc::new(RwLock::new(BTreeMap::new())),
             discovery_timeout_seconds: settings.discovery_timeout_seconds,
             refresh_seconds: settings.refresh_seconds,
             scan_seconds: settings.scan_seconds,
+            energy_price_pence_per_kwh: settings.energy_price_pence_per_kwh,
             state_path: settings.state_path.clone(),
         }
     }
 }
 
 impl ManagedDevice {
-    fn view(&self) -> DeviceView {
+    fn view(&self, energy_price_pence_per_kwh: f64) -> DeviceView {
         let snapshot = self.snapshot.as_ref();
 
         DeviceView {
@@ -233,6 +313,14 @@ impl ManagedDevice {
                     current_power_w: energy.current_power_w,
                     today_energy_wh: energy.today_energy_wh,
                     month_energy_wh: energy.month_energy_wh,
+                    today_cost_pence: estimate_energy_cost_pence(
+                        energy.today_energy_wh,
+                        energy_price_pence_per_kwh,
+                    ),
+                    month_cost_pence: estimate_energy_cost_pence(
+                        energy.month_energy_wh,
+                        energy_price_pence_per_kwh,
+                    ),
                     today_runtime_minutes: energy.today_runtime_minutes,
                     month_runtime_minutes: energy.month_runtime_minutes,
                 })
@@ -279,6 +367,7 @@ async fn list_devices(State(state): State<AppState>) -> Json<DeviceListResponse>
     Json(DeviceListResponse {
         devices: device_views(&state).await,
         updated_at_ms: now_ms(),
+        energy_price_pence_per_kwh: state.energy_price_pence_per_kwh,
         scan_error: None,
     })
 }
@@ -292,8 +381,28 @@ async fn scan_devices(State(state): State<AppState>) -> Json<DeviceListResponse>
     Json(DeviceListResponse {
         devices: device_views(&state).await,
         updated_at_ms: now_ms(),
+        energy_price_pence_per_kwh: state.energy_price_pence_per_kwh,
         scan_error,
     })
+}
+
+async fn export_energy_workbook(State(state): State<AppState>) -> Result<Response, AppError> {
+    let buffer = build_energy_export_workbook(&state).await?;
+
+    Ok((
+        [
+            (
+                header::CONTENT_TYPE,
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            ),
+            (
+                header::CONTENT_DISPOSITION,
+                "attachment; filename=\"fusebox-energy.xlsx\"",
+            ),
+        ],
+        buffer,
+    )
+        .into_response())
 }
 
 async fn toggle_device(
@@ -554,7 +663,10 @@ async fn existing_config(state: &AppState) -> TapoConfig {
 async fn device_views(state: &AppState) -> Vec<DeviceView> {
     let devices = state.devices.read().await;
 
-    devices.values().map(ManagedDevice::view).collect()
+    devices
+        .values()
+        .map(|device| device.view(state.energy_price_pence_per_kwh))
+        .collect()
 }
 
 async fn get_device_config(state: &AppState, name: &str) -> Result<DeviceConfig> {
@@ -571,7 +683,7 @@ async fn get_device_view(state: &AppState, name: &str) -> Result<DeviceView> {
 
     devices
         .get(name)
-        .map(ManagedDevice::view)
+        .map(|device| device.view(state.energy_price_pence_per_kwh))
         .ok_or_else(|| anyhow!("device '{name}' was not found"))
 }
 
@@ -587,6 +699,427 @@ fn optional_u64_env(name: &str, default: u64) -> Result<u64> {
         Err(std::env::VarError::NotPresent) => Ok(default),
         Err(error) => Err(error).with_context(|| format!("failed to read {name}")),
     }
+}
+
+fn optional_f64_env(name: &str, default: f64) -> Result<f64> {
+    match std::env::var(name) {
+        Ok(value) => value
+            .parse::<f64>()
+            .with_context(|| format!("{name} must be a number")),
+        Err(std::env::VarError::NotPresent) => Ok(default),
+        Err(error) => Err(error).with_context(|| format!("failed to read {name}")),
+    }
+}
+
+fn estimate_energy_cost_pence(energy_wh: u64, price_pence_per_kwh: f64) -> f64 {
+    energy_wh as f64 / 1000.0 * price_pence_per_kwh
+}
+
+async fn build_energy_export_workbook(state: &AppState) -> Result<Vec<u8>> {
+    let devices = export_devices(state).await;
+    let device_names = devices
+        .iter()
+        .map(|device| device.name.clone())
+        .collect::<Vec<_>>();
+    let specs = export_specs(Utc::now())?;
+    let mut tables = Vec::with_capacity(specs.len());
+    let mut errors = Vec::new();
+
+    for spec in specs {
+        let (table, mut sheet_errors) = collect_export_table(state, &devices, &spec).await;
+        tables.push(table);
+        errors.append(&mut sheet_errors);
+    }
+
+    write_export_workbook(&device_names, &tables, &errors)
+}
+
+async fn export_devices(state: &AppState) -> Vec<ExportDevice> {
+    let devices = state.devices.read().await;
+
+    devices
+        .values()
+        .filter(|device| matches!(device.config.model, DeviceModel::P110 | DeviceModel::P115))
+        .map(|device| ExportDevice {
+            name: device.name.clone(),
+            config: device.config.clone(),
+        })
+        .collect()
+}
+
+fn export_specs(now: DateTime<Utc>) -> Result<Vec<ExportSpec>> {
+    let today = now.date_naive();
+    let week_start = today
+        .checked_sub_days(Days::new(6))
+        .ok_or_else(|| anyhow!("failed to calculate weekly energy export start date"))?;
+    let quarter_start = current_quarter_start(today)?;
+    let year_start = NaiveDate::from_ymd_opt(today.year(), 1, 1)
+        .ok_or_else(|| anyhow!("failed to calculate yearly energy export start date"))?;
+    let power_day_start = now
+        .checked_sub_signed(ChronoDuration::hours(24))
+        .ok_or_else(|| anyhow!("failed to calculate 24 hour power export start time"))?;
+    let power_week_start = now
+        .checked_sub_signed(ChronoDuration::days(7))
+        .ok_or_else(|| anyhow!("failed to calculate weekly power export start time"))?;
+
+    Ok(vec![
+        ExportSpec {
+            sheet_name: "Energy - Hourly (last week)",
+            value_format: "0.000",
+            kind: ExportKind::EnergyHourly {
+                start_date: week_start,
+                end_date: today,
+            },
+        },
+        ExportSpec {
+            sheet_name: "Energy - Daily (last 3 mo)",
+            value_format: "0.000",
+            kind: ExportKind::EnergyDaily {
+                start_date: quarter_start,
+            },
+        },
+        ExportSpec {
+            sheet_name: "Energy - Monthly (last year)",
+            value_format: "0.000",
+            kind: ExportKind::EnergyMonthly {
+                start_date: year_start,
+            },
+        },
+        ExportSpec {
+            sheet_name: "Power - 5min (last 24h)",
+            value_format: "0.0",
+            kind: ExportKind::PowerEvery5Minutes {
+                ranges: split_datetime_ranges(power_day_start, now, ChronoDuration::hours(12)),
+            },
+        },
+        ExportSpec {
+            sheet_name: "Power - Hourly (last week)",
+            value_format: "0.0",
+            kind: ExportKind::PowerHourly {
+                ranges: split_datetime_ranges(power_week_start, now, ChronoDuration::days(6)),
+            },
+        },
+    ])
+}
+
+fn current_quarter_start(date: NaiveDate) -> Result<NaiveDate> {
+    let month = match date.month() {
+        1..=3 => 1,
+        4..=6 => 4,
+        7..=9 => 7,
+        10..=12 => 10,
+        _ => return Err(anyhow!("invalid month {}", date.month())),
+    };
+
+    NaiveDate::from_ymd_opt(date.year(), month, 1)
+        .ok_or_else(|| anyhow!("failed to calculate current quarter start date"))
+}
+
+fn split_datetime_ranges(
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+    max_duration: ChronoDuration,
+) -> Vec<(DateTime<Utc>, DateTime<Utc>)> {
+    let mut ranges = Vec::new();
+    let mut cursor = start;
+
+    while cursor < end {
+        let next = cursor
+            .checked_add_signed(max_duration)
+            .filter(|candidate| *candidate < end)
+            .unwrap_or(end);
+        ranges.push((cursor, next));
+        cursor = next;
+    }
+
+    ranges
+}
+
+async fn collect_export_table(
+    state: &AppState,
+    devices: &[ExportDevice],
+    spec: &ExportSpec,
+) -> (ExportTable, Vec<ExportError>) {
+    let mut rows_by_timestamp: BTreeMap<DateTime<Utc>, BTreeMap<String, f64>> = BTreeMap::new();
+    let mut errors = Vec::new();
+
+    for device in devices {
+        match read_export_entries(state, &device.config, spec).await {
+            Ok(entries) => {
+                for (timestamp, value) in entries {
+                    if let Some(value) = value {
+                        rows_by_timestamp
+                            .entry(timestamp)
+                            .or_default()
+                            .insert(device.name.clone(), value);
+                    }
+                }
+            }
+            Err(error) => errors.push(ExportError {
+                sheet_name: spec.sheet_name,
+                device_name: device.name.clone(),
+                message: error.to_string(),
+            }),
+        }
+    }
+
+    let rows = rows_by_timestamp
+        .into_iter()
+        .map(|(timestamp, values)| ExportRow { timestamp, values })
+        .collect();
+
+    (
+        ExportTable {
+            sheet_name: spec.sheet_name,
+            value_format: spec.value_format,
+            rows,
+        },
+        errors,
+    )
+}
+
+async fn read_export_entries(
+    state: &AppState,
+    device: &DeviceConfig,
+    spec: &ExportSpec,
+) -> Result<Vec<(DateTime<Utc>, Option<f64>)>> {
+    match &spec.kind {
+        ExportKind::EnergyHourly {
+            start_date,
+            end_date,
+        } => {
+            read_energy_entries(
+                state,
+                device,
+                EnergyDataInterval::Hourly {
+                    start_date: *start_date,
+                    end_date: *end_date,
+                },
+            )
+            .await
+        }
+        ExportKind::EnergyDaily { start_date } => {
+            read_energy_entries(
+                state,
+                device,
+                EnergyDataInterval::Daily {
+                    start_date: *start_date,
+                },
+            )
+            .await
+        }
+        ExportKind::EnergyMonthly { start_date } => {
+            read_energy_entries(
+                state,
+                device,
+                EnergyDataInterval::Monthly {
+                    start_date: *start_date,
+                },
+            )
+            .await
+        }
+        ExportKind::PowerEvery5Minutes { ranges } => {
+            read_power_entries(state, device, ranges, PowerExportInterval::Every5Minutes).await
+        }
+        ExportKind::PowerHourly { ranges } => {
+            read_power_entries(state, device, ranges, PowerExportInterval::Hourly).await
+        }
+    }
+}
+
+enum PowerExportInterval {
+    Every5Minutes,
+    Hourly,
+}
+
+async fn read_energy_entries(
+    state: &AppState,
+    device: &DeviceConfig,
+    interval: EnergyDataInterval,
+) -> Result<Vec<(DateTime<Utc>, Option<f64>)>> {
+    let result = match device.model {
+        DeviceModel::P110 => {
+            historical_client(state)
+                .p110(device.ip.to_string())
+                .await?
+                .get_energy_data(interval)
+                .await?
+        }
+        DeviceModel::P115 => {
+            historical_client(state)
+                .p115(device.ip.to_string())
+                .await?
+                .get_energy_data(interval)
+                .await?
+        }
+        DeviceModel::P100 | DeviceModel::P105 => {
+            return Err(anyhow!(
+                "{} at {} does not support energy monitoring",
+                device.model,
+                device.ip,
+            ));
+        }
+    };
+
+    Ok(result
+        .entries
+        .into_iter()
+        .map(|entry| (entry.start_date_time, Some(entry.energy as f64 / 1000.0)))
+        .collect())
+}
+
+async fn read_power_entries(
+    state: &AppState,
+    device: &DeviceConfig,
+    ranges: &[(DateTime<Utc>, DateTime<Utc>)],
+    interval: PowerExportInterval,
+) -> Result<Vec<(DateTime<Utc>, Option<f64>)>> {
+    let mut entries = Vec::new();
+
+    for (start_date_time, end_date_time) in ranges {
+        let interval = match interval {
+            PowerExportInterval::Every5Minutes => PowerDataInterval::Every5Minutes {
+                start_date_time: *start_date_time,
+                end_date_time: *end_date_time,
+            },
+            PowerExportInterval::Hourly => PowerDataInterval::Hourly {
+                start_date_time: *start_date_time,
+                end_date_time: *end_date_time,
+            },
+        };
+        let result = match device.model {
+            DeviceModel::P110 => {
+                historical_client(state)
+                    .p110(device.ip.to_string())
+                    .await?
+                    .get_power_data(interval)
+                    .await?
+            }
+            DeviceModel::P115 => {
+                historical_client(state)
+                    .p115(device.ip.to_string())
+                    .await?
+                    .get_power_data(interval)
+                    .await?
+            }
+            DeviceModel::P100 | DeviceModel::P105 => {
+                return Err(anyhow!(
+                    "{} at {} does not support energy monitoring",
+                    device.model,
+                    device.ip,
+                ));
+            }
+        };
+
+        entries.extend(
+            result
+                .entries
+                .into_iter()
+                .map(|entry| (entry.start_date_time, entry.power.map(|power| power as f64))),
+        );
+    }
+
+    Ok(entries)
+}
+
+fn historical_client(state: &AppState) -> ApiClient {
+    ApiClient::new(&state.credentials.username, &state.credentials.password)
+        .with_timeout(Duration::from_secs(30))
+}
+
+fn write_export_workbook(
+    device_names: &[String],
+    tables: &[ExportTable],
+    errors: &[ExportError],
+) -> Result<Vec<u8>> {
+    let mut workbook = Workbook::new();
+
+    for table in tables {
+        write_export_table(&mut workbook, device_names, table)?;
+    }
+
+    if !errors.is_empty() {
+        write_export_errors(&mut workbook, errors)?;
+    }
+
+    workbook
+        .save_to_buffer()
+        .context("failed to build energy export workbook")
+}
+
+fn write_export_table(
+    workbook: &mut Workbook,
+    device_names: &[String],
+    table: &ExportTable,
+) -> Result<()> {
+    let header_format = Format::new()
+        .set_bold()
+        .set_border(FormatBorder::Thin)
+        .set_align(FormatAlign::Center);
+    let value_format = Format::new().set_num_format(table.value_format);
+    let worksheet = workbook.add_worksheet().set_name(table.sheet_name)?;
+
+    worksheet.set_column_width(0, 24)?;
+    worksheet.write_with_format(0, 0, "Timestamp", &header_format)?;
+
+    for (index, name) in device_names.iter().enumerate() {
+        let column = (index + 1) as u16;
+        worksheet.set_column_width(column, 18)?;
+        worksheet.write_with_format(0, column, name, &header_format)?;
+    }
+
+    let total_column = (device_names.len() + 1) as u16;
+    worksheet.set_column_width(total_column, 14)?;
+    worksheet.write_with_format(0, total_column, "Total", &header_format)?;
+
+    for (row_index, row) in table.rows.iter().enumerate() {
+        let worksheet_row = (row_index + 1) as u32;
+        worksheet.write(
+            worksheet_row,
+            0,
+            row.timestamp.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
+        )?;
+
+        for (index, name) in device_names.iter().enumerate() {
+            if let Some(value) = row.values.get(name) {
+                worksheet.write_with_format(
+                    worksheet_row,
+                    (index + 1) as u16,
+                    *value,
+                    &value_format,
+                )?;
+            }
+        }
+
+        let total = row.values.values().sum::<f64>();
+        worksheet.write_with_format(worksheet_row, total_column, total, &value_format)?;
+    }
+
+    Ok(())
+}
+
+fn write_export_errors(workbook: &mut Workbook, errors: &[ExportError]) -> Result<()> {
+    let header_format = Format::new()
+        .set_bold()
+        .set_border(FormatBorder::Thin)
+        .set_align(FormatAlign::Center);
+    let worksheet = workbook.add_worksheet().set_name("Export Errors")?;
+
+    worksheet.set_column_width(0, 32)?;
+    worksheet.set_column_width(1, 22)?;
+    worksheet.set_column_width(2, 72)?;
+    worksheet.write_with_format(0, 0, "Sheet", &header_format)?;
+    worksheet.write_with_format(0, 1, "Device", &header_format)?;
+    worksheet.write_with_format(0, 2, "Error", &header_format)?;
+
+    for (index, error) in errors.iter().enumerate() {
+        let row = (index + 1) as u32;
+        worksheet.write(row, 0, error.sheet_name)?;
+        worksheet.write(row, 1, &error.device_name)?;
+        worksheet.write(row, 2, &error.message)?;
+    }
+
+    Ok(())
 }
 
 fn optional_path_env(name: &str) -> Option<PathBuf> {
@@ -629,6 +1162,7 @@ const INDEX_HTML: &str = r##"<!doctype html>
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#201d19">
     <title>Fusebox</title>
     <style>
         :root {
@@ -679,6 +1213,7 @@ const INDEX_HTML: &str = r##"<!doctype html>
 
         button {
             font: inherit;
+            touch-action: manipulation;
         }
 
         .shell {
@@ -717,7 +1252,34 @@ const INDEX_HTML: &str = r##"<!doctype html>
             cursor: pointer;
         }
 
+        .header-actions {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .export-link {
+            display: inline-flex;
+            min-height: 44px;
+            align-items: center;
+            padding: 10px 16px;
+            border: 1px solid rgba(242, 212, 138, 0.34);
+            border-radius: 10px;
+            color: #f4e8cb;
+            background: rgba(0, 0, 0, 0.26);
+            box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08);
+            font-family: ui-sans-serif, system-ui, sans-serif;
+            text-decoration: none;
+            touch-action: manipulation;
+        }
+
+        .scan-button:hover,
+        .export-link:hover {
+            filter: brightness(1.08);
+        }
+
         .scan-button:focus-visible,
+        .export-link:focus-visible,
         .toggle:focus-visible {
             outline: 3px solid #f2d48a;
             outline-offset: 3px;
@@ -762,7 +1324,7 @@ const INDEX_HTML: &str = r##"<!doctype html>
 
         .meter-row {
             display: grid;
-            grid-template-columns: repeat(3, minmax(0, 1fr));
+            grid-template-columns: repeat(4, minmax(0, 1fr));
             gap: 12px;
             margin-bottom: 22px;
         }
@@ -789,6 +1351,7 @@ const INDEX_HTML: &str = r##"<!doctype html>
             margin-top: 5px;
             font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
             font-size: 22px;
+            font-variant-numeric: tabular-nums;
         }
 
         .breaker-grid {
@@ -931,6 +1494,13 @@ const INDEX_HTML: &str = r##"<!doctype html>
             background: rgba(0, 0, 0, 0.22);
             font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
             font-size: 12px;
+            font-variant-numeric: tabular-nums;
+        }
+
+        @media (prefers-reduced-motion: reduce) {
+            .lever {
+                transition: none;
+            }
         }
 
         .reading span {
@@ -980,6 +1550,15 @@ const INDEX_HTML: &str = r##"<!doctype html>
             .scan-button {
                 width: 100%;
             }
+
+            .header-actions {
+                display: grid;
+                grid-template-columns: 1fr;
+            }
+
+            .export-link {
+                justify-content: center;
+            }
         }
     </style>
 </head>
@@ -987,7 +1566,10 @@ const INDEX_HTML: &str = r##"<!doctype html>
     <main class="shell">
         <header class="header">
             <h1>Fusebox</h1>
-            <button class="scan-button" id="scan" type="button">Scan now</button>
+            <div class="header-actions">
+                <a class="export-link" href="/api/energy/export.xlsx" download>Export xlsx</a>
+                <button class="scan-button" id="scan" type="button">Scan now</button>
+            </div>
         </header>
 
         <p class="notice" id="notice" role="status" hidden></p>
@@ -997,6 +1579,7 @@ const INDEX_HTML: &str = r##"<!doctype html>
                 <div class="meter"><span>Devices</span><strong id="device-count">0</strong></div>
                 <div class="meter"><span>Live load</span><strong id="total-power">0 W</strong></div>
                 <div class="meter"><span>Today</span><strong id="today-energy">0 Wh</strong></div>
+                <div class="meter"><span>Cost today</span><strong id="today-cost">0p</strong></div>
             </div>
             <div class="breaker-grid" id="devices"></div>
         </section>
@@ -1008,6 +1591,7 @@ const INDEX_HTML: &str = r##"<!doctype html>
         const deviceCountEl = document.querySelector("#device-count");
         const totalPowerEl = document.querySelector("#total-power");
         const todayEnergyEl = document.querySelector("#today-energy");
+        const todayCostEl = document.querySelector("#today-cost");
         const noticeEl = document.querySelector("#notice");
         const devicePollMs = 500;
         let deviceRequestInFlight = false;
@@ -1074,10 +1658,12 @@ const INDEX_HTML: &str = r##"<!doctype html>
         function renderDevices(devices) {
             const totalPower = devices.reduce((total, device) => total + (device.energy?.current_power_w ?? 0), 0);
             const todayEnergy = devices.reduce((total, device) => total + (device.energy?.today_energy_wh ?? 0), 0);
+            const todayCost = devices.reduce((total, device) => total + (device.energy?.today_cost_pence ?? 0), 0);
 
             deviceCountEl.textContent = devices.length;
             totalPowerEl.textContent = `${totalPower} W`;
-            todayEnergyEl.textContent = `${todayEnergy} Wh`;
+            todayEnergyEl.textContent = formatEnergy(todayEnergy);
+            todayCostEl.textContent = formatCost(todayCost);
 
             if (devices.length === 0) {
                 devicesEl.innerHTML = `<div class="empty">No supported Tapo plugs found yet. Check credentials and LAN access, or press Scan now.</div>`;
@@ -1124,8 +1710,9 @@ const INDEX_HTML: &str = r##"<!doctype html>
                     </div>
                     <div class="readings">
                         <div class="reading"><span>Now</span>${energy?.current_power_w ?? "-"} W</div>
-                        <div class="reading"><span>Today</span>${energy?.today_energy_wh ?? "-"} Wh</div>
-                        <div class="reading"><span>Month</span>${energy?.month_energy_wh ?? "-"} Wh</div>
+                        <div class="reading"><span>Today</span>${energy ? formatEnergy(energy.today_energy_wh) : "-"}</div>
+                        <div class="reading"><span>Cost</span>${energy ? formatCost(energy.today_cost_pence) : "-"}</div>
+                        <div class="reading"><span>Month</span>${energy ? formatEnergy(energy.month_energy_wh) : "-"}</div>
                         <div class="reading"><span>Runtime</span>${energy?.today_runtime_minutes ?? "-"} min</div>
                     </div>
                     ${isOffline ? `<p class="device-meta">${escapeHtml(device.last_error)}</p>` : ""}
@@ -1138,6 +1725,16 @@ const INDEX_HTML: &str = r##"<!doctype html>
             const minutes = Math.floor(seconds / 60);
             if (minutes < 60) return `${minutes} min`;
             return `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
+        }
+
+        function formatEnergy(wh) {
+            if (wh >= 1000) return `${(wh / 1000).toFixed(2)} kWh`;
+            return `${Math.round(wh)} Wh`;
+        }
+
+        function formatCost(pence) {
+            if (pence >= 100) return `£${(pence / 100).toFixed(2)}`;
+            return `${pence.toFixed(1)}p`;
         }
 
         function escapeHtml(value) {
@@ -1181,19 +1778,58 @@ mod tests {
                 device_type: "Plug with Energy Monitoring".to_string(),
                 device_on: true,
                 on_time_seconds: 120,
-                energy: None,
+                energy: Some(tapoctl::EnergySnapshot {
+                    current_power_mw: Some(12_000),
+                    current_power_w: Some(12),
+                    today_energy_wh: 1500,
+                    month_energy_wh: 12_000,
+                    today_runtime_minutes: 80,
+                    month_runtime_minutes: 900,
+                }),
             }),
             last_error: None,
             discovered_at_ms: 1,
             updated_at_ms: Some(2),
         };
 
-        let view = device.view();
+        let view = device.view(30.0);
 
         assert_eq!(view.name, "lights");
         assert_eq!(view.nickname, "Lights");
         assert_eq!(view.device_on, Some(true));
         assert_eq!(view.on_time_seconds, Some(120));
+        assert_eq!(view.energy.unwrap().today_cost_pence, 45.0);
+    }
+
+    #[test]
+    fn splits_power_export_ranges_at_tapo_limits() {
+        let start = DateTime::from_timestamp(1_767_225_600, 0).unwrap();
+        let end = start + ChronoDuration::hours(24);
+
+        let ranges = split_datetime_ranges(start, end, ChronoDuration::hours(12));
+
+        assert_eq!(ranges.len(), 2);
+        assert_eq!(ranges[0], (start, start + ChronoDuration::hours(12)));
+        assert_eq!(ranges[1], (start + ChronoDuration::hours(12), end));
+    }
+
+    #[test]
+    fn writes_export_workbook_buffer() {
+        let mut values = BTreeMap::new();
+        values.insert("lights".to_string(), 1.5);
+        let table = ExportTable {
+            sheet_name: "Energy - Hourly (last week)",
+            value_format: "0.000",
+            rows: vec![ExportRow {
+                timestamp: DateTime::from_timestamp(1_767_225_600, 0).unwrap(),
+                values,
+            }],
+        };
+
+        let buffer = write_export_workbook(&["lights".to_string()], &[table], &[]).unwrap();
+
+        assert!(buffer.len() > 1000);
+        assert_eq!(&buffer[0..2], b"PK");
     }
 
     #[tokio::test]
@@ -1206,6 +1842,7 @@ mod tests {
             refresh_seconds: 10,
             scan_seconds: 60,
             discovery_timeout_seconds: 5,
+            energy_price_pence_per_kwh: DEFAULT_ENERGY_PRICE_PENCE_PER_KWH,
             state_path: state_path.clone(),
         };
         let state = AppState::new(&settings);

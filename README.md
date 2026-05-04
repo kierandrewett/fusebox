@@ -7,7 +7,8 @@ Local web control board for Tapo P110 plugs, with LAN discovery, live state poll
 - **LAN discovery:** scans the local network for supported Tapo plugs using `tapoctl` discovery.
 - **Remembered devices:** saves discovered device configs to disk and reloads them on the next start.
 - **Local control:** toggles plugs from the browser through the local Tapo API.
-- **Energy readings:** shows current load, daily energy, monthly energy, and runtime for P110/P115-style plugs that expose energy data.
+- **Energy readings:** shows current load, daily energy, monthly energy, estimated UK cost, and runtime for P110/P115-style plugs that expose energy data.
+- **Spreadsheet export:** generates an Excel workbook with hourly, daily, monthly, and power-history sheets.
 - **Safe default bind:** listens on `127.0.0.1:8787` unless you explicitly change `FUSEBOX_BIND`.
 
 ## Getting Started
@@ -35,6 +36,7 @@ Open [http://127.0.0.1:8787](http://127.0.0.1:8787).
 | `FUSEBOX_BIND` | Socket address the web server listens on. Keep this local unless you add authentication. | No | `127.0.0.1:8787` |
 | `FUSEBOX_REFRESH_SECONDS` | Poll interval for discovered devices. | No | `10` |
 | `FUSEBOX_SCAN_SECONDS` | Background LAN discovery interval. Manual scan is still available in the UI. | No | `60` |
+| `FUSEBOX_ENERGY_PRICE_PENCE_PER_KWH` | Estimated UK electricity unit rate used for cost display. | No | `27.03` |
 | `FUSEBOX_DISCOVERY_TIMEOUT_SECONDS` | Discovery timeout per scan, from 1 to 60 seconds. | No | `5` |
 | `FUSEBOX_STATE_PATH` | JSON file used to remember discovered device configs. | No | `$XDG_CONFIG_HOME/fusebox/state.json` or `$HOME/.config/fusebox/state.json` |
 | `RUST_LOG` | Logging filter. Fusebox defaults to `info` when this is unset. | No | `info` |
@@ -62,6 +64,7 @@ Set `FUSEBOX_STATE_PATH` if you want the file somewhere else, for example when r
 ```text
 GET  /health
 GET  /api/devices
+GET  /api/energy/export.xlsx
 POST /api/scan
 POST /api/devices/{name}/toggle
 POST /api/devices/{name}/power
