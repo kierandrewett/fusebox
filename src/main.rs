@@ -102,6 +102,35 @@ struct EnergyView {
     month_runtime_minutes: u64,
 }
 
+#[derive(Debug, Clone, Serialize)]
+struct UsageHistoryResponse {
+    series: Vec<UsageHistorySeries>,
+    totals: Vec<UsageHistoryPoint>,
+    errors: Vec<UsageHistoryError>,
+    updated_at_ms: u128,
+    start_date: String,
+    end_date: String,
+    unit: &'static str,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct UsageHistorySeries {
+    device_name: String,
+    points: Vec<UsageHistoryPoint>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct UsageHistoryPoint {
+    timestamp_ms: i64,
+    power_w: f64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct UsageHistoryError {
+    device_name: String,
+    message: String,
+}
+
 #[derive(Debug, Clone)]
 struct ExportDevice {
     name: String,
@@ -200,6 +229,7 @@ async fn main() -> Result<()> {
         .route("/favicon.ico", get(favicon))
         .route("/health", get(health))
         .route("/api/devices", get(list_devices))
+        .route("/api/energy/history.json", get(energy_history))
         .route("/api/energy/export.xlsx", get(export_energy_workbook))
         .route("/ws/devices", get(devices_websocket))
         .route("/api/scan", post(scan_devices))
@@ -435,6 +465,10 @@ async fn send_device_event(socket: &mut WebSocket, response: DeviceListResponse)
         .send(Message::Text(payload.into()))
         .await
         .context("failed to send device event")
+}
+
+async fn energy_history(State(state): State<AppState>) -> Json<UsageHistoryResponse> {
+    Json(build_usage_history(&state).await)
 }
 
 async fn export_energy_workbook(State(state): State<AppState>) -> Result<Response, AppError> {
@@ -834,6 +868,70 @@ async fn build_energy_export_workbook(state: &AppState) -> Result<Vec<u8>> {
     }
 
     write_export_workbook(&device_names, &tables, &errors)
+}
+
+async fn build_usage_history(state: &AppState) -> UsageHistoryResponse {
+    let devices = export_devices(state).await;
+    let now = Utc::now();
+    let start = now
+        .checked_sub_signed(ChronoDuration::days(7))
+        .unwrap_or(now);
+    let ranges = split_datetime_ranges(start, now, ChronoDuration::days(6));
+    let mut series = Vec::with_capacity(devices.len());
+    let mut totals_by_timestamp: BTreeMap<DateTime<Utc>, f64> = BTreeMap::new();
+    let mut errors = Vec::new();
+
+    for device in devices {
+        match read_power_entries(
+            state,
+            &device.config,
+            &ranges,
+            PowerExportInterval::Hourly,
+        )
+        .await
+        {
+            Ok(entries) => {
+                let mut points = Vec::new();
+
+                for (timestamp, power) in entries {
+                    if let Some(power_w) = power {
+                        points.push(UsageHistoryPoint {
+                            timestamp_ms: timestamp.timestamp_millis(),
+                            power_w,
+                        });
+                        *totals_by_timestamp.entry(timestamp).or_default() += power_w;
+                    }
+                }
+
+                series.push(UsageHistorySeries {
+                    device_name: device.name,
+                    points,
+                });
+            }
+            Err(error) => errors.push(UsageHistoryError {
+                device_name: device.name,
+                message: error.to_string(),
+            }),
+        }
+    }
+
+    let totals = totals_by_timestamp
+        .into_iter()
+        .map(|(timestamp, power_w)| UsageHistoryPoint {
+            timestamp_ms: timestamp.timestamp_millis(),
+            power_w,
+        })
+        .collect();
+
+    UsageHistoryResponse {
+        series,
+        totals,
+        errors,
+        updated_at_ms: now_ms(),
+        start_date: start.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
+        end_date: now.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
+        unit: "W",
+    }
 }
 
 async fn export_devices(state: &AppState) -> Vec<ExportDevice> {
@@ -1284,6 +1382,8 @@ const INDEX_HTML: &str = r##"<!doctype html>
     <style>
         :root {
             color-scheme: dark;
+            --font-ui: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+            --font-data: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
             --theme-color: #201d19;
             --wall: #201d19;
             --cabinet: #5b5144;
@@ -1318,6 +1418,9 @@ const INDEX_HTML: &str = r##"<!doctype html>
             --green: #66d18c;
             --red: #de5e4b;
             --amber: #e5b75b;
+            --graph-line: #66d18c;
+            --graph-fill: rgba(102, 209, 140, 0.16);
+            --graph-grid: rgba(34, 29, 23, 0.18);
             --muted: #9b907d;
         }
 
@@ -1356,6 +1459,9 @@ const INDEX_HTML: &str = r##"<!doctype html>
             --green: #71e09b;
             --red: #f06b5c;
             --amber: #d0a85e;
+            --graph-line: #71e09b;
+            --graph-fill: rgba(113, 224, 155, 0.12);
+            --graph-grid: rgba(239, 231, 215, 0.14);
             --muted: #a79d8b;
         }
 
@@ -1374,7 +1480,7 @@ const INDEX_HTML: &str = r##"<!doctype html>
             min-height: 100svh;
             margin: 0;
             color: var(--text);
-            font-family: ui-serif, Georgia, Cambria, "Times New Roman", serif;
+            font-family: var(--font-ui);
         }
 
         body::before {
@@ -1448,7 +1554,6 @@ const INDEX_HTML: &str = r##"<!doctype html>
             color: var(--secondary-text);
             background: var(--secondary-bg);
             box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08);
-            font-family: ui-sans-serif, system-ui, sans-serif;
             text-decoration: none;
             touch-action: manipulation;
         }
@@ -1526,7 +1631,6 @@ const INDEX_HTML: &str = r##"<!doctype html>
 
         .meter span {
             display: block;
-            font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
             font-size: 11px;
             letter-spacing: 0.12em;
             text-transform: uppercase;
@@ -1535,15 +1639,70 @@ const INDEX_HTML: &str = r##"<!doctype html>
         .meter strong {
             display: block;
             margin-top: 5px;
-            font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+            font-family: var(--font-data);
             font-size: 22px;
             font-variant-numeric: tabular-nums;
         }
 
+        .usage-panel {
+            margin-bottom: 22px;
+            padding: 14px;
+            border: 1px solid rgba(0, 0, 0, 0.55);
+            border-radius: 10px;
+            color: var(--ink);
+            background: linear-gradient(var(--meter-start), var(--meter-end));
+            box-shadow: inset 0 1px 8px rgba(255, 255, 255, 0.4), inset 0 -8px 18px rgba(88, 60, 28, 0.18);
+        }
+
+        .usage-header {
+            display: flex;
+            align-items: baseline;
+            justify-content: space-between;
+            gap: 12px;
+            margin-bottom: 10px;
+        }
+
+        .usage-header h2 {
+            margin: 0;
+            font-size: 15px;
+            letter-spacing: 0.08em;
+            line-height: 1.2;
+            text-transform: uppercase;
+        }
+
+        .usage-header span {
+            color: color-mix(in srgb, var(--ink) 72%, transparent);
+            font-family: var(--font-data);
+            font-size: 12px;
+            font-variant-numeric: tabular-nums;
+        }
+
+        .usage-chart-container {
+            position: relative;
+            height: 184px;
+            overflow: hidden;
+            border: 1px solid rgba(0, 0, 0, 0.24);
+            border-radius: 8px;
+            background:
+                linear-gradient(var(--graph-grid) 1px, transparent 1px),
+                linear-gradient(90deg, var(--graph-grid) 1px, transparent 1px),
+                rgba(0, 0, 0, 0.08);
+            background-size: 100% 25%, 12.5% 100%, auto;
+        }
+
+        .usage-chart {
+            max-height: 184px;
+        }
+
+        .usage-empty {
+            margin: 10px 0 0;
+            color: color-mix(in srgb, var(--ink) 72%, transparent);
+            font-size: 13px;
+        }
+
         .breaker-grid {
             display: grid;
-            grid-template-columns: repeat(auto-fill, minmax(220px, 280px));
-            justify-content: start;
+            grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr));
             gap: 16px;
         }
 
@@ -1583,7 +1742,7 @@ const INDEX_HTML: &str = r##"<!doctype html>
 
         .device-meta {
             margin: 7px 0 0;
-            font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+            font-family: var(--font-data);
             font-size: 11px;
             line-height: 1.45;
             text-transform: uppercase;
@@ -1638,7 +1797,7 @@ const INDEX_HTML: &str = r##"<!doctype html>
             justify-content: space-between;
             gap: 8px;
             margin-top: 10px;
-            font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+            font-family: var(--font-data);
             font-size: 12px;
         }
 
@@ -1678,7 +1837,7 @@ const INDEX_HTML: &str = r##"<!doctype html>
             padding: 8px;
             border-radius: 6px;
             background: rgba(0, 0, 0, 0.22);
-            font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+            font-family: var(--font-data);
             font-size: 12px;
             font-variant-numeric: tabular-nums;
         }
@@ -1703,7 +1862,6 @@ const INDEX_HTML: &str = r##"<!doctype html>
             border-radius: 8px;
             color: #f0dfbd;
             background: rgba(54, 38, 15, 0.7);
-            font-family: ui-sans-serif, system-ui, sans-serif;
             font-size: 13px;
             line-height: 1.45;
         }
@@ -1769,10 +1927,21 @@ const INDEX_HTML: &str = r##"<!doctype html>
                 <div class="meter"><span>Today</span><strong id="today-energy">0 Wh</strong></div>
                 <div class="meter"><span>Cost today</span><strong id="today-cost">0p</strong></div>
             </div>
+            <section class="usage-panel" aria-labelledby="usage-title">
+                <div class="usage-header">
+                    <h2 id="usage-title">7-day usage</h2>
+                    <span id="usage-range">Loading history</span>
+                </div>
+                <div class="usage-chart-container">
+                    <canvas class="usage-chart" id="usage-chart" aria-label="Hourly power draw in watts for each energy-monitoring plug over the last seven days." role="img"></canvas>
+                </div>
+                <p class="usage-empty" id="usage-empty">Loading 7-day power history from Tapo.</p>
+            </section>
             <div class="breaker-grid" id="devices"></div>
         </section>
     </main>
 
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.5.1/dist/chart.umd.min.js"></script>
     <script>
         const devicesEl = document.querySelector("#devices");
         const scanButton = document.querySelector("#scan");
@@ -1783,12 +1952,19 @@ const INDEX_HTML: &str = r##"<!doctype html>
         const todayEnergyEl = document.querySelector("#today-energy");
         const todayCostEl = document.querySelector("#today-cost");
         const noticeEl = document.querySelector("#notice");
+        const usageChartEl = document.querySelector("#usage-chart");
+        const usageEmptyEl = document.querySelector("#usage-empty");
+        const usageRangeEl = document.querySelector("#usage-range");
         const deviceStreamReconnectMs = 2000;
+        const chartPalette = ["#66d18c", "#e5b75b", "#7bb7ff", "#f06b5c", "#c99cff", "#62d6d1"];
+        let powerChart = null;
         let deviceRequestInFlight = false;
+        let historyRequestInFlight = false;
         let deviceSocket = null;
         let deviceSocketReconnect = null;
 
         syncThemeButton();
+        initializePowerChart();
 
         themeButton.addEventListener("click", () => {
             const nextTheme = document.documentElement.dataset.theme === "dark" ? "classic" : "dark";
@@ -1808,8 +1984,8 @@ const INDEX_HTML: &str = r##"<!doctype html>
             scanButton.textContent = "Scanning";
             try {
                 const payload = await requestJson("/api/scan", { method: "POST" });
-                renderDevices(payload.devices ?? []);
-                renderNotice(payload.scan_error);
+                renderDevicePayload(payload);
+                loadUsageHistory();
             } catch (error) {
                 renderNotice(error.message);
             } finally {
@@ -1825,12 +2001,29 @@ const INDEX_HTML: &str = r##"<!doctype html>
 
             try {
                 const payload = await requestJson("/api/devices");
-                renderDevices(payload.devices ?? []);
-                renderNotice(payload.scan_error);
+                renderDevicePayload(payload);
             } catch (error) {
                 renderNotice(error.message);
             } finally {
                 deviceRequestInFlight = false;
+            }
+        }
+
+        async function loadUsageHistory() {
+            if (historyRequestInFlight) return;
+
+            historyRequestInFlight = true;
+            usageRangeEl.textContent = "Loading history";
+
+            try {
+                const payload = await requestJson("/api/energy/history.json");
+                renderUsageHistory(payload);
+            } catch (error) {
+                usageEmptyEl.hidden = false;
+                usageEmptyEl.textContent = error.message;
+                usageRangeEl.textContent = "History unavailable";
+            } finally {
+                historyRequestInFlight = false;
             }
         }
 
@@ -1844,8 +2037,7 @@ const INDEX_HTML: &str = r##"<!doctype html>
             socket.addEventListener("message", (event) => {
                 try {
                     const payload = JSON.parse(event.data);
-                    renderDevices(payload.devices ?? []);
-                    renderNotice(payload.scan_error);
+                    renderDevicePayload(payload);
                 } catch (_error) {
                     renderNotice("Live device update was not valid JSON.");
                 }
@@ -1906,6 +2098,13 @@ const INDEX_HTML: &str = r##"<!doctype html>
             themeButton.setAttribute("aria-pressed", String(isDark));
             themeButton.textContent = isDark ? "Classic mode" : "Dark mode";
             themeColorMeta.setAttribute("content", isDark ? "#08090b" : "#201d19");
+            syncPowerChartTheme();
+        }
+
+        function renderDevicePayload(payload) {
+            const devices = payload.devices ?? [];
+            renderDevices(devices);
+            renderNotice(payload.scan_error);
         }
 
         function renderDevices(devices) {
@@ -1920,7 +2119,7 @@ const INDEX_HTML: &str = r##"<!doctype html>
 
             if (devices.length === 0) {
                 devicesEl.innerHTML = `<div class="empty">No supported Tapo plugs found yet. Check credentials and LAN access, or press Scan now.</div>`;
-                return;
+                return { totalPower, todayEnergy, todayCost };
             }
 
             devicesEl.innerHTML = devices.map(renderDevice).join("");
@@ -1936,6 +2135,149 @@ const INDEX_HTML: &str = r##"<!doctype html>
                         button.disabled = false;
                     }
                 });
+            });
+
+            return { totalPower, todayEnergy, todayCost };
+        }
+
+        function recordPowerSample(watts, timestampMs) {
+            if (!Number.isFinite(watts) || !Number.isFinite(timestampMs)) return;
+
+            const lastSample = powerSamples.at(-1);
+            if (lastSample?.timestampMs === timestampMs) {
+                lastSample.watts = watts;
+                return;
+            }
+
+            powerSamples.push({ timestampMs, watts });
+
+            if (powerSamples.length > maxPowerSamples) {
+                powerSamples.splice(0, powerSamples.length - maxPowerSamples);
+            }
+        }
+
+        function renderPowerGraph() {
+            if (powerChart === null) {
+                usageEmptyEl.hidden = false;
+                usageRangeEl.textContent = "Chart library unavailable";
+                return;
+            }
+
+            if (powerSamples.length < 2) {
+                usageEmptyEl.hidden = false;
+                usageRangeEl.textContent = "Waiting for readings";
+                return;
+            }
+
+            usageEmptyEl.hidden = true;
+
+            const maxWatts = Math.max(...powerSamples.map((sample) => sample.watts), 1);
+            const latestWatts = powerSamples.at(-1).watts;
+
+            powerChart.data.labels = powerSamples.map((sample) => formatTimeLabel(sample.timestampMs));
+            powerChart.data.datasets[0].data = powerSamples.map((sample) => sample.watts);
+            powerChart.options.scales.y.suggestedMax = Math.ceil(maxWatts * 1.15);
+            powerChart.update("none");
+            usageRangeEl.textContent = `${formatPower(latestWatts)} now / ${formatPower(maxWatts)} peak`;
+        }
+
+        function initializePowerChart() {
+            if (typeof Chart === "undefined") {
+                usageEmptyEl.textContent = "Chart.js could not load, so the live graph is unavailable.";
+                return;
+            }
+
+            const chartTheme = powerChartTheme();
+
+            powerChart = new Chart(usageChartEl, {
+                type: "line",
+                data: {
+                    labels: [],
+                    datasets: [{
+                        label: "Live load",
+                        data: [],
+                        borderColor: chartTheme.graphLine,
+                        backgroundColor: chartTheme.graphFill,
+                        borderWidth: 3,
+                        cubicInterpolationMode: "monotone",
+                        fill: true,
+                        pointRadius: 0,
+                        pointHoverRadius: 4,
+                        tension: 0.28,
+                    }],
+                },
+                options: {
+                    animation: false,
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    interaction: {
+                        intersect: false,
+                        mode: "index",
+                    },
+                    plugins: {
+                        legend: {
+                            display: false,
+                        },
+                        tooltip: {
+                            callbacks: {
+                                label: (context) => ` ${formatPower(context.parsed.y)}`,
+                            },
+                        },
+                    },
+                    scales: {
+                        x: {
+                            grid: {
+                                color: chartTheme.graphGrid,
+                            },
+                            ticks: {
+                                color: chartTheme.ink,
+                                maxTicksLimit: 6,
+                            },
+                        },
+                        y: {
+                            beginAtZero: true,
+                            grid: {
+                                color: chartTheme.graphGrid,
+                            },
+                            ticks: {
+                                color: chartTheme.ink,
+                                callback: (value) => `${value} W`,
+                            },
+                        },
+                    },
+                },
+            });
+        }
+
+        function syncPowerChartTheme() {
+            if (powerChart === null) return;
+
+            const chartTheme = powerChartTheme();
+            const dataset = powerChart.data.datasets[0];
+            dataset.borderColor = chartTheme.graphLine;
+            dataset.backgroundColor = chartTheme.graphFill;
+            powerChart.options.scales.x.grid.color = chartTheme.graphGrid;
+            powerChart.options.scales.x.ticks.color = chartTheme.ink;
+            powerChart.options.scales.y.grid.color = chartTheme.graphGrid;
+            powerChart.options.scales.y.ticks.color = chartTheme.ink;
+            powerChart.update("none");
+        }
+
+        function powerChartTheme() {
+            const styles = getComputedStyle(document.documentElement);
+            return {
+                graphLine: styles.getPropertyValue("--graph-line").trim(),
+                graphFill: styles.getPropertyValue("--graph-fill").trim(),
+                graphGrid: styles.getPropertyValue("--graph-grid").trim(),
+                ink: styles.getPropertyValue("--ink").trim(),
+            };
+        }
+
+        function formatTimeLabel(timestampMs) {
+            return new Date(timestampMs).toLocaleTimeString([], {
+                hour: "2-digit",
+                minute: "2-digit",
+                second: "2-digit",
             });
         }
 
@@ -2009,6 +2351,11 @@ const INDEX_HTML: &str = r##"<!doctype html>
         function formatCost(pence) {
             if (pence >= 100) return `£${(pence / 100).toFixed(2)}`;
             return `${pence.toFixed(1)}p`;
+        }
+
+        function formatPower(watts) {
+            if (watts >= 1000) return `${(watts / 1000).toFixed(2)} kW`;
+            return `${Math.round(watts)} W`;
         }
 
         function escapeHtml(value) {
