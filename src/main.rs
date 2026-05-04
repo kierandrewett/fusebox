@@ -2016,6 +2016,7 @@ const INDEX_HTML: &str = r##"<!doctype html>
         let historyRequestInFlight = false;
         let deviceSocket = null;
         let deviceSocketReconnect = null;
+        let switchAudioContext = null;
 
         syncThemeButton();
         initializePowerChart();
@@ -2179,19 +2180,68 @@ const INDEX_HTML: &str = r##"<!doctype html>
             devicesEl.innerHTML = devices.map(renderDevice).join("");
             devicesEl.querySelectorAll("button[data-device]").forEach((button) => {
                 button.addEventListener("click", async () => {
+                    const wasOn = button.dataset.on === "true";
+                    const nextIsOn = !wasOn;
+
+                    playSwitchClick(nextIsOn);
                     button.disabled = true;
+                    button.dataset.on = String(nextIsOn);
+                    button.setAttribute("aria-pressed", String(nextIsOn));
+                    button.classList.add("is-switching");
+
                     try {
                         await requestJson(`/api/devices/${encodeURIComponent(button.dataset.device)}/toggle`, { method: "POST" });
                         await loadDevices();
                     } catch (error) {
+                        button.dataset.on = String(wasOn);
+                        button.setAttribute("aria-pressed", String(wasOn));
                         renderNotice(error.message);
                     } finally {
                         button.disabled = false;
+                        window.setTimeout(() => {
+                            button.classList.remove("is-switching");
+                        }, 180);
                     }
                 });
             });
 
             return { totalPower, todayEnergy, todayCost };
+        }
+
+        function playSwitchClick(nextIsOn) {
+            const AudioContextClass = window.AudioContext ?? window.webkitAudioContext;
+            if (!AudioContextClass) return;
+
+            try {
+                if (switchAudioContext === null) {
+                    switchAudioContext = new AudioContextClass();
+                }
+
+                if (switchAudioContext.state === "suspended") {
+                    void switchAudioContext.resume();
+                }
+
+                const oscillator = switchAudioContext.createOscillator();
+                const gain = switchAudioContext.createGain();
+                const now = switchAudioContext.currentTime;
+                const startFrequency = nextIsOn ? 190 : 140;
+                const endFrequency = nextIsOn ? 90 : 70;
+
+                oscillator.type = "square";
+                oscillator.frequency.setValueAtTime(startFrequency, now);
+                oscillator.frequency.exponentialRampToValueAtTime(endFrequency, now + 0.045);
+
+                gain.gain.setValueAtTime(0.0001, now);
+                gain.gain.exponentialRampToValueAtTime(0.045, now + 0.006);
+                gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.055);
+
+                oscillator.connect(gain);
+                gain.connect(switchAudioContext.destination);
+                oscillator.start(now);
+                oscillator.stop(now + 0.06);
+            } catch (_error) {
+                // Browsers can reject audio creation under stricter policies; the switch should still work.
+            }
         }
 
         function renderUsageHistory(history) {
@@ -2387,7 +2437,7 @@ const INDEX_HTML: &str = r##"<!doctype html>
                         <p class="device-meta">${escapeHtml(device.name)} / ${escapeHtml(device.ip)} / ${escapeHtml(device.model)}</p>
                     </div>
                     <div class="toggle-wrap">
-                        <button class="toggle" type="button" data-device="${escapeHtml(device.name)}" data-on="${isOn}" aria-label="Toggle ${escapeHtml(device.nickname)}">
+                        <button class="toggle" type="button" data-device="${escapeHtml(device.name)}" data-on="${isOn}" aria-pressed="${isOn}" aria-label="Toggle ${escapeHtml(device.nickname)}">
                             <span class="lever" aria-hidden="true"></span>
                         </button>
                     </div>
