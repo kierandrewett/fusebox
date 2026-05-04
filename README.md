@@ -54,7 +54,9 @@ docker compose up --build
 
 The container stores its remembered device state at `/data/state.json`, backed by the `fusebox-state` volume in the example. Tapo credentials still come from `.env` at runtime and are not baked into the image.
 
-The Compose example publishes the web UI on `127.0.0.1:8787` for safety. LAN discovery may be limited by Docker bridge networking. On Linux, if discovery cannot see plugs on your LAN, you can try host networking by setting `network_mode: host`, removing the `ports` block, and setting `FUSEBOX_BIND=127.0.0.1:8787` unless you intentionally want to expose the unauthenticated UI beyond the host.
+The Compose example publishes the web UI on `127.0.0.1:8787` for safety. LAN discovery may be limited by Docker bridge networking. If the container is on a Docker-only network, set `FUSEBOX_DISCOVERY_TARGETS` to the real LAN CIDR for your plugs, for example `192.168.0.0/24`. Fusebox logs each selected target before scanning, so `docker logs fusebox` should show the CIDR and broadcast address it is trying.
+
+On Linux, if explicit discovery targets still cannot see plugs on your LAN, you can try host networking by setting `network_mode: host`, removing the `ports` block, and setting `FUSEBOX_BIND=127.0.0.1:8787` unless you intentionally want to expose the unauthenticated UI beyond the host.
 
 ### Homelab reverse proxy setup
 
@@ -74,7 +76,7 @@ fuse.drewett.dev {
 }
 ```
 
-This should still allow Fusebox to make normal outbound connections from the container to LAN plug IPs through Docker bridge NAT. The part that may not work reliably is broadcast-based LAN discovery. If toggling a remembered plug works but scanning does not find new plugs, the container has LAN access but discovery broadcast is being blocked or isolated by Docker networking.
+This should still allow Fusebox to make normal outbound connections from the container to LAN plug IPs through Docker bridge NAT. The part that may not work reliably is broadcast-based LAN discovery. Set `FUSEBOX_DISCOVERY_TARGETS=192.168.0.0/24` or your actual plug LAN CIDR so Fusebox scans the LAN instead of only the Docker `intranet` CIDR. If toggling a remembered plug works but scanning still does not find new plugs, the container has LAN access but discovery broadcast is being blocked or isolated by Docker networking.
 
 For full LAN discovery on a Linux homelab host, use one of these approaches:
 
@@ -93,6 +95,7 @@ For full LAN discovery on a Linux homelab host, use one of these approaches:
 | `FUSEBOX_SCAN_SECONDS` | Background LAN discovery interval. Manual scan is still available in the UI. | No | `60` |
 | `FUSEBOX_ENERGY_PRICE_PENCE_PER_KWH` | Estimated UK electricity unit rate used for cost display. | No | `27.03` |
 | `FUSEBOX_DISCOVERY_TIMEOUT_SECONDS` | Discovery timeout per scan, from 1 to 60 seconds. | No | `5` |
+| `FUSEBOX_DISCOVERY_TARGETS` | Comma or space separated IPv4 addresses/CIDRs to scan instead of auto-detected local interfaces. Useful in Docker when plugs live on a different LAN, for example `192.168.0.0/24`. | No | auto-detected interfaces, then `255.255.255.255` fallback |
 | `FUSEBOX_STATE_PATH` | JSON file used to remember discovered device configs. | No | `$XDG_CONFIG_HOME/fusebox/state.json` or `$HOME/.config/fusebox/state.json` |
 | `RUST_LOG` | Logging filter. Fusebox defaults to `info` when this is unset. | No | `info` |
 

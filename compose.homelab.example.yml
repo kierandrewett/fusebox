@@ -12,6 +12,7 @@ services:
     environment:
       FUSEBOX_BIND: 0.0.0.0:8787
       FUSEBOX_STATE_PATH: /data/state.json
+      FUSEBOX_DISCOVERY_TARGETS: ${FUSEBOX_DISCOVERY_TARGETS:-}
       RUST_LOG: info
     volumes:
       - fusebox-state:/data
