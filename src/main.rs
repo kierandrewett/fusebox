@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs;
 use std::io::ErrorKind;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::path::{Path as FsPath, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -21,7 +21,7 @@ use tapoctl::{
     Config as TapoConfig, DeviceConfig, DeviceModel, DeviceSnapshot, TapoController,
     TapoCredentials, discovery_add_candidates,
 };
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 use tokio::time::sleep;
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
@@ -46,6 +46,7 @@ struct AppState {
     controller: TapoController,
     credentials: TapoCredentials,
     devices: Arc<RwLock<BTreeMap<String, ManagedDevice>>>,
+    device_locks: Arc<RwLock<BTreeMap<IpAddr, Arc<Mutex<()>>>>>,
     discovery_timeout_seconds: u64,
     refresh_seconds: u64,
     scan_seconds: u64,
@@ -279,6 +280,7 @@ impl AppState {
             controller,
             credentials,
             devices: Arc::new(RwLock::new(BTreeMap::new())),
+            device_locks: Arc::new(RwLock::new(BTreeMap::new())),
             discovery_timeout_seconds: settings.discovery_timeout_seconds,
             refresh_seconds: settings.refresh_seconds,
             scan_seconds: settings.scan_seconds,
@@ -410,6 +412,8 @@ async fn toggle_device(
     Path(name): Path<String>,
 ) -> Result<Json<DeviceView>, AppError> {
     let device = get_device_config(&state, &name).await?;
+    let operation_lock = device_operation_lock(&state, &device).await;
+    let _operation_guard = operation_lock.lock().await;
     let snapshot = state.controller.toggle_power(&device).await?;
     update_device_snapshot(&state, &name, snapshot, None).await;
 
@@ -425,8 +429,11 @@ async fn set_device_power(
     Json(request): Json<SetPowerRequest>,
 ) -> Result<Json<DeviceView>, AppError> {
     let device = get_device_config(&state, &name).await?;
+    let operation_lock = device_operation_lock(&state, &device).await;
+    let _operation_guard = operation_lock.lock().await;
     state.controller.set_power(&device, request.on).await?;
-    refresh_device(&state, &name, device).await;
+    let snapshot = state.controller.read_device(&device).await?;
+    update_device_snapshot(&state, &name, snapshot, None).await;
 
     get_device_view(&state, &name)
         .await
@@ -618,10 +625,25 @@ async fn refresh_all_devices(state: &AppState) {
 }
 
 async fn refresh_device(state: &AppState, name: &str, device: DeviceConfig) {
+    let operation_lock = device_operation_lock(state, &device).await;
+    let _operation_guard = operation_lock.lock().await;
+
     match state.controller.read_device(&device).await {
         Ok(snapshot) => update_device_snapshot(state, name, snapshot, None).await,
         Err(error) => update_device_error(state, name, error.to_string()).await,
     }
+}
+
+async fn device_operation_lock(state: &AppState, device: &DeviceConfig) -> Arc<Mutex<()>> {
+    if let Some(lock) = state.device_locks.read().await.get(&device.ip).cloned() {
+        return lock;
+    }
+
+    let mut locks = state.device_locks.write().await;
+    locks
+        .entry(device.ip)
+        .or_insert_with(|| Arc::new(Mutex::new(())))
+        .clone()
 }
 
 async fn update_device_snapshot(
@@ -937,6 +959,8 @@ async fn read_energy_entries(
     device: &DeviceConfig,
     interval: EnergyDataInterval,
 ) -> Result<Vec<(DateTime<Utc>, Option<f64>)>> {
+    let operation_lock = device_operation_lock(state, device).await;
+    let _operation_guard = operation_lock.lock().await;
     let result = match device.model {
         DeviceModel::P110 => {
             historical_client(state)
@@ -974,6 +998,8 @@ async fn read_power_entries(
     ranges: &[(DateTime<Utc>, DateTime<Utc>)],
     interval: PowerExportInterval,
 ) -> Result<Vec<(DateTime<Utc>, Option<f64>)>> {
+    let operation_lock = device_operation_lock(state, device).await;
+    let _operation_guard = operation_lock.lock().await;
     let mut entries = Vec::new();
 
     for (start_date_time, end_date_time) in ranges {
@@ -1880,11 +1906,50 @@ mod tests {
         let _ = fs::remove_file(state_path);
     }
 
+    #[tokio::test]
+    async fn reuses_device_operation_locks_by_ip() {
+        let state_path = test_state_path("locks");
+        let settings = test_settings(state_path);
+        let state = AppState::new(&settings);
+        let first_device = DeviceConfig {
+            ip: "192.168.0.40".parse().unwrap(),
+            model: DeviceModel::P110,
+        };
+        let same_ip_device = DeviceConfig {
+            ip: "192.168.0.40".parse().unwrap(),
+            model: DeviceModel::P115,
+        };
+        let other_device = DeviceConfig {
+            ip: "192.168.0.41".parse().unwrap(),
+            model: DeviceModel::P110,
+        };
+
+        let first_lock = device_operation_lock(&state, &first_device).await;
+        let same_ip_lock = device_operation_lock(&state, &same_ip_device).await;
+        let other_lock = device_operation_lock(&state, &other_device).await;
+
+        assert!(Arc::ptr_eq(&first_lock, &same_ip_lock));
+        assert!(!Arc::ptr_eq(&first_lock, &other_lock));
+    }
+
     fn test_state_path(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
             "fusebox-{name}-{}-{}.json",
             std::process::id(),
             now_ms(),
         ))
+    }
+
+    fn test_settings(state_path: PathBuf) -> Settings {
+        Settings {
+            bind_address: "127.0.0.1:8787".parse().unwrap(),
+            username: "dummy@example.com".to_string(),
+            password: "dummy-password".to_string(),
+            refresh_seconds: 10,
+            scan_seconds: 60,
+            discovery_timeout_seconds: 5,
+            energy_price_pence_per_kwh: DEFAULT_ENERGY_PRICE_PENCE_PER_KWH,
+            state_path,
+        }
     }
 }
