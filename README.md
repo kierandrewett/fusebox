@@ -30,6 +30,32 @@ cargo run
 
 Open [http://127.0.0.1:8787](http://127.0.0.1:8787).
 
+## Docker
+
+Build and run the container locally:
+
+```bash
+docker build -t fusebox:local .
+docker run --rm \
+  --env-file .env \
+  -e FUSEBOX_BIND=0.0.0.0:8787 \
+  -e FUSEBOX_STATE_PATH=/data/state.json \
+  -p 127.0.0.1:8787:8787 \
+  -v fusebox-state:/data \
+  fusebox:local
+```
+
+Or use the Compose example:
+
+```bash
+cp compose.example.yml compose.yml
+docker compose up --build
+```
+
+The container stores its remembered device state at `/data/state.json`, backed by the `fusebox-state` volume in the example. Tapo credentials still come from `.env` at runtime and are not baked into the image.
+
+The Compose example publishes the web UI on `127.0.0.1:8787` for safety. LAN discovery may be limited by Docker bridge networking. On Linux, if discovery cannot see plugs on your LAN, you can try host networking by setting `network_mode: host`, removing the `ports` block, and setting `FUSEBOX_BIND=127.0.0.1:8787` unless you intentionally want to expose the unauthenticated UI beyond the host.
+
 ## Environment Variables
 
 | Variable | Description | Required | Default |

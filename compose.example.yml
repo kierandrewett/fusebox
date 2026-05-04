@@ -1,0 +1,27 @@
+services:
+  fusebox:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: fusebox:local
+    init: true
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      FUSEBOX_BIND: 0.0.0.0:8787
+      FUSEBOX_STATE_PATH: /data/state.json
+      RUST_LOG: info
+    ports:
+      - "127.0.0.1:8787:8787"
+    volumes:
+      - fusebox-state:/data
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8787/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  fusebox-state:

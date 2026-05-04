@@ -1,0 +1,11 @@
+.git
+.gitignore
+.dockerignore
+.env
+.env.*
+!.env.example
+target
+.playwright-mcp
+*.log
+compose.yml
+docker-compose.yml
