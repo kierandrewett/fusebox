@@ -2237,6 +2237,10 @@ const INDEX_HTML: &str = r##"<!doctype html>
 
                 oscillator.connect(gain);
                 gain.connect(switchAudioContext.destination);
+                oscillator.addEventListener("ended", () => {
+                    oscillator.disconnect();
+                    gain.disconnect();
+                }, { once: true });
                 oscillator.start(now);
                 oscillator.stop(now + 0.06);
             } catch (_error) {
