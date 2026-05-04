@@ -56,6 +56,32 @@ The container stores its remembered device state at `/data/state.json`, backed b
 
 The Compose example publishes the web UI on `127.0.0.1:8787` for safety. LAN discovery may be limited by Docker bridge networking. On Linux, if discovery cannot see plugs on your LAN, you can try host networking by setting `network_mode: host`, removing the `ports` block, and setting `FUSEBOX_BIND=127.0.0.1:8787` unless you intentionally want to expose the unauthenticated UI beyond the host.
 
+### Homelab reverse proxy setup
+
+If Fusebox will sit behind a Tailscale-only Caddy container, put both containers on the same Docker network and let Caddy proxy to the service name:
+
+```bash
+docker network create intranet
+cp compose.homelab.example.yml compose.yml
+docker compose up --build
+```
+
+The homelab example joins the external `intranet` network and only exposes port `8787` to other containers on that network. A matching Caddy route can use:
+
+```caddyfile
+fuse.drewett.dev {
+  reverse_proxy fusebox:8787
+}
+```
+
+This should still allow Fusebox to make normal outbound connections from the container to LAN plug IPs through Docker bridge NAT. The part that may not work reliably is broadcast-based LAN discovery. If toggling a remembered plug works but scanning does not find new plugs, the container has LAN access but discovery broadcast is being blocked or isolated by Docker networking.
+
+For full LAN discovery on a Linux homelab host, use one of these approaches:
+
+- **Host networking:** run Fusebox with `network_mode: host`. This gives the process the host's LAN network stack, which is the most likely to make discovery work. The trade-off is that it cannot also join the Docker `intranet` network, so Caddy needs to proxy to the host address, for example `http://192.168.0.10:8787`, or Caddy also needs host networking. If you bind Fusebox to `0.0.0.0`, protect it with host firewall rules because Fusebox does not have browser authentication yet.
+- **Macvlan:** give Fusebox its own LAN IP and also attach it to `intranet` for Caddy. This keeps Caddy service-name routing and gives Fusebox first-class LAN presence, but it is more fiddly: you need a macvlan parent interface, a LAN IP range, and often a host shim if the homelab host itself needs to talk to the container.
+- **Bridge plus remembered devices:** keep the `intranet` example and rely on direct plug control once devices are known. This is the simplest option if discovery is not essential after initial setup.
+
 ## Environment Variables
 
 | Variable | Description | Required | Default |
