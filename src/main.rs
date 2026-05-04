@@ -882,13 +882,7 @@ async fn build_usage_history(state: &AppState) -> UsageHistoryResponse {
     let mut errors = Vec::new();
 
     for device in devices {
-        match read_power_entries(
-            state,
-            &device.config,
-            &ranges,
-            PowerExportInterval::Hourly,
-        )
-        .await
+        match read_power_entries(state, &device.config, &ranges, PowerExportInterval::Hourly).await
         {
             Ok(entries) => {
                 let mut points = Vec::new();
@@ -1756,8 +1750,13 @@ const INDEX_HTML: &str = r##"<!doctype html>
 
         .toggle {
             position: relative;
+            --lever-travel: 40px;
+            --lever-angle: 2deg;
+            --switch-glow: var(--red);
+            --switch-glow-y: 68px;
             width: 84px;
             height: 132px;
+            overflow: hidden;
             border: 0;
             border-radius: 16px;
             background: linear-gradient(90deg, #100f0e, var(--toggle-mid) 48%, #0e0d0c);
@@ -1766,10 +1765,49 @@ const INDEX_HTML: &str = r##"<!doctype html>
                 inset 0 0 24px rgba(0, 0, 0, 0.7),
                 0 0 0 6px rgba(0, 0, 0, 0.22);
             cursor: pointer;
+            transition: box-shadow 160ms ease, transform 120ms cubic-bezier(0.22, 1, 0.36, 1);
+        }
+
+        .toggle::before {
+            content: "";
+            position: absolute;
+            left: 50%;
+            width: 48px;
+            height: 48px;
+            border-radius: 999px;
+            background: radial-gradient(circle, color-mix(in srgb, var(--switch-glow) 42%, transparent), transparent 70%);
+            opacity: 0.5;
+            transform: translate(-50%, var(--switch-glow-y));
+            transition: opacity 180ms ease, transform 220ms cubic-bezier(0.25, 1, 0.5, 1);
+        }
+
+        .toggle::after {
+            content: "";
+            position: absolute;
+            inset: 9px 14px;
+            border-radius: 12px;
+            background: linear-gradient(90deg, rgba(255, 255, 255, 0.08), transparent 36%, rgba(0, 0, 0, 0.2));
+            pointer-events: none;
+        }
+
+        .toggle:disabled {
+            cursor: progress;
+            opacity: 0.9;
+        }
+
+        .toggle:active,
+        .toggle.is-switching {
+            transform: translateY(1px);
+            box-shadow:
+                inset 0 0 0 2px #090807,
+                inset 0 0 24px rgba(0, 0, 0, 0.78),
+                0 0 0 6px rgba(0, 0, 0, 0.18);
         }
 
         .lever {
             position: absolute;
+            z-index: 1;
+            top: 14px;
             left: 18px;
             width: 48px;
             height: 64px;
@@ -1779,17 +1817,31 @@ const INDEX_HTML: &str = r##"<!doctype html>
                 inset 0 1px 0 rgba(255, 255, 255, 0.35),
                 inset 0 -10px 16px rgba(0, 0, 0, 0.35),
                 0 8px 14px rgba(0, 0, 0, 0.5);
-            transition: top 180ms ease, transform 180ms ease;
+            transform: translateY(var(--lever-travel)) rotate(var(--lever-angle));
+            transform-origin: center center;
+            transition: box-shadow 160ms ease, transform 220ms cubic-bezier(0.25, 1, 0.5, 1);
         }
 
         .toggle[data-on="true"] .lever {
-            top: 14px;
-            transform: rotate(-2deg);
+            --lever-travel: 0px;
+            --lever-angle: -2deg;
+        }
+
+        .toggle[data-on="true"] {
+            --switch-glow: var(--green);
+            --switch-glow-y: 18px;
         }
 
         .toggle[data-on="false"] .lever {
-            top: 54px;
-            transform: rotate(2deg);
+            --lever-travel: 40px;
+            --lever-angle: 2deg;
+        }
+
+        .toggle.is-switching .lever {
+            box-shadow:
+                inset 0 1px 0 rgba(255, 255, 255, 0.28),
+                inset 0 -12px 18px rgba(0, 0, 0, 0.42),
+                0 6px 10px rgba(0, 0, 0, 0.54);
         }
 
         .status-strip {
@@ -1843,6 +1895,8 @@ const INDEX_HTML: &str = r##"<!doctype html>
         }
 
         @media (prefers-reduced-motion: reduce) {
+            .toggle,
+            .toggle::before,
             .lever {
                 transition: none;
             }
@@ -2140,45 +2194,70 @@ const INDEX_HTML: &str = r##"<!doctype html>
             return { totalPower, todayEnergy, todayCost };
         }
 
-        function recordPowerSample(watts, timestampMs) {
-            if (!Number.isFinite(watts) || !Number.isFinite(timestampMs)) return;
-
-            const lastSample = powerSamples.at(-1);
-            if (lastSample?.timestampMs === timestampMs) {
-                lastSample.watts = watts;
-                return;
-            }
-
-            powerSamples.push({ timestampMs, watts });
-
-            if (powerSamples.length > maxPowerSamples) {
-                powerSamples.splice(0, powerSamples.length - maxPowerSamples);
-            }
-        }
-
-        function renderPowerGraph() {
+        function renderUsageHistory(history) {
             if (powerChart === null) {
                 usageEmptyEl.hidden = false;
                 usageRangeEl.textContent = "Chart library unavailable";
                 return;
             }
 
-            if (powerSamples.length < 2) {
+            const totals = history.totals ?? [];
+            if (totals.length < 2) {
                 usageEmptyEl.hidden = false;
-                usageRangeEl.textContent = "Waiting for readings";
+                usageEmptyEl.textContent = (history.errors ?? []).length > 0
+                    ? "Tapo did not return enough history to draw the chart."
+                    : "No 7-day power history is available yet.";
+                usageRangeEl.textContent = "History unavailable";
                 return;
             }
 
             usageEmptyEl.hidden = true;
 
-            const maxWatts = Math.max(...powerSamples.map((sample) => sample.watts), 1);
-            const latestWatts = powerSamples.at(-1).watts;
+            const labels = totals.map((point) => formatHistoryLabel(point.timestamp_ms));
+            const timestamps = totals.map((point) => point.timestamp_ms);
+            const maxWatts = Math.max(...totals.map((point) => point.power_w), 1);
+            const chartTheme = powerChartTheme();
+            const datasets = [{
+                label: "Total",
+                data: totals.map((point) => point.power_w),
+                borderColor: chartTheme.graphLine,
+                backgroundColor: chartTheme.graphFill,
+                borderWidth: 3,
+                cubicInterpolationMode: "monotone",
+                fill: true,
+                pointRadius: 0,
+                pointHoverRadius: 4,
+                tension: 0.28,
+            }];
 
-            powerChart.data.labels = powerSamples.map((sample) => formatTimeLabel(sample.timestampMs));
-            powerChart.data.datasets[0].data = powerSamples.map((sample) => sample.watts);
+            for (const [index, series] of (history.series ?? []).entries()) {
+                const pointsByTimestamp = new Map((series.points ?? []).map((point) => [point.timestamp_ms, point.power_w]));
+                const color = chartPalette[index % chartPalette.length];
+                datasets.push({
+                    label: series.device_name,
+                    data: timestamps.map((timestamp) => pointsByTimestamp.get(timestamp) ?? null),
+                    borderColor: color,
+                    backgroundColor: "transparent",
+                    borderWidth: 2,
+                    cubicInterpolationMode: "monotone",
+                    fill: false,
+                    pointRadius: 0,
+                    pointHoverRadius: 4,
+                    spanGaps: true,
+                    tension: 0.24,
+                });
+            }
+
+            powerChart.data.labels = labels;
+            powerChart.data.datasets = datasets;
             powerChart.options.scales.y.suggestedMax = Math.ceil(maxWatts * 1.15);
             powerChart.update("none");
-            usageRangeEl.textContent = `${formatPower(latestWatts)} now / ${formatPower(maxWatts)} peak`;
+            usageRangeEl.textContent = `Last 7 days / ${formatPower(maxWatts)} peak`;
+
+            if ((history.errors ?? []).length > 0) {
+                usageEmptyEl.hidden = false;
+                usageEmptyEl.textContent = `${history.errors.length} device history read failed.`;
+            }
         }
 
         function initializePowerChart() {
@@ -2194,7 +2273,7 @@ const INDEX_HTML: &str = r##"<!doctype html>
                 data: {
                     labels: [],
                     datasets: [{
-                        label: "Live load",
+                        label: "Total",
                         data: [],
                         borderColor: chartTheme.graphLine,
                         backgroundColor: chartTheme.graphFill,
@@ -2216,7 +2295,12 @@ const INDEX_HTML: &str = r##"<!doctype html>
                     },
                     plugins: {
                         legend: {
-                            display: false,
+                            display: true,
+                            labels: {
+                                boxWidth: 10,
+                                color: chartTheme.ink,
+                                usePointStyle: true,
+                            },
                         },
                         tooltip: {
                             callbacks: {
@@ -2260,6 +2344,7 @@ const INDEX_HTML: &str = r##"<!doctype html>
             powerChart.options.scales.x.ticks.color = chartTheme.ink;
             powerChart.options.scales.y.grid.color = chartTheme.graphGrid;
             powerChart.options.scales.y.ticks.color = chartTheme.ink;
+            powerChart.options.plugins.legend.labels.color = chartTheme.ink;
             powerChart.update("none");
         }
 
@@ -2278,6 +2363,13 @@ const INDEX_HTML: &str = r##"<!doctype html>
                 hour: "2-digit",
                 minute: "2-digit",
                 second: "2-digit",
+            });
+        }
+
+        function formatHistoryLabel(timestampMs) {
+            return new Date(timestampMs).toLocaleString([], {
+                weekday: "short",
+                hour: "2-digit",
             });
         }
 
@@ -2368,6 +2460,7 @@ const INDEX_HTML: &str = r##"<!doctype html>
         }
 
         loadDevices();
+        loadUsageHistory();
         connectDeviceStream();
     </script>
 </body>
