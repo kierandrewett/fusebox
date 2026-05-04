@@ -13,8 +13,6 @@ services:
       FUSEBOX_BIND: 0.0.0.0:8787
       FUSEBOX_STATE_PATH: /data/state.json
       RUST_LOG: info
-    expose:
-      - "8787"
     volumes:
       - fusebox-state:/data
     networks:

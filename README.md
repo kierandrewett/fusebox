@@ -66,7 +66,7 @@ cp compose.homelab.example.yml compose.yml
 docker compose up --build
 ```
 
-The homelab example joins the external `intranet` network and only exposes port `8787` to other containers on that network. A matching Caddy route can use:
+The homelab example joins the external `intranet` network and does not publish any ports to the host. Caddy can still reach Fusebox by service name because both containers are on the same Docker network. A matching Caddy route can use:
 
 ```caddyfile
 fuse.drewett.dev {
