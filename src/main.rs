@@ -891,20 +891,18 @@ async fn build_energy_export_workbook(state: &AppState) -> Result<Vec<u8>> {
     write_export_workbook(&device_names, &tables, &errors)
 }
 
-async fn build_usage_history(state: &AppState) -> UsageHistoryResponse {
+async fn build_usage_history(state: &AppState, range_key: Option<&str>) -> UsageHistoryResponse {
+    let range = usage_history_range(range_key);
     let devices = export_devices(state).await;
     let now = Utc::now();
-    let start = now
-        .checked_sub_signed(ChronoDuration::days(7))
-        .unwrap_or(now);
-    let ranges = split_datetime_ranges(start, now, ChronoDuration::days(6));
+    let start = now.checked_sub_signed(range.duration).unwrap_or(now);
+    let ranges = split_datetime_ranges(start, now, range.range_limit);
     let mut series = Vec::with_capacity(devices.len());
     let mut totals_by_timestamp: BTreeMap<DateTime<Utc>, f64> = BTreeMap::new();
     let mut errors = Vec::new();
 
     for device in devices {
-        match read_power_entries(state, &device.config, &ranges, PowerExportInterval::Hourly).await
-        {
+        match read_power_entries(state, &device.config, &ranges, range.interval).await {
             Ok(entries) => {
                 let mut points = Vec::new();
 
@@ -943,9 +941,89 @@ async fn build_usage_history(state: &AppState) -> UsageHistoryResponse {
         totals,
         errors,
         updated_at_ms: now_ms(),
+        range: range.key,
+        range_label: range.label,
+        interval: range.interval_label,
         start_date: start.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
         end_date: now.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
         unit: "W",
+    }
+}
+
+fn usage_history_range(range_key: Option<&str>) -> UsageHistoryRange {
+    match range_key {
+        Some("5m") => UsageHistoryRange {
+            key: "5m",
+            label: "5 minutes",
+            interval_label: "5-minute",
+            duration: ChronoDuration::minutes(5),
+            range_limit: ChronoDuration::hours(12),
+            interval: PowerExportInterval::Every5Minutes,
+        },
+        Some("30m") => UsageHistoryRange {
+            key: "30m",
+            label: "30 minutes",
+            interval_label: "5-minute",
+            duration: ChronoDuration::minutes(30),
+            range_limit: ChronoDuration::hours(12),
+            interval: PowerExportInterval::Every5Minutes,
+        },
+        Some("1h") => UsageHistoryRange {
+            key: "1h",
+            label: "1 hour",
+            interval_label: "5-minute",
+            duration: ChronoDuration::hours(1),
+            range_limit: ChronoDuration::hours(12),
+            interval: PowerExportInterval::Every5Minutes,
+        },
+        Some("6h") => UsageHistoryRange {
+            key: "6h",
+            label: "6 hours",
+            interval_label: "5-minute",
+            duration: ChronoDuration::hours(6),
+            range_limit: ChronoDuration::hours(12),
+            interval: PowerExportInterval::Every5Minutes,
+        },
+        Some("12h") => UsageHistoryRange {
+            key: "12h",
+            label: "12 hours",
+            interval_label: "5-minute",
+            duration: ChronoDuration::hours(12),
+            range_limit: ChronoDuration::hours(12),
+            interval: PowerExportInterval::Every5Minutes,
+        },
+        Some("1d") => UsageHistoryRange {
+            key: "1d",
+            label: "1 day",
+            interval_label: "5-minute",
+            duration: ChronoDuration::days(1),
+            range_limit: ChronoDuration::hours(12),
+            interval: PowerExportInterval::Every5Minutes,
+        },
+        Some("3d") => UsageHistoryRange {
+            key: "3d",
+            label: "3 days",
+            interval_label: "hourly",
+            duration: ChronoDuration::days(3),
+            range_limit: ChronoDuration::days(6),
+            interval: PowerExportInterval::Hourly,
+        },
+        Some("30d") => UsageHistoryRange {
+            key: "30d",
+            label: "30 days",
+            interval_label: "hourly",
+            duration: ChronoDuration::days(30),
+            range_limit: ChronoDuration::days(6),
+            interval: PowerExportInterval::Hourly,
+        },
+        _ => UsageHistoryRange {
+            key: "7d",
+            label: "7 days",
+            interval_label: "hourly",
+            duration: ChronoDuration::days(7),
+            range_limit: ChronoDuration::days(6),
+            interval: PowerExportInterval::Hourly,
+        },
     }
 }
 
@@ -1142,6 +1220,7 @@ async fn read_export_entries(
     }
 }
 
+#[derive(Debug, Clone, Copy)]
 enum PowerExportInterval {
     Every5Minutes,
     Hourly,
@@ -1677,6 +1756,40 @@ const INDEX_HTML: &str = r##"<!doctype html>
             margin-bottom: 10px;
         }
 
+        .usage-range-controls {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+            margin-bottom: 12px;
+        }
+
+        .range-button {
+            min-height: 32px;
+            padding: 6px 9px;
+            border: 1px solid rgba(0, 0, 0, 0.24);
+            border-radius: 999px;
+            color: color-mix(in srgb, var(--ink) 78%, transparent);
+            background: rgba(0, 0, 0, 0.08);
+            font-family: var(--font-data);
+            font-size: 12px;
+            cursor: pointer;
+        }
+
+        .range-button:hover {
+            filter: brightness(1.08);
+        }
+
+        .range-button:focus-visible {
+            outline: 3px solid rgba(0, 0, 0, 0.34);
+            outline-offset: 2px;
+        }
+
+        .range-button[aria-pressed="true"] {
+            color: var(--primary-text);
+            background: linear-gradient(var(--primary-start), var(--primary-end));
+            box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.36);
+        }
+
         .usage-header h2 {
             margin: 0;
             font-size: 15px;
@@ -2004,13 +2117,24 @@ const INDEX_HTML: &str = r##"<!doctype html>
             </div>
             <section class="usage-panel" aria-labelledby="usage-title">
                 <div class="usage-header">
-                    <h2 id="usage-title">7-day usage</h2>
+                    <h2 id="usage-title">7 days usage</h2>
                     <span id="usage-range">Loading history</span>
+                </div>
+                <div class="usage-range-controls" id="usage-range-controls" aria-label="Energy usage history range">
+                    <button class="range-button" type="button" data-history-range="5m">5m</button>
+                    <button class="range-button" type="button" data-history-range="30m">30m</button>
+                    <button class="range-button" type="button" data-history-range="1h">1h</button>
+                    <button class="range-button" type="button" data-history-range="6h">6h</button>
+                    <button class="range-button" type="button" data-history-range="12h">12h</button>
+                    <button class="range-button" type="button" data-history-range="1d">1d</button>
+                    <button class="range-button" type="button" data-history-range="3d">3d</button>
+                    <button class="range-button" type="button" data-history-range="7d">7d</button>
+                    <button class="range-button" type="button" data-history-range="30d">30d</button>
                 </div>
                 <div class="usage-chart-container">
                     <canvas class="usage-chart" id="usage-chart" aria-label="Hourly power draw in watts for each energy-monitoring plug over the last seven days." role="img"></canvas>
                 </div>
-                <p class="usage-empty" id="usage-empty">Loading 7-day power history from Tapo.</p>
+                <p class="usage-empty" id="usage-empty">Loading power history from Tapo.</p>
             </section>
             <div class="breaker-grid" id="devices"></div>
         </section>
@@ -2027,11 +2151,15 @@ const INDEX_HTML: &str = r##"<!doctype html>
         const todayEnergyEl = document.querySelector("#today-energy");
         const todayCostEl = document.querySelector("#today-cost");
         const noticeEl = document.querySelector("#notice");
+        const usageTitleEl = document.querySelector("#usage-title");
         const usageChartEl = document.querySelector("#usage-chart");
         const usageEmptyEl = document.querySelector("#usage-empty");
         const usageRangeEl = document.querySelector("#usage-range");
+        const usageRangeControlsEl = document.querySelector("#usage-range-controls");
         const deviceStreamReconnectMs = 2000;
         const chartPalette = ["#e5b75b", "#7bb7ff", "#f06b5c", "#c99cff", "#62d6d1", "#ff9d66", "#b6e36a", "#f38ad3"];
+        const defaultHistoryRange = "7d";
+        let selectedHistoryRange = defaultHistoryRange;
         let powerChart = null;
         let deviceRequestInFlight = false;
         let historyRequestInFlight = false;
@@ -2040,6 +2168,7 @@ const INDEX_HTML: &str = r##"<!doctype html>
         let switchAudioContext = null;
 
         syncThemeButton();
+        syncHistoryRangeButtons();
         initializePowerChart();
 
         themeButton.addEventListener("click", () => {
@@ -2070,6 +2199,15 @@ const INDEX_HTML: &str = r##"<!doctype html>
             }
         });
 
+        usageRangeControlsEl.addEventListener("click", (event) => {
+            const button = event.target.closest("button[data-history-range]");
+            if (button === null) return;
+
+            selectedHistoryRange = button.dataset.historyRange ?? defaultHistoryRange;
+            syncHistoryRangeButtons();
+            loadUsageHistory();
+        });
+
         async function loadDevices() {
             if (deviceRequestInFlight) return;
 
@@ -2092,7 +2230,7 @@ const INDEX_HTML: &str = r##"<!doctype html>
             usageRangeEl.textContent = "Loading history";
 
             try {
-                const payload = await requestJson("/api/energy/history.json");
+                const payload = await requestJson(`/api/energy/history.json?range=${encodeURIComponent(selectedHistoryRange)}`);
                 renderUsageHistory(payload);
             } catch (error) {
                 usageEmptyEl.hidden = false;
@@ -2181,6 +2319,13 @@ const INDEX_HTML: &str = r##"<!doctype html>
             const devices = payload.devices ?? [];
             renderDevices(devices);
             renderNotice(payload.scan_error);
+        }
+
+        function syncHistoryRangeButtons() {
+            usageRangeControlsEl.querySelectorAll("button[data-history-range]").forEach((button) => {
+                const isSelected = button.dataset.historyRange === selectedHistoryRange;
+                button.setAttribute("aria-pressed", String(isSelected));
+            });
         }
 
         function renderDevices(devices) {
@@ -2322,12 +2467,13 @@ const INDEX_HTML: &str = r##"<!doctype html>
                 usageEmptyEl.hidden = false;
                 usageEmptyEl.textContent = (history.errors ?? []).length > 0
                     ? "Tapo did not return enough history to draw the chart."
-                    : "No 7-day power history is available yet.";
+                    : "No power history is available for this range yet.";
                 usageRangeEl.textContent = "History unavailable";
                 return;
             }
 
             usageEmptyEl.hidden = true;
+            usageEmptyEl.textContent = "";
 
             const labels = totals.map((point) => formatHistoryLabel(point.timestamp_ms));
             const timestamps = totals.map((point) => point.timestamp_ms);
@@ -2368,7 +2514,8 @@ const INDEX_HTML: &str = r##"<!doctype html>
             powerChart.data.datasets = datasets;
             powerChart.options.scales.y.suggestedMax = Math.ceil(maxWatts * 1.15);
             powerChart.update("none");
-            usageRangeEl.textContent = `Last 7 days / ${formatPower(maxWatts)} peak`;
+            usageTitleEl.textContent = `${history.range_label ?? selectedHistoryRange} usage`;
+            usageRangeEl.textContent = `${history.interval ?? "power"} readings / ${formatPower(maxWatts)} peak`;
 
             if ((history.errors ?? []).length > 0) {
                 usageEmptyEl.hidden = false;
