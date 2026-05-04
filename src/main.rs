@@ -1190,9 +1190,21 @@ const INDEX_HTML: &str = r##"<!doctype html>
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="theme-color" content="#201d19">
     <title>Fusebox</title>
+    <script>
+        (() => {
+            try {
+                const storedTheme = localStorage.getItem("fusebox-theme");
+                const systemTheme = window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "classic";
+                document.documentElement.dataset.theme = storedTheme ?? systemTheme;
+            } catch (_error) {
+                document.documentElement.dataset.theme = "classic";
+            }
+        })();
+    </script>
     <style>
         :root {
             color-scheme: dark;
+            --theme-color: #201d19;
             --wall: #201d19;
             --cabinet: #5b5144;
             --cabinet-dark: #211d19;
@@ -1200,10 +1212,71 @@ const INDEX_HTML: &str = r##"<!doctype html>
             --brass: #c19b55;
             --paper: #e5d8b6;
             --ink: #221d17;
+            --text: #f2ead7;
+            --title: #f3e9d1;
+            --bg-start: #171512;
+            --bg-end: #14120f;
+            --bg-glow-a: rgba(255, 214, 128, 0.13);
+            --bg-glow-b: rgba(193, 155, 85, 0.07);
+            --cabinet-border: #2a2118;
+            --cabinet-highlight: rgba(255, 255, 255, 0.06);
+            --cabinet-shadow: rgba(0, 0, 0, 0.18);
+            --cabinet-stripe-a: #5f5445;
+            --cabinet-stripe-b: #514738;
+            --meter-start: #efe1bd;
+            --meter-end: #c8b37c;
+            --label-start: #f2e7c7;
+            --label-end: #c7b783;
+            --primary-text: #21170c;
+            --primary-start: #e7c577;
+            --primary-end: #9e7135;
+            --secondary-text: #f4e8cb;
+            --secondary-bg: rgba(0, 0, 0, 0.26);
+            --breaker-top: #26231f;
+            --toggle-mid: #3b3833;
+            --lever-mid: #b8aa8c;
             --green: #66d18c;
             --red: #de5e4b;
             --amber: #e5b75b;
             --muted: #9b907d;
+        }
+
+        html[data-theme="dark"] {
+            --theme-color: #08090b;
+            --wall: #090a0c;
+            --cabinet: #17191c;
+            --cabinet-dark: #050607;
+            --bakelite: #07080a;
+            --brass: #d0a85e;
+            --paper: #d8ccad;
+            --ink: #f2e9d4;
+            --text: #efe7d7;
+            --title: #fff3d6;
+            --bg-start: #050607;
+            --bg-end: #020304;
+            --bg-glow-a: rgba(224, 184, 96, 0.08);
+            --bg-glow-b: rgba(72, 111, 136, 0.12);
+            --cabinet-border: #050607;
+            --cabinet-highlight: rgba(255, 255, 255, 0.035);
+            --cabinet-shadow: rgba(0, 0, 0, 0.36);
+            --cabinet-stripe-a: #1f2225;
+            --cabinet-stripe-b: #15171a;
+            --meter-start: #25282b;
+            --meter-end: #111316;
+            --label-start: #252321;
+            --label-end: #11100f;
+            --primary-text: #0b0905;
+            --primary-start: #d0a85e;
+            --primary-end: #7c5424;
+            --secondary-text: #efe7d7;
+            --secondary-bg: rgba(255, 255, 255, 0.055);
+            --breaker-top: #101215;
+            --toggle-mid: #24282d;
+            --lever-mid: #6f7577;
+            --green: #71e09b;
+            --red: #f06b5c;
+            --amber: #d0a85e;
+            --muted: #a79d8b;
         }
 
         * {
@@ -1220,7 +1293,7 @@ const INDEX_HTML: &str = r##"<!doctype html>
             min-width: 320px;
             min-height: 100svh;
             margin: 0;
-            color: #f2ead7;
+            color: var(--text);
             font-family: ui-serif, Georgia, Cambria, "Times New Roman", serif;
         }
 
@@ -1230,9 +1303,9 @@ const INDEX_HTML: &str = r##"<!doctype html>
             inset: 0;
             z-index: -1;
             background:
-                radial-gradient(circle at 8% 0%, rgba(255, 214, 128, 0.13), transparent 34rem),
-                radial-gradient(circle at 92% 18%, rgba(193, 155, 85, 0.07), transparent 38rem),
-                linear-gradient(135deg, #171512 0%, var(--wall) 54%, #14120f 100%);
+                radial-gradient(circle at 8% 0%, var(--bg-glow-a), transparent 34rem),
+                radial-gradient(circle at 92% 18%, var(--bg-glow-b), transparent 38rem),
+                linear-gradient(135deg, var(--bg-start) 0%, var(--wall) 54%, var(--bg-end) 100%);
             background-repeat: no-repeat;
             background-size: cover;
         }
@@ -1257,7 +1330,7 @@ const INDEX_HTML: &str = r##"<!doctype html>
 
         h1 {
             margin: 0;
-            color: #f3e9d1;
+            color: var(--title);
             font-size: clamp(34px, 4vw, 62px);
             line-height: 0.95;
             letter-spacing: -0.045em;
@@ -1269,8 +1342,8 @@ const INDEX_HTML: &str = r##"<!doctype html>
             padding: 10px 16px;
             border: 1px solid rgba(0, 0, 0, 0.5);
             border-radius: 10px;
-            color: #21170c;
-            background: linear-gradient(#e7c577, #9e7135);
+            color: var(--primary-text);
+            background: linear-gradient(var(--primary-start), var(--primary-end));
             box-shadow:
                 inset 0 1px 0 rgba(255, 255, 255, 0.45),
                 0 4px 0 #553619,
@@ -1284,28 +1357,35 @@ const INDEX_HTML: &str = r##"<!doctype html>
             gap: 10px;
         }
 
-        .export-link {
+        .export-link,
+        .theme-button {
             display: inline-flex;
             min-height: 44px;
             align-items: center;
             padding: 10px 16px;
             border: 1px solid rgba(242, 212, 138, 0.34);
             border-radius: 10px;
-            color: #f4e8cb;
-            background: rgba(0, 0, 0, 0.26);
+            color: var(--secondary-text);
+            background: var(--secondary-bg);
             box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08);
             font-family: ui-sans-serif, system-ui, sans-serif;
             text-decoration: none;
             touch-action: manipulation;
         }
 
+        .theme-button {
+            cursor: pointer;
+        }
+
         .scan-button:hover,
-        .export-link:hover {
+        .export-link:hover,
+        .theme-button:hover {
             filter: brightness(1.08);
         }
 
         .scan-button:focus-visible,
         .export-link:focus-visible,
+        .theme-button:focus-visible,
         .toggle:focus-visible {
             outline: 3px solid #f2d48a;
             outline-offset: 3px;
@@ -1316,11 +1396,11 @@ const INDEX_HTML: &str = r##"<!doctype html>
             overflow: hidden;
             min-height: 560px;
             padding: clamp(18px, 4vw, 42px);
-            border: 10px solid #2a2118;
+            border: 10px solid var(--cabinet-border);
             border-radius: 18px;
             background:
-                linear-gradient(90deg, rgba(255,255,255,0.06), transparent 16%, rgba(0,0,0,0.18) 72%),
-                repeating-linear-gradient(90deg, #5f5445 0 18px, #514738 18px 36px);
+                linear-gradient(90deg, var(--cabinet-highlight), transparent 16%, var(--cabinet-shadow) 72%),
+                repeating-linear-gradient(90deg, var(--cabinet-stripe-a) 0 18px, var(--cabinet-stripe-b) 18px 36px);
             box-shadow:
                 inset 0 0 0 2px rgba(255, 255, 255, 0.08),
                 inset 0 0 48px rgba(0, 0, 0, 0.48),
@@ -1360,7 +1440,7 @@ const INDEX_HTML: &str = r##"<!doctype html>
             border: 1px solid rgba(0, 0, 0, 0.55);
             border-radius: 8px;
             color: var(--ink);
-            background: linear-gradient(#efe1bd, #c8b37c);
+            background: linear-gradient(var(--meter-start), var(--meter-end));
             box-shadow: inset 0 1px 8px rgba(255, 255, 255, 0.45), inset 0 -8px 18px rgba(88, 60, 28, 0.2);
         }
 
@@ -1395,7 +1475,7 @@ const INDEX_HTML: &str = r##"<!doctype html>
             border-radius: 14px;
             background:
                 linear-gradient(160deg, rgba(255,255,255,0.08), transparent 32%),
-                linear-gradient(#26231f, var(--bakelite));
+                linear-gradient(var(--breaker-top), var(--bakelite));
             box-shadow:
                 inset 0 0 0 1px rgba(255, 255, 255, 0.05),
                 inset 0 -18px 38px rgba(0, 0, 0, 0.34),
@@ -1410,7 +1490,7 @@ const INDEX_HTML: &str = r##"<!doctype html>
             padding: 10px 11px;
             border-radius: 6px;
             color: var(--ink);
-            background: linear-gradient(#f2e7c7, #c7b783);
+            background: linear-gradient(var(--label-start), var(--label-end));
             box-shadow: inset 0 0 0 1px rgba(66, 43, 20, 0.24);
         }
 
@@ -1441,7 +1521,7 @@ const INDEX_HTML: &str = r##"<!doctype html>
             height: 132px;
             border: 0;
             border-radius: 16px;
-            background: linear-gradient(90deg, #100f0e, #3b3833 48%, #0e0d0c);
+            background: linear-gradient(90deg, #100f0e, var(--toggle-mid) 48%, #0e0d0c);
             box-shadow:
                 inset 0 0 0 2px #090807,
                 inset 0 0 24px rgba(0, 0, 0, 0.7),
@@ -1455,7 +1535,7 @@ const INDEX_HTML: &str = r##"<!doctype html>
             width: 48px;
             height: 64px;
             border-radius: 10px;
-            background: linear-gradient(90deg, #34302a, #b8aa8c 44%, #3a352e);
+            background: linear-gradient(90deg, #34302a, var(--lever-mid) 44%, #3a352e);
             box-shadow:
                 inset 0 1px 0 rgba(255, 255, 255, 0.35),
                 inset 0 -10px 16px rgba(0, 0, 0, 0.35),
@@ -1582,7 +1662,8 @@ const INDEX_HTML: &str = r##"<!doctype html>
                 grid-template-columns: 1fr;
             }
 
-            .export-link {
+            .export-link,
+            .theme-button {
                 justify-content: center;
             }
         }
@@ -1593,6 +1674,7 @@ const INDEX_HTML: &str = r##"<!doctype html>
         <header class="header">
             <h1>Fusebox</h1>
             <div class="header-actions">
+                <button class="theme-button" id="theme-toggle" type="button" aria-pressed="false">Dark mode</button>
                 <a class="export-link" href="/api/energy/export.xlsx" download>Export xlsx</a>
                 <button class="scan-button" id="scan" type="button">Scan now</button>
             </div>
@@ -1614,6 +1696,8 @@ const INDEX_HTML: &str = r##"<!doctype html>
     <script>
         const devicesEl = document.querySelector("#devices");
         const scanButton = document.querySelector("#scan");
+        const themeButton = document.querySelector("#theme-toggle");
+        const themeColorMeta = document.querySelector('meta[name="theme-color"]');
         const deviceCountEl = document.querySelector("#device-count");
         const totalPowerEl = document.querySelector("#total-power");
         const todayEnergyEl = document.querySelector("#today-energy");
@@ -1621,6 +1705,21 @@ const INDEX_HTML: &str = r##"<!doctype html>
         const noticeEl = document.querySelector("#notice");
         const devicePollMs = 500;
         let deviceRequestInFlight = false;
+
+        syncThemeButton();
+
+        themeButton.addEventListener("click", () => {
+            const nextTheme = document.documentElement.dataset.theme === "dark" ? "classic" : "dark";
+            document.documentElement.dataset.theme = nextTheme;
+
+            try {
+                localStorage.setItem("fusebox-theme", nextTheme);
+            } catch (_error) {
+                // Ignore storage failures; the active page can still switch theme.
+            }
+
+            syncThemeButton();
+        });
 
         scanButton.addEventListener("click", async () => {
             scanButton.disabled = true;
@@ -1679,6 +1778,14 @@ const INDEX_HTML: &str = r##"<!doctype html>
 
             noticeEl.hidden = false;
             noticeEl.textContent = message;
+        }
+
+        function syncThemeButton() {
+            const isDark = document.documentElement.dataset.theme === "dark";
+
+            themeButton.setAttribute("aria-pressed", String(isDark));
+            themeButton.textContent = isDark ? "Classic mode" : "Dark mode";
+            themeColorMeta.setAttribute("content", isDark ? "#08090b" : "#201d19");
         }
 
         function renderDevices(devices) {
