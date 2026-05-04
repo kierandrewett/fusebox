@@ -59,6 +59,22 @@ $HOME/.config/fusebox/state.json
 
 Set `FUSEBOX_STATE_PATH` if you want the file somewhere else, for example when running under systemd or inside a container.
 
+## Spreadsheet Export
+
+The `GET /api/energy/export.xlsx` route builds a new workbook when you request it. It does not read from Fusebox's state file, and it does not use a database of readings collected by Fusebox.
+
+For each remembered P110/P115 device, Fusebox signs in to the plug over the local Tapo API and asks the device for its own history:
+
+- `Energy - Hourly (last week)`: hourly energy history, written as kWh.
+- `Energy - Daily (last 3 mo)`: daily energy history from the start of the current quarter, written as kWh.
+- `Energy - Monthly (last year)`: monthly energy history from 1 January, written as kWh.
+- `Power - 5min (last 24h)`: 5-minute power history, written as W.
+- `Power - Hourly (last week)`: hourly power history, written as W.
+
+The numbers are the historical values returned by the plug through the Tapo API. Fusebox only reshapes them into workbook sheets and totals the device columns for each timestamp. If a plug cannot return a sheet, the workbook includes an `Export Errors` sheet with the device name and error message.
+
+Cost values are not exported yet. The costs shown in the UI are estimates calculated from the live Wh counters and `FUSEBOX_ENERGY_PRICE_PENCE_PER_KWH`.
+
 ## API
 
 ```text

@@ -1675,7 +1675,7 @@ const INDEX_HTML: &str = r##"<!doctype html>
             <h1>Fusebox</h1>
             <div class="header-actions">
                 <button class="theme-button" id="theme-toggle" type="button" aria-pressed="false">Dark mode</button>
-                <a class="export-link" href="/api/energy/export.xlsx" download>Export xlsx</a>
+                <a class="export-link" href="/api/energy/export.xlsx" download title="Download a workbook generated from Tapo history readings">Export xlsx</a>
                 <button class="scan-button" id="scan" type="button">Scan now</button>
             </div>
         </header>
@@ -1839,25 +1839,46 @@ const INDEX_HTML: &str = r##"<!doctype html>
                     </div>
                     <div class="status-strip">
                         <span class="lamp ${statusClass}">${statusText}</span>
-                        <span>${formatRuntime(device.on_time_seconds)}</span>
+                        <span>${formatDurationFromSeconds(device.on_time_seconds)}</span>
                     </div>
                     <div class="readings">
                         <div class="reading"><span>Now</span>${energy?.current_power_w ?? "-"} W</div>
-                        <div class="reading"><span>Today</span>${energy ? formatEnergy(energy.today_energy_wh) : "-"}</div>
-                        <div class="reading"><span>Cost</span>${energy ? formatCost(energy.today_cost_pence) : "-"}</div>
-                        <div class="reading"><span>Month</span>${energy ? formatEnergy(energy.month_energy_wh) : "-"}</div>
-                        <div class="reading"><span>Runtime</span>${energy?.today_runtime_minutes ?? "-"} min</div>
+                        <div class="reading"><span>Today energy</span>${energy ? formatEnergy(energy.today_energy_wh) : "-"}</div>
+                        <div class="reading"><span>Today cost</span>${energy ? formatCost(energy.today_cost_pence) : "-"}</div>
+                        <div class="reading"><span>Month energy</span>${energy ? formatEnergy(energy.month_energy_wh) : "-"}</div>
+                        <div class="reading"><span>Month cost</span>${energy ? formatCost(energy.month_cost_pence) : "-"}</div>
+                        <div class="reading"><span>Today runtime</span>${energy ? formatDurationFromMinutes(energy.today_runtime_minutes) : "-"}</div>
                     </div>
                     ${isOffline ? `<p class="device-meta">${escapeHtml(device.last_error)}</p>` : ""}
                 </article>
             `;
         }
 
-        function formatRuntime(seconds) {
+        function formatDurationFromSeconds(seconds) {
             if (seconds === null || seconds === undefined) return "unknown";
             const minutes = Math.floor(seconds / 60);
-            if (minutes < 60) return `${minutes} min`;
-            return `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
+            return formatDurationFromMinutes(minutes);
+        }
+
+        function formatDurationFromMinutes(minutes) {
+            if (minutes === null || minutes === undefined) return "unknown";
+            const totalMinutes = Math.floor(minutes);
+            if (totalMinutes < 60) return `${totalMinutes} min`;
+
+            const hours = Math.floor(totalMinutes / 60);
+            if (hours < 48) return `${hours}h ${totalMinutes % 60}m`;
+
+            const days = Math.floor(hours / 24);
+            const remainingHours = hours % 24;
+            if (days < 60) return `${days}d ${remainingHours}h`;
+
+            const months = Math.floor(days / 30);
+            const remainingDays = days % 30;
+            if (months < 24) return `${months}mo ${remainingDays}d`;
+
+            const years = Math.floor(months / 12);
+            const remainingMonths = months % 12;
+            return `${years}y ${remainingMonths}mo`;
         }
 
         function formatEnergy(wh) {
