@@ -2132,7 +2132,7 @@ const INDEX_HTML: &str = r##"<!doctype html>
                     <button class="range-button" type="button" data-history-range="30d">30d</button>
                 </div>
                 <div class="usage-chart-container">
-                    <canvas class="usage-chart" id="usage-chart" aria-label="Hourly power draw in watts for each energy-monitoring plug over the last seven days." role="img"></canvas>
+                    <canvas class="usage-chart" id="usage-chart" aria-label="Power draw in watts for each energy-monitoring plug over the selected history range." role="img"></canvas>
                 </div>
                 <p class="usage-empty" id="usage-empty">Loading power history from Tapo.</p>
             </section>

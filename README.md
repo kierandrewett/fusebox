@@ -8,7 +8,7 @@ Local web control board for Tapo P110 plugs, with LAN discovery, WebSocket live 
 - **Remembered devices:** saves discovered device configs to disk and reloads them on the next start.
 - **Local control:** toggles plugs from the browser through the local Tapo API.
 - **Live updates:** streams device snapshots to the browser over WebSocket instead of polling indefinitely.
-- **7-day usage chart:** plots hourly Tapo power history with separate Chart.js lines for the total and each plug.
+- **Usage history chart:** plots selectable Tapo power history ranges with separate Chart.js lines for the total and each plug.
 - **Energy readings:** shows current load, daily energy, monthly energy, estimated UK cost, and runtime for P110/P115-style plugs that expose energy data.
 - **Spreadsheet export:** generates an Excel workbook with hourly, daily, monthly, and power-history sheets.
 - **Safe default bind:** listens on `127.0.0.1:8787` unless you explicitly change `FUSEBOX_BIND`.
@@ -82,7 +82,7 @@ Cost values are not exported yet. The costs shown in the UI are estimates calcul
 ```text
 GET  /health
 GET  /api/devices
-GET  /api/energy/history.json
+GET  /api/energy/history.json?range=7d
 GET  /api/energy/export.xlsx
 GET  /ws/devices
 POST /api/scan
@@ -114,7 +114,7 @@ Credentials are read from environment variables only. Do not commit `.env` files
 
 - The state file remembers discovered devices, but Fusebox does not automatically prune devices that have been removed from the LAN.
 - Energy readings depend on the device model and what the local Tapo API returns.
-- The 7-day usage chart loads Chart.js from jsDelivr because Fusebox does not have a frontend build pipeline yet.
+- The usage history chart loads Chart.js from jsDelivr because Fusebox does not have a frontend build pipeline yet.
 - Real control and energy verification needs access to the same LAN as the plugs.
 
 ## Licence
