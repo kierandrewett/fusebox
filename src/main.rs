@@ -1,5 +1,9 @@
 use std::collections::BTreeMap;
+use std::ffi::OsString;
+use std::fs;
+use std::io::ErrorKind;
 use std::net::SocketAddr;
+use std::path::{Path as FsPath, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -17,6 +21,9 @@ use tapoctl::{
 use tokio::sync::RwLock;
 use tokio::time::sleep;
 use tracing::{error, info, warn};
+use tracing_subscriber::EnvFilter;
+
+const STATE_VERSION: u32 = 1;
 
 #[derive(Debug, Clone)]
 struct Settings {
@@ -25,6 +32,7 @@ struct Settings {
     password: String,
     refresh_seconds: u64,
     discovery_timeout_seconds: u64,
+    state_path: PathBuf,
 }
 
 #[derive(Debug, Clone)]
@@ -33,6 +41,7 @@ struct AppState {
     devices: Arc<RwLock<BTreeMap<String, ManagedDevice>>>,
     discovery_timeout_seconds: u64,
     refresh_seconds: u64,
+    state_path: PathBuf,
 }
 
 #[derive(Debug, Clone)]
@@ -83,6 +92,12 @@ struct SetPowerRequest {
     on: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PersistedState {
+    version: u32,
+    devices: BTreeMap<String, DeviceConfig>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 struct ErrorResponse {
     error: ApiErrorBody,
@@ -98,10 +113,14 @@ struct AppError(anyhow::Error);
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt::init();
+    init_logging();
 
     let settings = Settings::from_env()?;
     let state = AppState::new(&settings);
+
+    if let Err(error) = load_persisted_state(&state).await {
+        warn!(%error, path = %state.state_path.display(), "failed to load persisted state");
+    }
 
     if let Err(error) = scan_and_refresh(&state).await {
         warn!(%error, "initial scan failed");
@@ -129,6 +148,12 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+fn init_logging() {
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+
+    tracing_subscriber::fmt().with_env_filter(filter).init();
+}
+
 impl Settings {
     fn from_env() -> Result<Self> {
         let bind_address = std::env::var("FUSEBOX_BIND")
@@ -139,6 +164,8 @@ impl Settings {
         let password = required_env("TAPO_PASSWORD")?;
         let refresh_seconds = optional_u64_env("FUSEBOX_REFRESH_SECONDS", 10)?;
         let discovery_timeout_seconds = optional_u64_env("FUSEBOX_DISCOVERY_TIMEOUT_SECONDS", 5)?;
+        let state_path = optional_path_env("FUSEBOX_STATE_PATH")
+            .unwrap_or(default_state_path().context("failed to resolve default state path")?);
 
         if !(1..=60).contains(&discovery_timeout_seconds) {
             return Err(anyhow!(
@@ -152,6 +179,7 @@ impl Settings {
             password,
             refresh_seconds,
             discovery_timeout_seconds,
+            state_path,
         })
     }
 }
@@ -168,6 +196,7 @@ impl AppState {
             devices: Arc::new(RwLock::new(BTreeMap::new())),
             discovery_timeout_seconds: settings.discovery_timeout_seconds,
             refresh_seconds: settings.refresh_seconds,
+            state_path: settings.state_path.clone(),
         }
     }
 }
@@ -300,10 +329,17 @@ async fn monitor_devices(state: AppState) {
 }
 
 async fn scan_and_refresh(state: &AppState) -> Result<()> {
-    let discovered = state
+    let discovered = match state
         .controller
         .discover(&[], &[], state.discovery_timeout_seconds)
-        .await?;
+        .await
+    {
+        Ok(discovered) => discovered,
+        Err(error) => {
+            refresh_all_devices(state).await;
+            return Err(error);
+        }
+    };
     let existing_config = existing_config(state).await;
     let candidates = discovery_add_candidates(&existing_config, &discovered);
 
@@ -311,25 +347,125 @@ async fn scan_and_refresh(state: &AppState) -> Result<()> {
         let mut devices = state.devices.write().await;
 
         for candidate in candidates {
+            let config = DeviceConfig {
+                ip: candidate.ip,
+                model: candidate.model,
+            };
+
             devices.insert(
                 candidate.name.clone(),
-                ManagedDevice {
-                    name: candidate.name,
-                    config: DeviceConfig {
-                        ip: candidate.ip,
-                        model: candidate.model,
-                    },
-                    snapshot: None,
-                    last_error: None,
-                    discovered_at_ms: now_ms(),
-                    updated_at_ms: None,
-                },
+                managed_device_from_config(candidate.name, config),
             );
         }
     }
 
+    save_persisted_state(state)
+        .await
+        .with_context(|| format!("failed to save state to {}", state.state_path.display()))?;
     refresh_all_devices(state).await;
     Ok(())
+}
+
+async fn load_persisted_state(state: &AppState) -> Result<()> {
+    let contents = match fs::read_to_string(&state.state_path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == ErrorKind::NotFound => {
+            info!(path = %state.state_path.display(), "no persisted state found");
+            return Ok(());
+        }
+        Err(error) => return Err(error).context("failed to read persisted state"),
+    };
+
+    let persisted: PersistedState =
+        serde_json::from_str(&contents).context("failed to parse persisted state")?;
+
+    if persisted.version != STATE_VERSION {
+        return Err(anyhow!(
+            "unsupported state version {}; expected {}",
+            persisted.version,
+            STATE_VERSION,
+        ));
+    }
+
+    let loaded_count = persisted.devices.len();
+    let mut devices = state.devices.write().await;
+
+    for (name, config) in persisted.devices {
+        devices.insert(name.clone(), managed_device_from_config(name, config));
+    }
+
+    info!(loaded_count, path = %state.state_path.display(), "loaded persisted devices");
+    Ok(())
+}
+
+async fn save_persisted_state(state: &AppState) -> Result<()> {
+    let persisted = {
+        let devices = state.devices.read().await;
+
+        PersistedState {
+            version: STATE_VERSION,
+            devices: devices
+                .iter()
+                .map(|(name, device)| (name.clone(), device.config.clone()))
+                .collect(),
+        }
+    };
+
+    write_json_atomically(&state.state_path, &persisted)
+}
+
+fn managed_device_from_config(name: String, config: DeviceConfig) -> ManagedDevice {
+    ManagedDevice {
+        name,
+        config,
+        snapshot: None,
+        last_error: None,
+        discovered_at_ms: now_ms(),
+        updated_at_ms: None,
+    }
+}
+
+fn write_json_atomically<T>(path: &FsPath, value: &T) -> Result<()>
+where
+    T: Serialize,
+{
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create state directory {}", parent.display()))?;
+    }
+
+    let temp_path = temporary_path_for(path)?;
+    let mut contents = serde_json::to_string_pretty(value).context("failed to serialize state")?;
+    contents.push('\n');
+
+    fs::write(&temp_path, contents).with_context(|| {
+        format!(
+            "failed to write temporary state file {}",
+            temp_path.display()
+        )
+    })?;
+    fs::rename(&temp_path, path).with_context(|| {
+        format!(
+            "failed to move temporary state file {} to {}",
+            temp_path.display(),
+            path.display(),
+        )
+    })?;
+
+    Ok(())
+}
+
+fn temporary_path_for(path: &FsPath) -> Result<PathBuf> {
+    let file_name = path
+        .file_name()
+        .ok_or_else(|| anyhow!("state path must include a file name"))?;
+    let mut temporary_name = OsString::from(file_name);
+    temporary_name.push(".tmp");
+
+    Ok(path.with_file_name(temporary_name))
 }
 
 async fn refresh_all_devices(state: &AppState) {
@@ -425,6 +561,34 @@ fn optional_u64_env(name: &str, default: u64) -> Result<u64> {
         Err(std::env::VarError::NotPresent) => Ok(default),
         Err(error) => Err(error).with_context(|| format!("failed to read {name}")),
     }
+}
+
+fn optional_path_env(name: &str) -> Option<PathBuf> {
+    match std::env::var_os(name) {
+        Some(value) if value.is_empty() => None,
+        Some(value) => Some(PathBuf::from(value)),
+        None => None,
+    }
+}
+
+fn default_state_path() -> Result<PathBuf> {
+    if let Some(config_home) = std::env::var_os("XDG_CONFIG_HOME").filter(|value| !value.is_empty())
+    {
+        return Ok(PathBuf::from(config_home)
+            .join("fusebox")
+            .join("state.json"));
+    }
+
+    if let Some(home) = std::env::var_os("HOME").filter(|value| !value.is_empty()) {
+        return Ok(PathBuf::from(home)
+            .join(".config")
+            .join("fusebox")
+            .join("state.json"));
+    }
+
+    Err(anyhow!(
+        "HOME or XDG_CONFIG_HOME must be set, or set FUSEBOX_STATE_PATH explicitly",
+    ))
 }
 
 fn now_ms() -> u128 {
@@ -986,5 +1150,59 @@ mod tests {
         assert_eq!(view.nickname, "Lights");
         assert_eq!(view.device_on, Some(true));
         assert_eq!(view.on_time_seconds, Some(120));
+    }
+
+    #[tokio::test]
+    async fn saves_and_loads_persisted_device_configs() {
+        let state_path = test_state_path("roundtrip");
+        let settings = Settings {
+            bind_address: "127.0.0.1:8787".parse().unwrap(),
+            username: "dummy@example.com".to_string(),
+            password: "dummy-password".to_string(),
+            refresh_seconds: 10,
+            discovery_timeout_seconds: 5,
+            state_path: state_path.clone(),
+        };
+        let state = AppState::new(&settings);
+
+        {
+            let mut devices = state.devices.write().await;
+            devices.insert(
+                "lights".to_string(),
+                managed_device_from_config(
+                    "lights".to_string(),
+                    DeviceConfig {
+                        ip: "192.168.0.40".parse().unwrap(),
+                        model: DeviceModel::P110,
+                    },
+                ),
+            );
+        }
+
+        save_persisted_state(&state).await.unwrap();
+
+        let contents = fs::read_to_string(&state_path).unwrap();
+        assert!(contents.contains("lights"));
+        assert!(!contents.contains("dummy-password"));
+
+        let reloaded_state = AppState::new(&settings);
+        load_persisted_state(&reloaded_state).await.unwrap();
+
+        let devices = reloaded_state.devices.read().await;
+        let loaded = devices.get("lights").unwrap();
+
+        assert_eq!(loaded.config.ip.to_string(), "192.168.0.40");
+        assert_eq!(loaded.config.model, DeviceModel::P110);
+        assert!(loaded.snapshot.is_none());
+
+        let _ = fs::remove_file(state_path);
+    }
+
+    fn test_state_path(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "fusebox-{name}-{}-{}.json",
+            std::process::id(),
+            now_ms(),
+        ))
     }
 }
