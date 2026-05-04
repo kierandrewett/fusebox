@@ -233,6 +233,10 @@ Credentials are read from environment variables only. Do not commit `.env` files
 
 - `/assets/switch.wav`: `Switch Light 06.wav` by tbrook, from <https://freesound.org/s/348224/>, licensed under Creative Commons 0.
 
+## Related Projects
+
+- [tapoctl](https://github.com/kierandrewett/tapoctl): Rust CLI and library for discovering, reading, and controlling Tapo plugs on the local network.
+
 ## Licence
 
-No licence has been set yet.
+Licensed under the Mozilla Public License Version 2.0. See [LICENSE](LICENSE).
