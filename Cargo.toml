@@ -5,7 +5,7 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1.0.102"
-axum = "0.8.9"
+axum = { version = "0.8.9", features = ["ws"] }
 chrono = { version = "0.4.42", features = ["clock"], default-features = false }
 rust_xlsxwriter = "0.94.0"
 serde = { version = "1.0.228", features = ["derive"] }

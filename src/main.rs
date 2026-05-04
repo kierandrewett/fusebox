@@ -8,6 +8,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow};
+use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, State};
 use axum::http::{StatusCode, header};
 use axum::response::{Html, IntoResponse, Response};
@@ -21,7 +22,7 @@ use tapoctl::{
     Config as TapoConfig, DeviceConfig, DeviceModel, DeviceSnapshot, TapoController,
     TapoCredentials, discovery_add_candidates,
 };
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::{Mutex, RwLock, watch};
 use tokio::time::sleep;
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
@@ -47,6 +48,7 @@ struct AppState {
     credentials: TapoCredentials,
     devices: Arc<RwLock<BTreeMap<String, ManagedDevice>>>,
     device_locks: Arc<RwLock<BTreeMap<IpAddr, Arc<Mutex<()>>>>>,
+    device_events: watch::Sender<DeviceListResponse>,
     discovery_timeout_seconds: u64,
     refresh_seconds: u64,
     scan_seconds: u64,
@@ -187,6 +189,7 @@ async fn main() -> Result<()> {
     if let Err(error) = load_persisted_state(&state).await {
         warn!(%error, path = %state.state_path.display(), "failed to load persisted state");
     }
+    publish_device_list(&state, None).await;
 
     tokio::spawn(initial_refresh_devices(state.clone()));
     tokio::spawn(monitor_devices(state.clone()));
@@ -198,6 +201,7 @@ async fn main() -> Result<()> {
         .route("/health", get(health))
         .route("/api/devices", get(list_devices))
         .route("/api/energy/export.xlsx", get(export_energy_workbook))
+        .route("/ws/devices", get(devices_websocket))
         .route("/api/scan", post(scan_devices))
         .route("/api/devices/{name}/toggle", post(toggle_device))
         .route("/api/devices/{name}/power", post(set_device_power))
@@ -275,12 +279,19 @@ impl AppState {
             password: settings.password.clone(),
         };
         let controller = TapoController::new(credentials.clone());
+        let (device_events, _device_event_receiver) = watch::channel(DeviceListResponse {
+            devices: Vec::new(),
+            updated_at_ms: now_ms(),
+            energy_price_pence_per_kwh: settings.energy_price_pence_per_kwh,
+            scan_error: None,
+        });
 
         Self {
             controller,
             credentials,
             devices: Arc::new(RwLock::new(BTreeMap::new())),
             device_locks: Arc::new(RwLock::new(BTreeMap::new())),
+            device_events,
             discovery_timeout_seconds: settings.discovery_timeout_seconds,
             refresh_seconds: settings.refresh_seconds,
             scan_seconds: settings.scan_seconds,
@@ -366,12 +377,7 @@ async fn health() -> Json<serde_json::Value> {
 }
 
 async fn list_devices(State(state): State<AppState>) -> Json<DeviceListResponse> {
-    Json(DeviceListResponse {
-        devices: device_views(&state).await,
-        updated_at_ms: now_ms(),
-        energy_price_pence_per_kwh: state.energy_price_pence_per_kwh,
-        scan_error: None,
-    })
+    Json(device_list_response(&state, None).await)
 }
 
 async fn scan_devices(State(state): State<AppState>) -> Json<DeviceListResponse> {
@@ -380,12 +386,55 @@ async fn scan_devices(State(state): State<AppState>) -> Json<DeviceListResponse>
         Err(error) => Some(error.to_string()),
     };
 
-    Json(DeviceListResponse {
-        devices: device_views(&state).await,
-        updated_at_ms: now_ms(),
-        energy_price_pence_per_kwh: state.energy_price_pence_per_kwh,
-        scan_error,
-    })
+    let response = device_list_response(&state, scan_error).await;
+    publish_device_list_response(&state, response.clone());
+
+    Json(response)
+}
+
+async fn devices_websocket(State(state): State<AppState>, websocket: WebSocketUpgrade) -> Response {
+    websocket.on_upgrade(|socket| stream_device_events(socket, state))
+}
+
+async fn stream_device_events(mut socket: WebSocket, state: AppState) {
+    let mut receiver = state.device_events.subscribe();
+
+    if send_device_event(&mut socket, device_list_response(&state, None).await)
+        .await
+        .is_err()
+    {
+        return;
+    }
+
+    loop {
+        tokio::select! {
+            changed = receiver.changed() => {
+                if changed.is_err() {
+                    return;
+                }
+
+                let response = receiver.borrow().clone();
+                if send_device_event(&mut socket, response).await.is_err() {
+                    return;
+                }
+            }
+            message = socket.recv() => {
+                match message {
+                    Some(Ok(Message::Close(_))) | None => return,
+                    Some(Ok(_message)) => {}
+                    Some(Err(_error)) => return,
+                }
+            }
+        }
+    }
+}
+
+async fn send_device_event(socket: &mut WebSocket, response: DeviceListResponse) -> Result<()> {
+    let payload = serde_json::to_string(&response).context("failed to serialize device event")?;
+    socket
+        .send(Message::Text(payload.into()))
+        .await
+        .context("failed to send device event")
 }
 
 async fn export_energy_workbook(State(state): State<AppState>) -> Result<Response, AppError> {
@@ -505,6 +554,11 @@ async fn discover_devices(state: &AppState) -> Result<()> {
     }
 
     info!(candidate_count, "discovery completed");
+
+    if candidate_count > 0 {
+        publish_device_list(state, None).await;
+    }
+
     Ok(())
 }
 
@@ -652,22 +706,30 @@ async fn update_device_snapshot(
     snapshot: DeviceSnapshot,
     last_error: Option<String>,
 ) {
-    let mut devices = state.devices.write().await;
+    {
+        let mut devices = state.devices.write().await;
 
-    if let Some(device) = devices.get_mut(name) {
-        device.snapshot = Some(snapshot);
-        device.last_error = last_error;
-        device.updated_at_ms = Some(now_ms());
+        if let Some(device) = devices.get_mut(name) {
+            device.snapshot = Some(snapshot);
+            device.last_error = last_error;
+            device.updated_at_ms = Some(now_ms());
+        }
     }
+
+    publish_device_list(state, None).await;
 }
 
 async fn update_device_error(state: &AppState, name: &str, error: String) {
-    let mut devices = state.devices.write().await;
+    {
+        let mut devices = state.devices.write().await;
 
-    if let Some(device) = devices.get_mut(name) {
-        device.last_error = Some(error);
-        device.updated_at_ms = Some(now_ms());
+        if let Some(device) = devices.get_mut(name) {
+            device.last_error = Some(error);
+            device.updated_at_ms = Some(now_ms());
+        }
     }
+
+    publish_device_list(state, None).await;
 }
 
 async fn existing_config(state: &AppState) -> TapoConfig {
@@ -689,6 +751,24 @@ async fn device_views(state: &AppState) -> Vec<DeviceView> {
         .values()
         .map(|device| device.view(state.energy_price_pence_per_kwh))
         .collect()
+}
+
+async fn device_list_response(state: &AppState, scan_error: Option<String>) -> DeviceListResponse {
+    DeviceListResponse {
+        devices: device_views(state).await,
+        updated_at_ms: now_ms(),
+        energy_price_pence_per_kwh: state.energy_price_pence_per_kwh,
+        scan_error,
+    }
+}
+
+async fn publish_device_list(state: &AppState, scan_error: Option<String>) {
+    let response = device_list_response(state, scan_error).await;
+    publish_device_list_response(state, response);
+}
+
+fn publish_device_list_response(state: &AppState, response: DeviceListResponse) {
+    let _ = state.device_events.send(response);
 }
 
 async fn get_device_config(state: &AppState, name: &str) -> Result<DeviceConfig> {
@@ -1703,8 +1783,10 @@ const INDEX_HTML: &str = r##"<!doctype html>
         const todayEnergyEl = document.querySelector("#today-energy");
         const todayCostEl = document.querySelector("#today-cost");
         const noticeEl = document.querySelector("#notice");
-        const devicePollMs = 500;
+        const deviceStreamReconnectMs = 2000;
         let deviceRequestInFlight = false;
+        let deviceSocket = null;
+        let deviceSocketReconnect = null;
 
         syncThemeButton();
 
@@ -1750,6 +1832,44 @@ const INDEX_HTML: &str = r##"<!doctype html>
             } finally {
                 deviceRequestInFlight = false;
             }
+        }
+
+        function connectDeviceStream() {
+            if (!("WebSocket" in window) || deviceSocket !== null) return;
+
+            const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+            const socket = new WebSocket(`${protocol}//${window.location.host}/ws/devices`);
+            deviceSocket = socket;
+
+            socket.addEventListener("message", (event) => {
+                try {
+                    const payload = JSON.parse(event.data);
+                    renderDevices(payload.devices ?? []);
+                    renderNotice(payload.scan_error);
+                } catch (_error) {
+                    renderNotice("Live device update was not valid JSON.");
+                }
+            });
+
+            socket.addEventListener("close", () => {
+                if (deviceSocket !== socket) return;
+
+                deviceSocket = null;
+                scheduleDeviceStreamReconnect();
+            });
+
+            socket.addEventListener("error", () => {
+                socket.close();
+            });
+        }
+
+        function scheduleDeviceStreamReconnect() {
+            if (deviceSocketReconnect !== null) return;
+
+            deviceSocketReconnect = window.setTimeout(() => {
+                deviceSocketReconnect = null;
+                connectDeviceStream();
+            }, deviceStreamReconnectMs);
         }
 
         async function requestJson(url, options) {
@@ -1901,7 +2021,7 @@ const INDEX_HTML: &str = r##"<!doctype html>
         }
 
         loadDevices();
-        setInterval(loadDevices, devicePollMs);
+        connectDeviceStream();
     </script>
 </body>
 </html>

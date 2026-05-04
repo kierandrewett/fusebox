@@ -1,12 +1,13 @@
 # Fusebox
 
-Local web control board for Tapo P110 plugs, with LAN discovery, live state polling, energy readings, and a fusebox-style browser UI.
+Local web control board for Tapo P110 plugs, with LAN discovery, WebSocket live updates, energy readings, and a fusebox-style browser UI.
 
 ## Features
 
 - **LAN discovery:** scans the local network for supported Tapo plugs using `tapoctl` discovery.
 - **Remembered devices:** saves discovered device configs to disk and reloads them on the next start.
 - **Local control:** toggles plugs from the browser through the local Tapo API.
+- **Live updates:** streams device snapshots to the browser over WebSocket instead of polling indefinitely.
 - **Energy readings:** shows current load, daily energy, monthly energy, estimated UK cost, and runtime for P110/P115-style plugs that expose energy data.
 - **Spreadsheet export:** generates an Excel workbook with hourly, daily, monthly, and power-history sheets.
 - **Safe default bind:** listens on `127.0.0.1:8787` unless you explicitly change `FUSEBOX_BIND`.
@@ -81,6 +82,7 @@ Cost values are not exported yet. The costs shown in the UI are estimates calcul
 GET  /health
 GET  /api/devices
 GET  /api/energy/export.xlsx
+GET  /ws/devices
 POST /api/scan
 POST /api/devices/{name}/toggle
 POST /api/devices/{name}/power
