@@ -21,7 +21,8 @@ use serde::{Deserialize, Serialize};
 use tapo::{ApiClient, requests::EnergyDataInterval, requests::PowerDataInterval};
 use tapoctl::{
     Config as TapoConfig, DeviceConfig, DeviceModel, DeviceSnapshot, TapoController,
-    TapoCredentials, discovery_add_candidates,
+    TapoCredentials, automatic_discovery_targets, discovery_add_candidates,
+    discovery_scan_targets_with_auto,
 };
 use tokio::sync::{Mutex, RwLock, watch};
 use tokio::time::sleep;
@@ -590,9 +591,27 @@ async fn scan_and_refresh(state: &AppState) -> Result<()> {
 }
 
 async fn discover_devices(state: &AppState) -> Result<()> {
+    let auto_targets = match automatic_discovery_targets() {
+        Ok(targets) => targets,
+        Err(error) => {
+            warn!(%error, "failed to inspect local IPv4 networks for discovery targets");
+            Vec::new()
+        }
+    };
+    let targets = discovery_scan_targets_with_auto(&[], &[], auto_targets)?;
+
+    info!(target_count = targets.len(), "discovery targets selected");
+    for target in &targets {
+        info!(
+            requested = %target.requested,
+            scan_address = %target.scan_address,
+            "discovery target selected",
+        );
+    }
+
     let discovered = state
         .controller
-        .discover(&[], &[], state.discovery_timeout_seconds)
+        .discover_targets(&targets, state.discovery_timeout_seconds)
         .await?;
     let existing_config = existing_config(state).await;
     let candidates = discovery_add_candidates(&existing_config, &discovered);
