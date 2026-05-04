@@ -84,6 +84,60 @@ For full LAN discovery on a Linux homelab host, use one of these approaches:
 - **Macvlan:** give Fusebox its own LAN IP and also attach it to `intranet` for Caddy. This keeps Caddy service-name routing and gives Fusebox first-class LAN presence, but it is more fiddly: you need a macvlan parent interface, a LAN IP range, and often a host shim if the homelab host itself needs to talk to the container.
 - **Bridge plus remembered devices:** keep the `intranet` example and rely on direct plug control once devices are known. This is the simplest option if discovery is not essential after initial setup.
 
+### Macvlan plus private Caddy proxy
+
+Use this when Fusebox needs proper LAN discovery and also needs to stay reachable by a Caddy container on the private `intranet` network.
+
+Pick an unused LAN IP for Fusebox and find the host LAN interface:
+
+```bash
+ip route get 192.168.0.1
+```
+
+Create a writable state directory for the container user:
+
+```bash
+sudo install -d -o 10001 -g 10001 /srv/fusebox-data
+```
+
+Add the macvlan values to `.env`:
+
+```env
+FUSEBOX_DATA_DIR=/srv/fusebox-data
+FUSEBOX_INTRANET_IP=10.10.0.30
+FUSEBOX_DISCOVERY_TARGETS=192.168.0.0/24
+FUSEBOX_LAN_PARENT=enp42s0
+FUSEBOX_LAN_IP=192.168.0.50
+FUSEBOX_LAN_SUBNET=192.168.0.0/24
+FUSEBOX_LAN_GATEWAY=192.168.0.1
+FUSEBOX_LAN_IP_RANGE=192.168.0.48/28
+```
+
+Use the macvlan Compose file:
+
+```bash
+docker network create intranet
+cp compose.macvlan.example.yml compose.yml
+docker compose up --build
+```
+
+The service joins both networks:
+
+- `tapo_lan`: macvlan network for discovery and direct LAN access to Tapo plugs.
+- `intranet`: private Docker network for Caddy to proxy to `fusebox:8787`.
+
+The example binds Fusebox to `FUSEBOX_INTRANET_IP:8787`, not `0.0.0.0`, so the web UI stays on the private Docker network instead of also listening on the macvlan LAN IP. Pick an unused `intranet` IP from that Docker network's subnet.
+
+Keep the Caddy route unchanged:
+
+```caddyfile
+fuse.drewett.dev {
+  reverse_proxy fusebox:8787
+}
+```
+
+Macvlan usually prevents the host itself from reaching the container's LAN IP unless you add a host-side macvlan shim. Caddy does not need that shim when it also shares the `intranet` network with Fusebox.
+
 ## Environment Variables
 
 | Variable | Description | Required | Default |

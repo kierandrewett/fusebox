@@ -1,0 +1,43 @@
+services:
+  fusebox:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: fusebox:local
+    init: true
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      FUSEBOX_BIND: ${FUSEBOX_INTRANET_IP:?set FUSEBOX_INTRANET_IP to an unused intranet address}:8787
+      FUSEBOX_STATE_PATH: /data/state.json
+      FUSEBOX_DISCOVERY_TARGETS: ${FUSEBOX_DISCOVERY_TARGETS:-192.168.0.0/24}
+      RUST_LOG: info
+    volumes:
+      - ${FUSEBOX_DATA_DIR:-./fusebox-data}:/data
+    networks:
+      intranet:
+        ipv4_address: ${FUSEBOX_INTRANET_IP:?set FUSEBOX_INTRANET_IP to an unused intranet address}
+      tapo_lan:
+        ipv4_address: ${FUSEBOX_LAN_IP:?set FUSEBOX_LAN_IP to an unused LAN address}
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://$${FUSEBOX_BIND}/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+networks:
+  intranet:
+    external: true
+
+  tapo_lan:
+    driver: macvlan
+    driver_opts:
+      parent: ${FUSEBOX_LAN_PARENT:?set FUSEBOX_LAN_PARENT to the host LAN interface}
+    ipam:
+      config:
+        - subnet: ${FUSEBOX_LAN_SUBNET:-192.168.0.0/24}
+          gateway: ${FUSEBOX_LAN_GATEWAY:-192.168.0.1}
+          ip_range: ${FUSEBOX_LAN_IP_RANGE:-192.168.0.48/28}
