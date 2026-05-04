@@ -2422,21 +2422,26 @@ const INDEX_HTML: &str = r##"<!doctype html>
                     const wasOn = button.dataset.on === "true";
                     const nextIsOn = !wasOn;
 
-                    playSwitchClick(nextIsOn);
                     button.disabled = true;
                     button.dataset.on = String(nextIsOn);
                     button.setAttribute("aria-pressed", String(nextIsOn));
                     button.classList.add("is-switching");
+                    let toggleSucceeded = false;
+                    prepareSwitchAudio();
 
                     try {
                         await requestJson(`/api/devices/${encodeURIComponent(button.dataset.device)}/toggle`, { method: "POST" });
                         await loadDevices();
+                        toggleSucceeded = true;
                     } catch (error) {
                         button.dataset.on = String(wasOn);
                         button.setAttribute("aria-pressed", String(wasOn));
                         renderNotice(error.message);
                     } finally {
                         button.disabled = false;
+                        if (toggleSucceeded) {
+                            playSwitchClick(nextIsOn);
+                        }
                         window.setTimeout(() => {
                             button.classList.remove("is-switching");
                         }, 180);
@@ -2448,8 +2453,20 @@ const INDEX_HTML: &str = r##"<!doctype html>
         }
 
         function playSwitchClick(nextIsOn) {
+            if (!prepareSwitchAudio()) return;
+
+            void loadSwitchAudioBuffer()
+                .then((buffer) => {
+                    playSwitchSample(buffer, nextIsOn);
+                })
+                .catch(() => {
+                    // Audio feedback is progressive enhancement; the toggle action should stay reliable without it.
+                });
+        }
+
+        function prepareSwitchAudio() {
             const AudioContextClass = window.AudioContext ?? window.webkitAudioContext;
-            if (!AudioContextClass) return;
+            if (!AudioContextClass) return false;
 
             try {
                 if (switchAudioContext === null) {
@@ -2461,14 +2478,14 @@ const INDEX_HTML: &str = r##"<!doctype html>
                 }
 
                 void loadSwitchAudioBuffer()
-                    .then((buffer) => {
-                        playSwitchSample(buffer, nextIsOn);
-                    })
                     .catch(() => {
                         // Audio feedback is progressive enhancement; the toggle action should stay reliable without it.
                     });
+
+                return true;
             } catch (_error) {
                 // Browsers can reject audio creation under stricter policies; the switch should still work.
+                return false;
             }
         }
 
