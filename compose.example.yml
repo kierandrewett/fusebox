@@ -7,7 +7,8 @@ services:
     init: true
     restart: unless-stopped
     env_file:
-      - .env
+      - path: .env
+        required: false
     environment:
       FUSEBOX_BIND: 0.0.0.0:8787
       FUSEBOX_STATE_PATH: /data/state.json

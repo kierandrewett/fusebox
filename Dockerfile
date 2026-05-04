@@ -17,13 +17,14 @@ RUN --mount=type=cache,target=/usr/local/cargo/git/db \
 
 FROM debian:bookworm-slim AS runtime
 
+ARG DEBIAN_FRONTEND=noninteractive
+
 RUN apt-get update && \
     apt-get install -y --no-install-recommends ca-certificates curl && \
     rm -rf /var/lib/apt/lists/*
 
-RUN groupadd --system --gid 10001 fusebox && \
+RUN groupadd --gid 10001 fusebox && \
     useradd \
-        --system \
         --uid 10001 \
         --gid fusebox \
         --home-dir /data \
