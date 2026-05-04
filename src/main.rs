@@ -8,6 +8,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow};
+use axum::body::Body;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, Query, State};
 use axum::http::{StatusCode, header};
@@ -29,6 +30,7 @@ use tracing_subscriber::EnvFilter;
 
 const STATE_VERSION: u32 = 1;
 const DEFAULT_ENERGY_PRICE_PENCE_PER_KWH: f64 = 27.03;
+const SWITCH_SOUND_BYTES: &[u8] = include_bytes!("../assets/348224__tbrook__switch-light-06.wav");
 
 #[derive(Debug, Clone)]
 struct Settings {
@@ -245,6 +247,7 @@ async fn main() -> Result<()> {
     let app = Router::new()
         .route("/", get(index))
         .route("/favicon.ico", get(favicon))
+        .route("/assets/switch.wav", get(switch_sound))
         .route("/health", get(health))
         .route("/api/devices", get(list_devices))
         .route("/api/energy/history.json", get(energy_history))
@@ -418,6 +421,15 @@ async fn index() -> Html<&'static str> {
 
 async fn favicon() -> StatusCode {
     StatusCode::NO_CONTENT
+}
+
+async fn switch_sound() -> Response {
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "audio/wav")
+        .header(header::CACHE_CONTROL, "public, max-age=31536000, immutable")
+        .body(Body::from(SWITCH_SOUND_BYTES))
+        .expect("static switch sound response should be valid")
 }
 
 async fn health() -> Json<serde_json::Value> {
@@ -2157,6 +2169,7 @@ const INDEX_HTML: &str = r##"<!doctype html>
         const usageRangeEl = document.querySelector("#usage-range");
         const usageRangeControlsEl = document.querySelector("#usage-range-controls");
         const deviceStreamReconnectMs = 2000;
+        const switchSoundUrl = "/assets/switch.wav";
         const chartPalette = ["#e5b75b", "#7bb7ff", "#f06b5c", "#c99cff", "#62d6d1", "#ff9d66", "#b6e36a", "#f38ad3"];
         const defaultHistoryRange = "7d";
         let selectedHistoryRange = defaultHistoryRange;
@@ -2166,6 +2179,7 @@ const INDEX_HTML: &str = r##"<!doctype html>
         let deviceSocket = null;
         let deviceSocketReconnect = null;
         let switchAudioContext = null;
+        let switchAudioBufferPromise = null;
 
         syncThemeButton();
         syncHistoryRangeButtons();
@@ -2387,69 +2401,52 @@ const INDEX_HTML: &str = r##"<!doctype html>
                     void switchAudioContext.resume();
                 }
 
-                const now = switchAudioContext.currentTime;
-                const primaryClickAt = nextIsOn ? now : now + 0.006;
-                const releaseClickAt = nextIsOn ? now + 0.028 : now + 0.022;
-
-                playSwitchClack(primaryClickAt, nextIsOn ? 165 : 135, 0.09);
-                playSwitchSnap(primaryClickAt, 0.018, 0.06);
-                playSwitchClack(releaseClickAt, nextIsOn ? 86 : 74, 0.045);
+                void loadSwitchAudioBuffer()
+                    .then((buffer) => {
+                        playSwitchSample(buffer, nextIsOn);
+                    })
+                    .catch(() => {
+                        // Audio feedback is progressive enhancement; the toggle action should stay reliable without it.
+                    });
             } catch (_error) {
                 // Browsers can reject audio creation under stricter policies; the switch should still work.
             }
         }
 
-        function playSwitchClack(startTime, frequency, volume) {
-            const oscillator = switchAudioContext.createOscillator();
-            const gain = switchAudioContext.createGain();
+        function loadSwitchAudioBuffer() {
+            if (switchAudioBufferPromise !== null) return switchAudioBufferPromise;
 
-            oscillator.type = "triangle";
-            oscillator.frequency.setValueAtTime(frequency, startTime);
-            oscillator.frequency.exponentialRampToValueAtTime(Math.max(20, frequency * 0.45), startTime + 0.026);
+            switchAudioBufferPromise = fetch(switchSoundUrl)
+                .then((response) => {
+                    if (!response.ok) {
+                        throw new Error(`Switch sound failed with status ${response.status}`);
+                    }
 
-            gain.gain.setValueAtTime(0.0001, startTime);
-            gain.gain.exponentialRampToValueAtTime(volume, startTime + 0.002);
-            gain.gain.exponentialRampToValueAtTime(0.0001, startTime + 0.034);
+                    return response.arrayBuffer();
+                })
+                .then((arrayBuffer) => switchAudioContext.decodeAudioData(arrayBuffer))
+                .catch((error) => {
+                    switchAudioBufferPromise = null;
+                    throw error;
+                });
 
-            oscillator.connect(gain);
-            gain.connect(switchAudioContext.destination);
-            oscillator.addEventListener("ended", () => {
-                oscillator.disconnect();
-                gain.disconnect();
-            }, { once: true });
-            oscillator.start(startTime);
-            oscillator.stop(startTime + 0.04);
+            return switchAudioBufferPromise;
         }
 
-        function playSwitchSnap(startTime, duration, volume) {
-            const sampleRate = switchAudioContext.sampleRate;
-            const frameCount = Math.max(1, Math.floor(sampleRate * duration));
-            const noiseBuffer = switchAudioContext.createBuffer(1, frameCount, sampleRate);
-            const noise = noiseBuffer.getChannelData(0);
-            const filter = switchAudioContext.createBiquadFilter();
-            const gain = switchAudioContext.createGain();
-
-            for (let index = 0; index < frameCount; index += 1) {
-                const envelope = 1 - (index / frameCount);
-                noise[index] = (Math.random() * 2 - 1) * envelope;
-            }
-
+        function playSwitchSample(buffer, nextIsOn) {
             const source = switchAudioContext.createBufferSource();
-            source.buffer = noiseBuffer;
-            filter.type = "bandpass";
-            filter.frequency.setValueAtTime(1800, startTime);
-            filter.Q.setValueAtTime(1.4, startTime);
+            const gain = switchAudioContext.createGain();
+            const startTime = switchAudioContext.currentTime;
+            const playbackRate = nextIsOn ? 1 : 0.68;
+            const volume = nextIsOn ? 0.86 : 0.78;
 
-            gain.gain.setValueAtTime(0.0001, startTime);
-            gain.gain.exponentialRampToValueAtTime(volume, startTime + 0.001);
-            gain.gain.exponentialRampToValueAtTime(0.0001, startTime + duration);
-
-            source.connect(filter);
-            filter.connect(gain);
+            source.buffer = buffer;
+            source.playbackRate.setValueAtTime(playbackRate, startTime);
+            gain.gain.setValueAtTime(volume, startTime);
+            source.connect(gain);
             gain.connect(switchAudioContext.destination);
             source.addEventListener("ended", () => {
                 source.disconnect();
-                filter.disconnect();
                 gain.disconnect();
             }, { once: true });
             source.start(startTime);

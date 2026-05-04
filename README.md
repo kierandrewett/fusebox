@@ -7,6 +7,7 @@ Local web control board for Tapo P110 plugs, with LAN discovery, WebSocket live 
 - **LAN discovery:** scans the local network for supported Tapo plugs using `tapoctl` discovery.
 - **Remembered devices:** saves discovered device configs to disk and reloads them on the next start.
 - **Local control:** toggles plugs from the browser through the local Tapo API.
+- **Sampled switch feedback:** plays a physical switch sample for browser toggles, with a lower-pitched OFF sound.
 - **Live updates:** streams device snapshots to the browser over WebSocket instead of polling indefinitely.
 - **Usage history chart:** plots selectable Tapo power history ranges with separate Chart.js lines for the total and each plug.
 - **Energy readings:** shows current load, daily energy, monthly energy, estimated UK cost, and runtime for P110/P115-style plugs that expose energy data.
@@ -116,6 +117,10 @@ Credentials are read from environment variables only. Do not commit `.env` files
 - Energy readings depend on the device model and what the local Tapo API returns.
 - The usage history chart loads Chart.js from jsDelivr because Fusebox does not have a frontend build pipeline yet.
 - Real control and energy verification needs access to the same LAN as the plugs.
+
+## Audio Credits
+
+- `/assets/switch.wav`: `Switch Light 06.wav` by tbrook, from <https://freesound.org/s/348224/>, licensed under Creative Commons 0.
 
 ## Licence
 
