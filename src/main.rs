@@ -20,7 +20,7 @@ use tapoctl::{
 };
 use tokio::sync::RwLock;
 use tokio::time::sleep;
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
 const STATE_VERSION: u32 = 1;
@@ -122,10 +122,7 @@ async fn main() -> Result<()> {
         warn!(%error, path = %state.state_path.display(), "failed to load persisted state");
     }
 
-    if let Err(error) = scan_and_refresh(&state).await {
-        warn!(%error, "initial scan failed");
-    }
-
+    tokio::spawn(initial_refresh_devices(state.clone()));
     tokio::spawn(monitor_devices(state.clone()));
 
     let app = Router::new()
@@ -322,47 +319,56 @@ async fn monitor_devices(state: AppState) {
     loop {
         sleep(Duration::from_secs(state.refresh_seconds)).await;
 
-        if let Err(error) = scan_and_refresh(&state).await {
-            error!(%error, "monitor pass failed");
-        }
+        refresh_all_devices(&state).await;
+    }
+}
+
+async fn initial_refresh_devices(state: AppState) {
+    refresh_all_devices(&state).await;
+
+    if let Err(error) = discover_devices(&state).await {
+        warn!(%error, "background discovery failed");
     }
 }
 
 async fn scan_and_refresh(state: &AppState) -> Result<()> {
-    let discovered = match state
+    discover_devices(state).await?;
+    refresh_all_devices(state).await;
+    Ok(())
+}
+
+async fn discover_devices(state: &AppState) -> Result<()> {
+    let discovered = state
         .controller
         .discover(&[], &[], state.discovery_timeout_seconds)
-        .await
-    {
-        Ok(discovered) => discovered,
-        Err(error) => {
-            refresh_all_devices(state).await;
-            return Err(error);
-        }
-    };
+        .await?;
     let existing_config = existing_config(state).await;
     let candidates = discovery_add_candidates(&existing_config, &discovered);
+    let candidate_count = candidates.len();
 
-    {
-        let mut devices = state.devices.write().await;
+    if candidate_count > 0 {
+        {
+            let mut devices = state.devices.write().await;
 
-        for candidate in candidates {
-            let config = DeviceConfig {
-                ip: candidate.ip,
-                model: candidate.model,
-            };
+            for candidate in candidates {
+                let config = DeviceConfig {
+                    ip: candidate.ip,
+                    model: candidate.model,
+                };
 
-            devices.insert(
-                candidate.name.clone(),
-                managed_device_from_config(candidate.name, config),
-            );
+                devices.insert(
+                    candidate.name.clone(),
+                    managed_device_from_config(candidate.name, config),
+                );
+            }
         }
+
+        save_persisted_state(state)
+            .await
+            .with_context(|| format!("failed to save state to {}", state.state_path.display()))?;
     }
 
-    save_persisted_state(state)
-        .await
-        .with_context(|| format!("failed to save state to {}", state.state_path.display()))?;
-    refresh_all_devices(state).await;
+    info!(candidate_count, "discovery completed");
     Ok(())
 }
 
