@@ -9,7 +9,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow};
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::{StatusCode, header};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
@@ -108,6 +108,9 @@ struct UsageHistoryResponse {
     totals: Vec<UsageHistoryPoint>,
     errors: Vec<UsageHistoryError>,
     updated_at_ms: u128,
+    range: &'static str,
+    range_label: &'static str,
+    interval: &'static str,
     start_date: String,
     end_date: String,
     unit: &'static str,
@@ -129,6 +132,21 @@ struct UsageHistoryPoint {
 struct UsageHistoryError {
     device_name: String,
     message: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct UsageHistoryQuery {
+    range: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct UsageHistoryRange {
+    key: &'static str,
+    label: &'static str,
+    interval_label: &'static str,
+    duration: ChronoDuration,
+    range_limit: ChronoDuration,
+    interval: PowerExportInterval,
 }
 
 #[derive(Debug, Clone)]
@@ -467,8 +485,11 @@ async fn send_device_event(socket: &mut WebSocket, response: DeviceListResponse)
         .context("failed to send device event")
 }
 
-async fn energy_history(State(state): State<AppState>) -> Json<UsageHistoryResponse> {
-    Json(build_usage_history(&state).await)
+async fn energy_history(
+    State(state): State<AppState>,
+    Query(query): Query<UsageHistoryQuery>,
+) -> Json<UsageHistoryResponse> {
+    Json(build_usage_history(&state, query.range.as_deref()).await)
 }
 
 async fn export_energy_workbook(State(state): State<AppState>) -> Result<Response, AppError> {
