@@ -2010,7 +2010,7 @@ const INDEX_HTML: &str = r##"<!doctype html>
         const usageEmptyEl = document.querySelector("#usage-empty");
         const usageRangeEl = document.querySelector("#usage-range");
         const deviceStreamReconnectMs = 2000;
-        const chartPalette = ["#66d18c", "#e5b75b", "#7bb7ff", "#f06b5c", "#c99cff", "#62d6d1"];
+        const chartPalette = ["#e5b75b", "#7bb7ff", "#f06b5c", "#c99cff", "#62d6d1", "#ff9d66", "#b6e36a", "#f38ad3"];
         let powerChart = null;
         let deviceRequestInFlight = false;
         let historyRequestInFlight = false;
@@ -2221,31 +2221,72 @@ const INDEX_HTML: &str = r##"<!doctype html>
                     void switchAudioContext.resume();
                 }
 
-                const oscillator = switchAudioContext.createOscillator();
-                const gain = switchAudioContext.createGain();
                 const now = switchAudioContext.currentTime;
-                const startFrequency = nextIsOn ? 190 : 140;
-                const endFrequency = nextIsOn ? 90 : 70;
+                const primaryClickAt = nextIsOn ? now : now + 0.006;
+                const releaseClickAt = nextIsOn ? now + 0.028 : now + 0.022;
 
-                oscillator.type = "square";
-                oscillator.frequency.setValueAtTime(startFrequency, now);
-                oscillator.frequency.exponentialRampToValueAtTime(endFrequency, now + 0.045);
-
-                gain.gain.setValueAtTime(0.0001, now);
-                gain.gain.exponentialRampToValueAtTime(0.045, now + 0.006);
-                gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.055);
-
-                oscillator.connect(gain);
-                gain.connect(switchAudioContext.destination);
-                oscillator.addEventListener("ended", () => {
-                    oscillator.disconnect();
-                    gain.disconnect();
-                }, { once: true });
-                oscillator.start(now);
-                oscillator.stop(now + 0.06);
+                playSwitchClack(primaryClickAt, nextIsOn ? 165 : 135, 0.09);
+                playSwitchSnap(primaryClickAt, 0.018, 0.06);
+                playSwitchClack(releaseClickAt, nextIsOn ? 86 : 74, 0.045);
             } catch (_error) {
                 // Browsers can reject audio creation under stricter policies; the switch should still work.
             }
+        }
+
+        function playSwitchClack(startTime, frequency, volume) {
+            const oscillator = switchAudioContext.createOscillator();
+            const gain = switchAudioContext.createGain();
+
+            oscillator.type = "triangle";
+            oscillator.frequency.setValueAtTime(frequency, startTime);
+            oscillator.frequency.exponentialRampToValueAtTime(Math.max(20, frequency * 0.45), startTime + 0.026);
+
+            gain.gain.setValueAtTime(0.0001, startTime);
+            gain.gain.exponentialRampToValueAtTime(volume, startTime + 0.002);
+            gain.gain.exponentialRampToValueAtTime(0.0001, startTime + 0.034);
+
+            oscillator.connect(gain);
+            gain.connect(switchAudioContext.destination);
+            oscillator.addEventListener("ended", () => {
+                oscillator.disconnect();
+                gain.disconnect();
+            }, { once: true });
+            oscillator.start(startTime);
+            oscillator.stop(startTime + 0.04);
+        }
+
+        function playSwitchSnap(startTime, duration, volume) {
+            const sampleRate = switchAudioContext.sampleRate;
+            const frameCount = Math.max(1, Math.floor(sampleRate * duration));
+            const noiseBuffer = switchAudioContext.createBuffer(1, frameCount, sampleRate);
+            const noise = noiseBuffer.getChannelData(0);
+            const filter = switchAudioContext.createBiquadFilter();
+            const gain = switchAudioContext.createGain();
+
+            for (let index = 0; index < frameCount; index += 1) {
+                const envelope = 1 - (index / frameCount);
+                noise[index] = (Math.random() * 2 - 1) * envelope;
+            }
+
+            const source = switchAudioContext.createBufferSource();
+            source.buffer = noiseBuffer;
+            filter.type = "bandpass";
+            filter.frequency.setValueAtTime(1800, startTime);
+            filter.Q.setValueAtTime(1.4, startTime);
+
+            gain.gain.setValueAtTime(0.0001, startTime);
+            gain.gain.exponentialRampToValueAtTime(volume, startTime + 0.001);
+            gain.gain.exponentialRampToValueAtTime(0.0001, startTime + duration);
+
+            source.connect(filter);
+            filter.connect(gain);
+            gain.connect(switchAudioContext.destination);
+            source.addEventListener("ended", () => {
+                source.disconnect();
+                filter.disconnect();
+                gain.disconnect();
+            }, { once: true });
+            source.start(startTime);
         }
 
         function renderUsageHistory(history) {
@@ -2358,6 +2399,7 @@ const INDEX_HTML: &str = r##"<!doctype html>
                         },
                         tooltip: {
                             callbacks: {
+                                title: (items) => items.length > 0 ? items[0].label : "",
                                 label: (context) => ` ${formatPower(context.parsed.y)}`,
                             },
                         },
@@ -2412,18 +2454,13 @@ const INDEX_HTML: &str = r##"<!doctype html>
             };
         }
 
-        function formatTimeLabel(timestampMs) {
-            return new Date(timestampMs).toLocaleTimeString([], {
-                hour: "2-digit",
-                minute: "2-digit",
-                second: "2-digit",
-            });
-        }
-
         function formatHistoryLabel(timestampMs) {
             return new Date(timestampMs).toLocaleString([], {
                 weekday: "short",
+                day: "2-digit",
+                month: "short",
                 hour: "2-digit",
+                minute: "2-digit",
             });
         }
 
