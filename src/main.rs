@@ -31,6 +31,7 @@ struct Settings {
     username: String,
     password: String,
     refresh_seconds: u64,
+    scan_seconds: u64,
     discovery_timeout_seconds: u64,
     state_path: PathBuf,
 }
@@ -41,6 +42,7 @@ struct AppState {
     devices: Arc<RwLock<BTreeMap<String, ManagedDevice>>>,
     discovery_timeout_seconds: u64,
     refresh_seconds: u64,
+    scan_seconds: u64,
     state_path: PathBuf,
 }
 
@@ -124,6 +126,7 @@ async fn main() -> Result<()> {
 
     tokio::spawn(initial_refresh_devices(state.clone()));
     tokio::spawn(monitor_devices(state.clone()));
+    tokio::spawn(scan_for_devices(state.clone()));
 
     let app = Router::new()
         .route("/", get(index))
@@ -160,6 +163,7 @@ impl Settings {
         let username = required_env("TAPO_USERNAME")?;
         let password = required_env("TAPO_PASSWORD")?;
         let refresh_seconds = optional_u64_env("FUSEBOX_REFRESH_SECONDS", 10)?;
+        let scan_seconds = optional_u64_env("FUSEBOX_SCAN_SECONDS", 60)?;
         let discovery_timeout_seconds = optional_u64_env("FUSEBOX_DISCOVERY_TIMEOUT_SECONDS", 5)?;
         let state_path = optional_path_env("FUSEBOX_STATE_PATH")
             .unwrap_or(default_state_path().context("failed to resolve default state path")?);
@@ -170,11 +174,16 @@ impl Settings {
             ));
         }
 
+        if !(10..=3600).contains(&scan_seconds) {
+            return Err(anyhow!("FUSEBOX_SCAN_SECONDS must be between 10 and 3600"));
+        }
+
         Ok(Self {
             bind_address,
             username,
             password,
             refresh_seconds,
+            scan_seconds,
             discovery_timeout_seconds,
             state_path,
         })
@@ -193,6 +202,7 @@ impl AppState {
             devices: Arc::new(RwLock::new(BTreeMap::new())),
             discovery_timeout_seconds: settings.discovery_timeout_seconds,
             refresh_seconds: settings.refresh_seconds,
+            scan_seconds: settings.scan_seconds,
             state_path: settings.state_path.clone(),
         }
     }
@@ -320,6 +330,16 @@ async fn monitor_devices(state: AppState) {
         sleep(Duration::from_secs(state.refresh_seconds)).await;
 
         refresh_all_devices(&state).await;
+    }
+}
+
+async fn scan_for_devices(state: AppState) {
+    loop {
+        sleep(Duration::from_secs(state.scan_seconds)).await;
+
+        if let Err(error) = discover_devices(&state).await {
+            warn!(%error, "periodic discovery failed");
+        }
     }
 }
 
@@ -630,14 +650,31 @@ const INDEX_HTML: &str = r##"<!doctype html>
             box-sizing: border-box;
         }
 
+        html {
+            min-height: 100%;
+            background: var(--wall);
+        }
+
         body {
+            position: relative;
             min-width: 320px;
+            min-height: 100svh;
             margin: 0;
             color: #f2ead7;
-            background:
-                radial-gradient(circle at top left, rgba(255, 214, 128, 0.13), transparent 32rem),
-                linear-gradient(135deg, #171512, var(--wall));
             font-family: ui-serif, Georgia, Cambria, "Times New Roman", serif;
+        }
+
+        body::before {
+            content: "";
+            position: fixed;
+            inset: 0;
+            z-index: -1;
+            background:
+                radial-gradient(circle at 8% 0%, rgba(255, 214, 128, 0.13), transparent 34rem),
+                radial-gradient(circle at 92% 18%, rgba(193, 155, 85, 0.07), transparent 38rem),
+                linear-gradient(135deg, #171512 0%, var(--wall) 54%, #14120f 100%);
+            background-repeat: no-repeat;
+            background-size: cover;
         }
 
         button {
@@ -645,42 +682,25 @@ const INDEX_HTML: &str = r##"<!doctype html>
         }
 
         .shell {
-            width: min(1180px, calc(100vw - 32px));
-            margin: 24px auto;
+            width: min(1200px, calc(100vw - 32px));
+            margin: 16px auto 32px;
         }
 
         .header {
             display: flex;
-            align-items: end;
+            align-items: center;
             justify-content: space-between;
             gap: 16px;
-            margin-bottom: 16px;
-        }
-
-        .eyebrow {
-            margin: 0 0 6px;
-            color: var(--brass);
-            font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-            font-size: 12px;
-            letter-spacing: 0.16em;
-            text-transform: uppercase;
+            margin-bottom: 12px;
         }
 
         h1 {
             margin: 0;
-            font-size: clamp(38px, 7vw, 86px);
-            line-height: 0.92;
-            letter-spacing: -0.06em;
+            color: #f3e9d1;
+            font-size: clamp(34px, 4vw, 62px);
+            line-height: 0.95;
+            letter-spacing: -0.045em;
             text-shadow: 0 3px 0 #000;
-        }
-
-        .subhead {
-            max-width: 560px;
-            margin: 10px 0 0;
-            color: #c8bda7;
-            font-family: ui-sans-serif, system-ui, sans-serif;
-            font-size: 14px;
-            line-height: 1.5;
         }
 
         .scan-button {
@@ -773,7 +793,8 @@ const INDEX_HTML: &str = r##"<!doctype html>
 
         .breaker-grid {
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+            grid-template-columns: repeat(auto-fill, minmax(220px, 280px));
+            justify-content: start;
             gap: 16px;
         }
 
@@ -946,17 +967,26 @@ const INDEX_HTML: &str = r##"<!doctype html>
                 grid-template-columns: 1fr;
                 display: grid;
             }
+
+            .shell {
+                width: min(100vw - 20px, 1200px);
+                margin-top: 10px;
+            }
+
+            .breaker-grid {
+                grid-template-columns: 1fr;
+            }
+
+            .scan-button {
+                width: 100%;
+            }
         }
     </style>
 </head>
 <body>
     <main class="shell">
         <header class="header">
-            <div>
-                <p class="eyebrow">Local Tapo control board</p>
-                <h1>Fusebox</h1>
-                <p class="subhead">Discovers supported Tapo plugs on the LAN, polls their state, reads energy data where the plug supports it, and lets you throw each breaker from this panel.</p>
-            </div>
+            <h1>Fusebox</h1>
             <button class="scan-button" id="scan" type="button">Scan now</button>
         </header>
 
@@ -979,6 +1009,8 @@ const INDEX_HTML: &str = r##"<!doctype html>
         const totalPowerEl = document.querySelector("#total-power");
         const todayEnergyEl = document.querySelector("#today-energy");
         const noticeEl = document.querySelector("#notice");
+        const devicePollMs = 500;
+        let deviceRequestInFlight = false;
 
         scanButton.addEventListener("click", async () => {
             scanButton.disabled = true;
@@ -996,12 +1028,18 @@ const INDEX_HTML: &str = r##"<!doctype html>
         });
 
         async function loadDevices() {
+            if (deviceRequestInFlight) return;
+
+            deviceRequestInFlight = true;
+
             try {
                 const payload = await requestJson("/api/devices");
                 renderDevices(payload.devices ?? []);
                 renderNotice(payload.scan_error);
             } catch (error) {
                 renderNotice(error.message);
+            } finally {
+                deviceRequestInFlight = false;
             }
         }
 
@@ -1112,7 +1150,7 @@ const INDEX_HTML: &str = r##"<!doctype html>
         }
 
         loadDevices();
-        setInterval(loadDevices, 3000);
+        setInterval(loadDevices, devicePollMs);
     </script>
 </body>
 </html>
@@ -1166,6 +1204,7 @@ mod tests {
             username: "dummy@example.com".to_string(),
             password: "dummy-password".to_string(),
             refresh_seconds: 10,
+            scan_seconds: 60,
             discovery_timeout_seconds: 5,
             state_path: state_path.clone(),
         };

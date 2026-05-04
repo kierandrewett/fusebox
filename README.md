@@ -34,6 +34,7 @@ Open [http://127.0.0.1:8787](http://127.0.0.1:8787).
 | `TAPO_PASSWORD` | Tapo cloud account password used for local device authentication. | Yes | none |
 | `FUSEBOX_BIND` | Socket address the web server listens on. Keep this local unless you add authentication. | No | `127.0.0.1:8787` |
 | `FUSEBOX_REFRESH_SECONDS` | Poll interval for discovered devices. | No | `10` |
+| `FUSEBOX_SCAN_SECONDS` | Background LAN discovery interval. Manual scan is still available in the UI. | No | `60` |
 | `FUSEBOX_DISCOVERY_TIMEOUT_SECONDS` | Discovery timeout per scan, from 1 to 60 seconds. | No | `5` |
 | `FUSEBOX_STATE_PATH` | JSON file used to remember discovered device configs. | No | `$XDG_CONFIG_HOME/fusebox/state.json` or `$HOME/.config/fusebox/state.json` |
 | `RUST_LOG` | Logging filter. Fusebox defaults to `info` when this is unset. | No | `info` |
