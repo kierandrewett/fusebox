@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs;
+use std::future::Future;
 use std::io::ErrorKind;
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path as FsPath, PathBuf};
@@ -32,6 +33,8 @@ use tracing_subscriber::EnvFilter;
 const STATE_VERSION: u32 = 1;
 const DEFAULT_ENERGY_PRICE_PENCE_PER_KWH: f64 = 27.03;
 const ALL_TIME_USAGE_START_YEAR: i32 = 2020;
+const TAPO_HANDSHAKE_RETRY_ATTEMPTS: usize = 3;
+const TAPO_HANDSHAKE_RETRY_DELAY: Duration = Duration::from_millis(350);
 const SWITCH_SOUND_BYTES: &[u8] = include_bytes!("../assets/348224__tbrook__switch-light-06.wav");
 
 #[derive(Debug, Clone)]
@@ -559,7 +562,14 @@ async fn toggle_device(
     let device = get_device_config(&state, &name).await?;
     let operation_lock = device_operation_lock(&state, &device).await;
     let _operation_guard = operation_lock.lock().await;
-    let snapshot = state.controller.toggle_power(&device).await?;
+    let current_snapshot = retry_tapo_handshake(|| state.controller.read_device(&device)).await?;
+    retry_tapo_handshake(|| {
+        state
+            .controller
+            .set_power(&device, !current_snapshot.device_on)
+    })
+    .await?;
+    let snapshot = retry_tapo_handshake(|| state.controller.read_device(&device)).await?;
     update_device_snapshot(&state, &name, snapshot, None).await;
 
     get_device_view(&state, &name)
@@ -576,8 +586,8 @@ async fn set_device_power(
     let device = get_device_config(&state, &name).await?;
     let operation_lock = device_operation_lock(&state, &device).await;
     let _operation_guard = operation_lock.lock().await;
-    state.controller.set_power(&device, request.on).await?;
-    let snapshot = state.controller.read_device(&device).await?;
+    retry_tapo_handshake(|| state.controller.set_power(&device, request.on)).await?;
+    let snapshot = retry_tapo_handshake(|| state.controller.read_device(&device)).await?;
     update_device_snapshot(&state, &name, snapshot, None).await;
 
     get_device_view(&state, &name)
@@ -810,10 +820,42 @@ async fn refresh_device(state: &AppState, name: &str, device: DeviceConfig) {
     let operation_lock = device_operation_lock(state, &device).await;
     let _operation_guard = operation_lock.lock().await;
 
-    match state.controller.read_device(&device).await {
+    match retry_tapo_handshake(|| state.controller.read_device(&device)).await {
         Ok(snapshot) => update_device_snapshot(state, name, snapshot, None).await,
         Err(error) => update_device_error(state, name, error.to_string()).await,
     }
+}
+
+async fn retry_tapo_handshake<T, F, Fut>(mut operation: F) -> Result<T>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<T>>,
+{
+    for attempt in 1..=TAPO_HANDSHAKE_RETRY_ATTEMPTS {
+        match operation().await {
+            Ok(value) => return Ok(value),
+            Err(error)
+                if attempt < TAPO_HANDSHAKE_RETRY_ATTEMPTS && is_tapo_handshake_error(&error) =>
+            {
+                warn!(
+                    attempt,
+                    next_attempt = attempt + 1,
+                    %error,
+                    "retrying Tapo operation after handshake failure",
+                );
+                sleep(TAPO_HANDSHAKE_RETRY_DELAY).await;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+
+    unreachable!("retry loop should return from an attempt")
+}
+
+fn is_tapo_handshake_error(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .any(|cause| cause.to_string().contains("Handshake2 failed"))
 }
 
 async fn device_operation_lock(state: &AppState, device: &DeviceConfig) -> Arc<Mutex<()>> {
@@ -3007,6 +3049,43 @@ mod tests {
                 "172.18.0.0/16".to_string(),
             ],
         );
+    }
+
+    #[test]
+    fn identifies_tapo_handshake_failures() {
+        let handshake_error = anyhow!("HTTP error 400: Handshake2 failed");
+        let other_error = anyhow!("HTTP error 400: device busy");
+
+        assert!(is_tapo_handshake_error(&handshake_error));
+        assert!(!is_tapo_handshake_error(&other_error));
+    }
+
+    #[tokio::test]
+    async fn retries_transient_tapo_handshake_failures() {
+        let attempts = Arc::new(Mutex::new(0_u8));
+        let result = retry_tapo_handshake({
+            let attempts = attempts.clone();
+
+            move || {
+                let attempts = attempts.clone();
+
+                async move {
+                    let mut attempts = attempts.lock().await;
+                    *attempts += 1;
+
+                    if *attempts == 1 {
+                        return Err(anyhow!("HTTP error 400: Handshake2 failed"));
+                    }
+
+                    Ok("ok")
+                }
+            }
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(result, "ok");
+        assert_eq!(*attempts.lock().await, 2);
     }
 
     #[test]
