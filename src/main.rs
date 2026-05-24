@@ -3139,17 +3139,18 @@ const INDEX_HTML: &str = r##"<!doctype html>
             letter-spacing: 0.06em;
         }
 
-        .schedule-action.on {
+        .schedule-action.state-on {
             background: var(--green);
             color: #0c1a0c;
         }
 
-        .schedule-action.off {
+        .schedule-action.state-off {
             background: var(--red);
             color: #200807;
         }
 
-        .schedule-action.toggle {
+        .schedule-action.state-toggle,
+        .schedule-action.state-cycle {
             background: var(--amber);
             color: #1a1306;
         }
@@ -3995,14 +3996,17 @@ const INDEX_HTML: &str = r##"<!doctype html>
             const isEditing = schedule !== null;
             currentEditScheduleId = isEditing ? schedule.id : null;
 
+            const device = latestDevices.find((entry) => entry.name === deviceName);
+            const displayName = device?.nickname || deviceName;
+
             scheduleFormDeviceEl.value = deviceName;
             scheduleFormErrorEl.hidden = true;
             scheduleFormErrorEl.textContent = "";
             scheduleFormSubmitEl.disabled = false;
             scheduleFormSubmitEl.textContent = isEditing ? "Save" : "Create";
             scheduleModalTitleEl.textContent = isEditing
-                ? `Edit schedule — ${deviceName}`
-                : `New schedule — ${deviceName}`;
+                ? `Edit schedule — ${displayName}`
+                : `New schedule — ${displayName}`;
             scheduleFormEl.reset();
             scheduleFormDeviceEl.value = deviceName;
 
@@ -4577,7 +4581,7 @@ const INDEX_HTML: &str = r##"<!doctype html>
                 <article class="breaker ${isOffline ? "offline" : ""}">
                     <div class="label-card">
                         <h2 class="device-name">${escapeHtml(device.nickname)}</h2>
-                        <p class="device-meta">${escapeHtml(device.name)} / ${escapeHtml(device.ip)} / ${escapeHtml(device.model)}</p>
+                        <p class="device-meta">${escapeHtml(device.ip)} / ${escapeHtml(device.model)}</p>
                     </div>
                     <div class="toggle-wrap">
                         <button class="toggle" type="button" data-device="${escapeHtml(device.name)}" data-on="${isOn}" aria-pressed="${isOn}" aria-label="Toggle ${escapeHtml(device.nickname)}">
@@ -4620,10 +4624,11 @@ const INDEX_HTML: &str = r##"<!doctype html>
 
         function renderScheduleItem(schedule) {
             const isInterval = schedule.kind === "interval";
-            const displayAction = isInterval ? "toggle" : (schedule.action ?? "on");
+            const stateName = isInterval ? "cycle" : (schedule.action ?? "on");
+            const stateClass = `state-${stateName}`;
             const actionBadge = isInterval
                 ? "CYC"
-                : displayAction === "on" ? "ON" : displayAction === "off" ? "OFF" : "TOG";
+                : stateName === "on" ? "ON" : stateName === "off" ? "OFF" : "TOG";
             const summary = isInterval
                 ? describeInterval(schedule)
                 : describeCron(schedule.cron ?? "");
@@ -4651,7 +4656,7 @@ const INDEX_HTML: &str = r##"<!doctype html>
                     </label>
                     <div class="schedule-body">
                         <span class="schedule-summary">
-                            <span class="schedule-action ${escapeHtml(displayAction)}">${actionBadge}</span>
+                            <span class="schedule-action ${stateClass}">${actionBadge}</span>
                             ${escapeHtml(summary)}
                         </span>
                         <span class="schedule-meta">${meta}</span>
