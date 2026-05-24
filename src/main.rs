@@ -377,10 +377,19 @@ const DEFAULT_CONDITION_POLL_SECONDS: u64 = 60;
 const CONDITION_HTTP_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_CONDITION_BODY_BYTES: usize = 256 * 1024;
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+enum ConditionAction {
+    On,
+    Off,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ConditionConfig {
     id: String,
     name: String,
+    #[serde(default)]
+    device_name: String,
     url: String,
     #[serde(default = "default_http_method")]
     method: String,
@@ -397,6 +406,10 @@ struct ConditionConfig {
     #[serde(default = "default_true")]
     enabled: bool,
     #[serde(default)]
+    action_on_pass: Option<ConditionAction>,
+    #[serde(default)]
+    action_on_fail: Option<ConditionAction>,
+    #[serde(default)]
     created_at_ms: u128,
     #[serde(default)]
     last_checked_at_ms: Option<u128>,
@@ -406,6 +419,12 @@ struct ConditionConfig {
     last_status_code: Option<u16>,
     #[serde(default)]
     last_error: Option<String>,
+    #[serde(default)]
+    last_action_at_ms: Option<u128>,
+    #[serde(default)]
+    last_action: Option<ConditionAction>,
+    #[serde(default)]
+    last_action_error: Option<String>,
 }
 
 fn default_http_method() -> String {
@@ -423,6 +442,7 @@ fn default_condition_poll_seconds() -> u64 {
 #[derive(Debug, Clone, Deserialize)]
 struct CreateConditionRequest {
     name: String,
+    device_name: String,
     url: String,
     #[serde(default = "default_http_method")]
     method: String,
@@ -438,12 +458,18 @@ struct CreateConditionRequest {
     poll_seconds: u64,
     #[serde(default = "default_true")]
     enabled: bool,
+    #[serde(default)]
+    action_on_pass: Option<ConditionAction>,
+    #[serde(default)]
+    action_on_fail: Option<ConditionAction>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 struct UpdateConditionRequest {
     #[serde(default)]
     name: Option<String>,
+    #[serde(default)]
+    device_name: Option<String>,
     #[serde(default)]
     url: Option<String>,
     #[serde(default)]
@@ -460,12 +486,26 @@ struct UpdateConditionRequest {
     poll_seconds: Option<u64>,
     #[serde(default)]
     enabled: Option<bool>,
+    #[serde(default, deserialize_with = "deserialize_optional_condition_action")]
+    action_on_pass: Option<Option<ConditionAction>>,
+    #[serde(default, deserialize_with = "deserialize_optional_condition_action")]
+    action_on_fail: Option<Option<ConditionAction>>,
+}
+
+fn deserialize_optional_condition_action<'de, D>(
+    deserializer: D,
+) -> Result<Option<Option<ConditionAction>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<Option<ConditionAction>>::deserialize(deserializer)
 }
 
 #[derive(Debug, Clone, Serialize)]
 struct ConditionView {
     id: String,
     name: String,
+    device_name: String,
     url: String,
     method: String,
     headers: BTreeMap<String, String>,
@@ -474,11 +514,16 @@ struct ConditionView {
     body_contains: Option<String>,
     poll_seconds: u64,
     enabled: bool,
+    action_on_pass: Option<ConditionAction>,
+    action_on_fail: Option<ConditionAction>,
     created_at_ms: u128,
     last_checked_at_ms: Option<u128>,
     last_passing: Option<bool>,
     last_status_code: Option<u16>,
     last_error: Option<String>,
+    last_action_at_ms: Option<u128>,
+    last_action: Option<ConditionAction>,
+    last_action_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1308,6 +1353,7 @@ async fn create_condition(
     if name.is_empty() {
         return Err(AppError(anyhow!("condition name is required")));
     }
+    ensure_device_exists(&state, &request.device_name).await?;
     validate_http_method(&request.method).map_err(AppError)?;
     parse_status_match(&request.status_match).map_err(AppError)?;
     let poll_seconds = clamp_poll_seconds(request.poll_seconds).map_err(AppError)?;
@@ -1316,6 +1362,7 @@ async fn create_condition(
     let condition = ConditionConfig {
         id: new_condition_id(),
         name,
+        device_name: request.device_name,
         url: request.url,
         method: request.method.to_uppercase(),
         headers: request.headers,
@@ -1324,11 +1371,16 @@ async fn create_condition(
         body_contains: request.body_contains.and_then(non_empty_label),
         poll_seconds,
         enabled: request.enabled,
+        action_on_pass: request.action_on_pass,
+        action_on_fail: request.action_on_fail,
         created_at_ms: now_ms(),
         last_checked_at_ms: None,
         last_passing: None,
         last_status_code: None,
         last_error: None,
+        last_action_at_ms: None,
+        last_action: None,
+        last_action_error: None,
     };
 
     let id = condition.id.clone();
@@ -1366,6 +1418,9 @@ async fn update_condition(
     if let Some(url) = request.url.as_deref() {
         validate_url(url).map_err(AppError)?;
     }
+    if let Some(device_name) = request.device_name.as_deref() {
+        ensure_device_exists(&state, device_name).await?;
+    }
 
     let updated = {
         let mut conditions = state.conditions.write().await;
@@ -1379,6 +1434,9 @@ async fn update_condition(
                 return Err(AppError(anyhow!("condition name cannot be empty")));
             }
             condition.name = trimmed.to_string();
+        }
+        if let Some(device_name) = request.device_name {
+            condition.device_name = device_name;
         }
         if let Some(url) = request.url {
             condition.url = url;
@@ -1409,6 +1467,12 @@ async fn update_condition(
                 condition.last_passing = None;
                 condition.last_status_code = None;
             }
+        }
+        if let Some(action) = request.action_on_pass {
+            condition.action_on_pass = action;
+        }
+        if let Some(action) = request.action_on_fail {
+            condition.action_on_fail = action;
         }
         condition.clone()
     };
@@ -1474,6 +1538,7 @@ fn condition_view(condition: &ConditionConfig) -> ConditionView {
     ConditionView {
         id: condition.id.clone(),
         name: condition.name.clone(),
+        device_name: condition.device_name.clone(),
         url: condition.url.clone(),
         method: condition.method.clone(),
         headers: condition.headers.clone(),
@@ -1482,11 +1547,16 @@ fn condition_view(condition: &ConditionConfig) -> ConditionView {
         body_contains: condition.body_contains.clone(),
         poll_seconds: condition.poll_seconds,
         enabled: condition.enabled,
+        action_on_pass: condition.action_on_pass,
+        action_on_fail: condition.action_on_fail,
         created_at_ms: condition.created_at_ms,
         last_checked_at_ms: condition.last_checked_at_ms,
         last_passing: condition.last_passing,
         last_status_code: condition.last_status_code,
         last_error: condition.last_error.clone(),
+        last_action_at_ms: condition.last_action_at_ms,
+        last_action: condition.last_action,
+        last_action_error: condition.last_action_error.clone(),
     }
 }
 
@@ -1672,7 +1742,9 @@ async fn probe_and_record(state: &AppState, id: &str) {
         return;
     }
 
+    let previous_passing = condition.last_passing;
     let outcome = probe_condition_once(&state.http_client, &condition).await;
+
     let updated = {
         let mut conditions = state.conditions.write().await;
         if let Some(stored) = conditions.get_mut(id) {
@@ -1685,12 +1757,89 @@ async fn probe_and_record(state: &AppState, id: &str) {
             false
         }
     };
+    if !updated {
+        return;
+    }
 
-    if updated {
-        if let Err(error) = save_persisted_state(state).await {
-            warn!(%error, condition_id = %id, "failed to persist condition probe result");
+    let transitioned = previous_passing != Some(outcome.passing);
+    let action = if outcome.passing {
+        condition.action_on_pass
+    } else {
+        condition.action_on_fail
+    };
+
+    if transitioned {
+        if let Some(action) = action {
+            apply_condition_action(state, &condition, action).await;
         }
     }
+
+    if let Err(error) = save_persisted_state(state).await {
+        warn!(%error, condition_id = %id, "failed to persist condition probe result");
+    }
+}
+
+async fn apply_condition_action(
+    state: &AppState,
+    condition: &ConditionConfig,
+    action: ConditionAction,
+) {
+    if condition.device_name.is_empty() {
+        return;
+    }
+
+    let outcome = drive_device_power(state, &condition.device_name, action).await;
+    let (last_action, last_action_error) = match outcome {
+        Ok(()) => {
+            info!(
+                condition_id = %condition.id,
+                device = %condition.device_name,
+                action = ?action,
+                "condition fired action",
+            );
+            (Some(action), None)
+        }
+        Err(error) => {
+            warn!(
+                condition_id = %condition.id,
+                device = %condition.device_name,
+                %error,
+                "condition action failed",
+            );
+            (None, Some(format!("{error:#}")))
+        }
+    };
+
+    let mut conditions = state.conditions.write().await;
+    if let Some(stored) = conditions.get_mut(&condition.id) {
+        stored.last_action_at_ms = Some(now_ms());
+        if last_action.is_some() {
+            stored.last_action = last_action;
+            stored.last_action_error = None;
+        }
+        if let Some(err) = last_action_error {
+            stored.last_action_error = Some(err);
+        }
+    }
+}
+
+async fn drive_device_power(
+    state: &AppState,
+    device_name: &str,
+    action: ConditionAction,
+) -> Result<()> {
+    let device = get_device_config(state, device_name).await?;
+    let operation_lock = device_operation_lock(state, &device).await;
+    let _operation_guard = operation_lock.lock().await;
+
+    let target = matches!(action, ConditionAction::On);
+    retry_tapo_handshake(|| state.controller.set_power(&device, target)).await?;
+
+    if let Ok(snapshot) = retry_tapo_handshake(|| state.controller.read_device(&device)).await {
+        update_device_snapshot(state, device_name, snapshot, None).await;
+    }
+
+    Ok(())
 }
 
 async fn run_condition_poller(state: AppState) {
@@ -3745,6 +3894,66 @@ const INDEX_HTML: &str = r##"<!doctype html>
             color: var(--muted);
         }
 
+        .section-accordion {
+            margin-top: 14px;
+            padding: 8px 11px;
+            border-radius: 8px;
+            background: rgba(0, 0, 0, 0.24);
+            font-family: var(--font-data);
+        }
+
+        .section-accordion > summary {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 8px;
+            list-style: none;
+            cursor: pointer;
+            padding: 2px 0;
+        }
+
+        .section-accordion > summary::-webkit-details-marker {
+            display: none;
+        }
+
+        .section-accordion[open] > summary {
+            margin-bottom: 8px;
+        }
+
+        .section-summary-text {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 11px;
+            font-weight: 600;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+            color: var(--muted);
+        }
+
+        .section-chevron {
+            display: inline-block;
+            transition: transform 120ms ease;
+            color: var(--muted);
+            font-size: 10px;
+        }
+
+        .section-accordion[open] .section-chevron {
+            transform: rotate(90deg);
+        }
+
+        .section-count {
+            display: inline-block;
+            min-width: 16px;
+            padding: 0 4px;
+            border-radius: 999px;
+            background: rgba(255, 255, 255, 0.08);
+            color: var(--text);
+            font-size: 10px;
+            text-align: center;
+            letter-spacing: 0;
+        }
+
         .schedule-add {
             padding: 4px 9px;
             border: 1px solid rgba(229, 216, 182, 0.3);
@@ -4450,14 +4659,6 @@ const INDEX_HTML: &str = r##"<!doctype html>
                 </div>
                 <p class="usage-empty" id="usage-empty">Loading power history from Tapo.</p>
             </section>
-            <section class="conditions-panel" id="conditions-panel" aria-label="Conditions">
-                <div class="conditions-header">
-                    <h2>Conditions</h2>
-                    <button class="schedule-add" id="condition-add" type="button">+ Add condition</button>
-                </div>
-                <ul class="condition-list" id="condition-list"></ul>
-                <p class="conditions-empty" id="conditions-empty">No conditions yet. Conditions are HTTP probes that gate schedule ON actions.</p>
-            </section>
             <div class="breaker-grid" id="devices"></div>
         </section>
     </main>
@@ -4469,9 +4670,10 @@ const INDEX_HTML: &str = r##"<!doctype html>
                 <h3 id="condition-modal-title">New condition</h3>
                 <button class="schedule-modal-close" type="button" data-close-condition-modal aria-label="Close">&times;</button>
             </header>
+            <input type="hidden" name="device_name" id="condition-form-device" />
             <label>
                 Name
-                <input type="text" name="name" maxlength="60" placeholder="daylight" autocomplete="off" required />
+                <input type="text" name="name" maxlength="60" placeholder="hot day" autocomplete="off" required />
             </label>
             <label>
                 Method
@@ -4508,7 +4710,25 @@ const INDEX_HTML: &str = r##"<!doctype html>
                 Body must contain (optional)
                 <input type="text" name="body_contains" autocomplete="off" />
             </label>
-            <p class="cron-hint">Status match: comma-separated codes or ranges, e.g. <code>200</code>, <code>200-299</code>, <code>200,204,301-302</code>.</p>
+            <div class="interval-duration-row">
+                <label>
+                    When passing
+                    <select name="action_on_pass">
+                        <option value="">No action</option>
+                        <option value="on">Turn on</option>
+                        <option value="off">Turn off</option>
+                    </select>
+                </label>
+                <label>
+                    When failing
+                    <select name="action_on_fail">
+                        <option value="">No action</option>
+                        <option value="on">Turn on</option>
+                        <option value="off">Turn off</option>
+                    </select>
+                </label>
+            </div>
+            <p class="cron-hint">Status match: codes or ranges (e.g. <code>200</code>, <code>200-299</code>). Actions fire only when the probe result transitions.</p>
             <p class="schedule-form-error" id="condition-form-error" hidden></p>
             <div class="schedule-form-actions">
                 <button type="button" data-close-condition-modal>Cancel</button>
@@ -4876,8 +5096,23 @@ const INDEX_HTML: &str = r##"<!doctype html>
             });
 
             wireScheduleControls();
+            wireConditionControls();
+            wireSectionAccordions();
 
             return { totalPower, todayEnergy, todayCost };
+        }
+
+        function wireSectionAccordions() {
+            devicesEl.querySelectorAll("details.section-accordion").forEach((details) => {
+                details.addEventListener("toggle", () => {
+                    sectionOpenStateSet(details.dataset.device, details.dataset.section, details.open);
+                });
+                details.querySelector("summary").addEventListener("click", (event) => {
+                    if (event.target.closest("button")) {
+                        event.preventDefault();
+                    }
+                });
+            });
         }
 
         function wireScheduleControls() {
@@ -4967,14 +5202,13 @@ const INDEX_HTML: &str = r##"<!doctype html>
             }
         }
 
-        const conditionListEl = document.querySelector("#condition-list");
-        const conditionsEmptyEl = document.querySelector("#conditions-empty");
-        const conditionAddBtn = document.querySelector("#condition-add");
         const conditionModalEl = document.querySelector("#condition-modal");
         const conditionFormEl = document.querySelector("#condition-form");
         const conditionFormErrorEl = document.querySelector("#condition-form-error");
         const conditionFormSubmitEl = document.querySelector("#condition-form-submit");
         const conditionModalTitleEl = document.querySelector("#condition-modal-title");
+        const conditionFormDeviceEl = document.querySelector("#condition-form-device");
+        let conditionsByDevice = new Map();
 
         async function loadConditions() {
             if (conditionsLoadInFlight) return;
@@ -4984,24 +5218,22 @@ const INDEX_HTML: &str = r##"<!doctype html>
                 const list = payload.conditions ?? [];
                 conditionsList = list;
                 conditionsById = new Map(list.map((c) => [c.id, c]));
-                renderConditions(list);
+                const byDevice = new Map();
+                for (const condition of list) {
+                    const device = condition.device_name;
+                    if (!byDevice.has(device)) byDevice.set(device, []);
+                    byDevice.get(device).push(condition);
+                }
+                conditionsByDevice = byDevice;
+                if (latestDevices.length > 0) {
+                    renderDevices(latestDevices);
+                }
                 refreshRequiresPicker();
             } catch (error) {
                 renderNotice(error.message);
             } finally {
                 conditionsLoadInFlight = false;
             }
-        }
-
-        function renderConditions(conditions) {
-            if (conditions.length === 0) {
-                conditionListEl.innerHTML = "";
-                conditionsEmptyEl.hidden = false;
-                return;
-            }
-            conditionsEmptyEl.hidden = true;
-            conditionListEl.innerHTML = conditions.map(renderConditionItem).join("");
-            wireConditionControls();
         }
 
         function renderConditionItem(condition) {
@@ -5032,6 +5264,18 @@ const INDEX_HTML: &str = r##"<!doctype html>
             if (condition.last_checked_at_ms) {
                 metaParts.push(`checked ${formatRelative(condition.last_checked_at_ms)}`);
             }
+            const actionParts = [];
+            if (condition.action_on_pass) actionParts.push(`pass→${condition.action_on_pass}`);
+            if (condition.action_on_fail) actionParts.push(`fail→${condition.action_on_fail}`);
+            if (actionParts.length > 0) {
+                metaParts.push(actionParts.join(" / "));
+            }
+            if (condition.last_action && condition.last_action_at_ms) {
+                metaParts.push(`fired ${escapeHtml(condition.last_action)} ${formatRelative(condition.last_action_at_ms)}`);
+            }
+            if (condition.last_action_error) {
+                metaParts.push(`<span style="color: var(--red);">action: ${escapeHtml(condition.last_action_error)}</span>`);
+            }
             if (condition.last_error) {
                 metaParts.push(`<span style="color: var(--red);">${escapeHtml(condition.last_error)}</span>`);
             }
@@ -5054,7 +5298,13 @@ const INDEX_HTML: &str = r##"<!doctype html>
         }
 
         function wireConditionControls() {
-            conditionListEl.querySelectorAll("button[data-condition-probe]").forEach((button) => {
+            devicesEl.querySelectorAll("button[data-add-condition]").forEach((button) => {
+                button.addEventListener("click", () => {
+                    openConditionModal(button.dataset.addCondition);
+                });
+            });
+
+            devicesEl.querySelectorAll("button[data-condition-probe]").forEach((button) => {
                 button.addEventListener("click", async () => {
                     const id = button.dataset.conditionProbe;
                     button.disabled = true;
@@ -5069,7 +5319,7 @@ const INDEX_HTML: &str = r##"<!doctype html>
                 });
             });
 
-            conditionListEl.querySelectorAll("button[data-condition-edit]").forEach((button) => {
+            devicesEl.querySelectorAll("button[data-condition-edit]").forEach((button) => {
                 button.addEventListener("click", () => {
                     const id = button.dataset.conditionEdit;
                     const condition = conditionsById.get(id);
@@ -5078,11 +5328,11 @@ const INDEX_HTML: &str = r##"<!doctype html>
                         loadConditions();
                         return;
                     }
-                    openConditionModal(condition);
+                    openConditionModal(condition.device_name, condition);
                 });
             });
 
-            conditionListEl.querySelectorAll("button[data-condition-delete]").forEach((button) => {
+            devicesEl.querySelectorAll("button[data-condition-delete]").forEach((button) => {
                 button.addEventListener("click", async () => {
                     const id = button.dataset.conditionDelete;
                     button.disabled = true;
@@ -5107,25 +5357,33 @@ const INDEX_HTML: &str = r##"<!doctype html>
             const container = document.querySelector("#schedule-requires-list");
             if (!container) return;
             const checkedIds = selectedIds ?? Array.from(container.querySelectorAll("input[type='checkbox']:checked")).map((input) => input.value);
-            if (conditionsList.length === 0) {
-                container.innerHTML = `<span class="requires-empty">No conditions defined yet.</span>`;
+            const deviceName = scheduleFormDeviceEl?.value ?? "";
+            const candidates = conditionsList.filter((c) => c.device_name === deviceName);
+            if (candidates.length === 0) {
+                container.innerHTML = `<span class="requires-empty">No conditions for this device.</span>`;
                 return;
             }
-            container.innerHTML = conditionsList
+            container.innerHTML = candidates
                 .map((c) => `<label><input type="checkbox" name="condition_id" value="${escapeHtml(c.id)}" ${checkedIds.includes(c.id) ? "checked" : ""} /> ${escapeHtml(c.name)}</label>`)
                 .join("");
         }
 
-        function openConditionModal(condition = null) {
+        function openConditionModal(deviceName, condition = null) {
             const isEditing = condition !== null;
             currentEditConditionId = isEditing ? condition.id : null;
+
+            const device = latestDevices.find((entry) => entry.name === deviceName);
+            const displayName = device?.nickname || deviceName;
 
             conditionFormErrorEl.hidden = true;
             conditionFormErrorEl.textContent = "";
             conditionFormSubmitEl.disabled = false;
             conditionFormSubmitEl.textContent = isEditing ? "Save" : "Create";
-            conditionModalTitleEl.textContent = isEditing ? `Edit condition — ${condition.name}` : "New condition";
+            conditionModalTitleEl.textContent = isEditing
+                ? `Edit condition — ${condition.name}`
+                : `New condition — ${displayName}`;
             conditionFormEl.reset();
+            conditionFormDeviceEl.value = deviceName;
 
             const set = (selector, value) => {
                 const el = conditionFormEl.querySelector(selector);
@@ -5140,12 +5398,16 @@ const INDEX_HTML: &str = r##"<!doctype html>
                 set('input[name="poll_seconds"]', String(condition.poll_seconds));
                 set('input[name="body_contains"]', condition.body_contains ?? "");
                 set('textarea[name="body"]', condition.body ?? "");
+                set('select[name="action_on_pass"]', condition.action_on_pass ?? "");
+                set('select[name="action_on_fail"]', condition.action_on_fail ?? "");
                 const headerLines = Object.entries(condition.headers || {}).map(([k, v]) => `${k}: ${v}`).join("\n");
                 set('textarea[name="headers"]', headerLines);
             } else {
                 set('select[name="method"]', "GET");
                 set('input[name="status_match"]', "200-299");
                 set('input[name="poll_seconds"]', "60");
+                set('select[name="action_on_pass"]', "");
+                set('select[name="action_on_fail"]', "");
             }
 
             conditionModalEl.hidden = false;
@@ -5171,14 +5433,13 @@ const INDEX_HTML: &str = r##"<!doctype html>
             }
         });
 
-        conditionAddBtn.addEventListener("click", () => openConditionModal());
-
         conditionFormEl.addEventListener("submit", async (event) => {
             event.preventDefault();
             conditionFormErrorEl.hidden = true;
             conditionFormErrorEl.textContent = "";
 
             const name = conditionFormEl.querySelector('input[name="name"]').value.trim();
+            const deviceName = conditionFormDeviceEl.value;
             const method = conditionFormEl.querySelector('select[name="method"]').value;
             const url = conditionFormEl.querySelector('input[name="url"]').value.trim();
             const statusMatch = conditionFormEl.querySelector('input[name="status_match"]').value.trim();
@@ -5186,6 +5447,8 @@ const INDEX_HTML: &str = r##"<!doctype html>
             const bodyContains = conditionFormEl.querySelector('input[name="body_contains"]').value;
             const body = conditionFormEl.querySelector('textarea[name="body"]').value;
             const headersRaw = conditionFormEl.querySelector('textarea[name="headers"]').value;
+            const actionOnPassRaw = conditionFormEl.querySelector('select[name="action_on_pass"]').value;
+            const actionOnFailRaw = conditionFormEl.querySelector('select[name="action_on_fail"]').value;
 
             if (!name) return showConditionFormError("Name is required.");
             if (!url) return showConditionFormError("URL is required.");
@@ -5206,6 +5469,9 @@ const INDEX_HTML: &str = r##"<!doctype html>
                 headers[key] = value;
             }
 
+            const actionOnPass = actionOnPassRaw === "" ? null : actionOnPassRaw;
+            const actionOnFail = actionOnFailRaw === "" ? null : actionOnFailRaw;
+
             const isEditing = currentEditConditionId !== null;
             const endpoint = isEditing
                 ? `/api/conditions/${encodeURIComponent(currentEditConditionId)}`
@@ -5213,6 +5479,7 @@ const INDEX_HTML: &str = r##"<!doctype html>
             const method_ = isEditing ? "PATCH" : "POST";
             const payload = {
                 name,
+                device_name: deviceName,
                 url,
                 method,
                 headers,
@@ -5220,6 +5487,8 @@ const INDEX_HTML: &str = r##"<!doctype html>
                 status_match: statusMatch,
                 body_contains: bodyContains === "" ? null : bodyContains,
                 poll_seconds: pollSeconds,
+                action_on_pass: actionOnPass,
+                action_on_fail: actionOnFail,
             };
             if (!isEditing) payload.enabled = true;
 
@@ -5863,9 +6132,16 @@ const INDEX_HTML: &str = r##"<!doctype html>
                         <div class="reading"><span>Today runtime</span>${energy ? formatDurationFromMinutes(energy.today_runtime_minutes) : "-"}</div>
                     </div>
                     ${renderSchedulesSection(device, schedules ?? [])}
+                    ${renderConditionsSection(device, conditionsByDevice.get(device.name) ?? [])}
                     ${isOffline ? `<p class="device-meta">${escapeHtml(device.last_error)}</p>` : ""}
                 </article>
             `;
+        }
+
+        function sectionOpenAttribute(deviceName, sectionKey, hasItems) {
+            const stored = sectionOpenStateGet(deviceName, sectionKey);
+            const open = stored === null ? hasItems : stored === "true";
+            return open ? "open" : "";
         }
 
         function renderSchedulesSection(device, schedules) {
@@ -5873,15 +6149,63 @@ const INDEX_HTML: &str = r##"<!doctype html>
             const body = schedules.length === 0
                 ? `<p class="schedules-empty">No schedules yet.</p>`
                 : `<ul class="schedule-list">${items}</ul>`;
+            const openAttr = sectionOpenAttribute(device.name, "schedules", schedules.length > 0);
+            const countBadge = schedules.length > 0 ? `<span class="section-count">${schedules.length}</span>` : "";
             return `
-                <section class="schedules" aria-label="Schedules for ${escapeHtml(device.nickname)}">
-                    <div class="schedules-header">
-                        <h3>Schedules</h3>
+                <details class="section-accordion" data-device="${escapeHtml(device.name)}" data-section="schedules" ${openAttr}>
+                    <summary>
+                        <span class="section-summary-text">
+                            <span class="section-chevron" aria-hidden="true">&#9656;</span>
+                            <span>Schedules</span>
+                            ${countBadge}
+                        </span>
                         <button class="schedule-add" type="button" data-add-schedule="${escapeHtml(device.name)}">+ Add</button>
-                    </div>
+                    </summary>
                     ${body}
-                </section>
+                </details>
             `;
+        }
+
+        function renderConditionsSection(device, conditions) {
+            const items = conditions.map(renderConditionItem).join("");
+            const body = conditions.length === 0
+                ? `<p class="schedules-empty">No conditions yet. Conditions are HTTP probes that turn this device on or off when their result changes.</p>`
+                : `<ul class="condition-list">${items}</ul>`;
+            const openAttr = sectionOpenAttribute(device.name, "conditions", conditions.length > 0);
+            const countBadge = conditions.length > 0 ? `<span class="section-count">${conditions.length}</span>` : "";
+            return `
+                <details class="section-accordion" data-device="${escapeHtml(device.name)}" data-section="conditions" ${openAttr}>
+                    <summary>
+                        <span class="section-summary-text">
+                            <span class="section-chevron" aria-hidden="true">&#9656;</span>
+                            <span>Conditions</span>
+                            ${countBadge}
+                        </span>
+                        <button class="schedule-add" type="button" data-add-condition="${escapeHtml(device.name)}">+ Add</button>
+                    </summary>
+                    ${body}
+                </details>
+            `;
+        }
+
+        function sectionOpenStateKey(deviceName, sectionKey) {
+            return `fusebox-section-${deviceName}-${sectionKey}`;
+        }
+
+        function sectionOpenStateGet(deviceName, sectionKey) {
+            try {
+                return localStorage.getItem(sectionOpenStateKey(deviceName, sectionKey));
+            } catch (_error) {
+                return null;
+            }
+        }
+
+        function sectionOpenStateSet(deviceName, sectionKey, isOpen) {
+            try {
+                localStorage.setItem(sectionOpenStateKey(deviceName, sectionKey), String(isOpen));
+            } catch (_error) {
+                // Storage may be unavailable; just live with the default.
+            }
         }
 
         function renderScheduleItem(schedule) {
@@ -6526,6 +6850,7 @@ mod tests {
         let condition = ConditionConfig {
             id: "cond1".to_string(),
             name: "test".to_string(),
+            device_name: "lights".to_string(),
             url: "http://example.invalid".to_string(),
             method: "GET".to_string(),
             headers: BTreeMap::new(),
@@ -6534,11 +6859,16 @@ mod tests {
             body_contains: None,
             poll_seconds: 60,
             enabled: true,
+            action_on_pass: None,
+            action_on_fail: None,
             created_at_ms: 0,
             last_checked_at_ms: None,
             last_passing: None,
             last_status_code: None,
             last_error: None,
+            last_action_at_ms: None,
+            last_action: None,
+            last_action_error: None,
         };
         let schedule = ScheduleConfig {
             id: "sched1".to_string(),
