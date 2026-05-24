@@ -3116,17 +3116,16 @@ const INDEX_HTML: &str = r##"<!doctype html>
         .schedule-summary {
             font-weight: 600;
             color: var(--text);
-            overflow: hidden;
-            text-overflow: ellipsis;
-            white-space: nowrap;
+            overflow-wrap: anywhere;
+            word-break: break-word;
         }
 
         .schedule-meta {
             color: var(--muted);
             font-size: 10px;
-            overflow: hidden;
-            text-overflow: ellipsis;
-            white-space: nowrap;
+            line-height: 1.35;
+            overflow-wrap: anywhere;
+            word-break: break-word;
         }
 
         .schedule-action {
@@ -4753,19 +4752,20 @@ const INDEX_HTML: &str = r##"<!doctype html>
             if (totalMinutes < 60) return `${totalMinutes} min`;
 
             const hours = Math.floor(totalMinutes / 60);
-            if (hours < 48) return `${hours}h ${totalMinutes % 60}m`;
+            const remainderMinutes = totalMinutes % 60;
+            if (hours < 48) return remainderMinutes === 0 ? `${hours}h` : `${hours}h ${remainderMinutes}m`;
 
             const days = Math.floor(hours / 24);
             const remainingHours = hours % 24;
-            if (days < 60) return `${days}d ${remainingHours}h`;
+            if (days < 60) return remainingHours === 0 ? `${days}d` : `${days}d ${remainingHours}h`;
 
             const months = Math.floor(days / 30);
             const remainingDays = days % 30;
-            if (months < 24) return `${months}mo ${remainingDays}d`;
+            if (months < 24) return remainingDays === 0 ? `${months}mo` : `${months}mo ${remainingDays}d`;
 
             const years = Math.floor(months / 12);
             const remainingMonths = months % 12;
-            return `${years}y ${remainingMonths}mo`;
+            return remainingMonths === 0 ? `${years}y` : `${years}y ${remainingMonths}mo`;
         }
 
         function formatEnergy(wh) {
