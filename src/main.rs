@@ -3064,7 +3064,7 @@ const INDEX_HTML: &str = r##"<!doctype html>
             border: 1px solid rgba(229, 216, 182, 0.3);
             border-radius: 6px;
             background: rgba(0, 0, 0, 0.3);
-            color: var(--ink);
+            color: var(--text);
             font-family: inherit;
             font-size: 11px;
             cursor: pointer;
@@ -3115,7 +3115,7 @@ const INDEX_HTML: &str = r##"<!doctype html>
 
         .schedule-summary {
             font-weight: 600;
-            color: var(--ink);
+            color: var(--text);
             overflow: hidden;
             text-overflow: ellipsis;
             white-space: nowrap;
@@ -3154,6 +3154,12 @@ const INDEX_HTML: &str = r##"<!doctype html>
             color: #1a1306;
         }
 
+        .schedule-actions {
+            display: inline-flex;
+            gap: 2px;
+        }
+
+        .schedule-edit,
         .schedule-delete {
             padding: 0;
             width: 22px;
@@ -3162,9 +3168,18 @@ const INDEX_HTML: &str = r##"<!doctype html>
             border-radius: 4px;
             background: transparent;
             color: var(--muted);
-            font-size: 16px;
+            font-size: 14px;
             line-height: 1;
             cursor: pointer;
+        }
+
+        .schedule-delete {
+            font-size: 16px;
+        }
+
+        .schedule-edit:hover {
+            color: var(--text);
+            background: rgba(0, 0, 0, 0.3);
         }
 
         .schedule-delete:hover {
@@ -3210,7 +3225,7 @@ const INDEX_HTML: &str = r##"<!doctype html>
             background:
                 linear-gradient(160deg, rgba(255,255,255,0.08), transparent 32%),
                 linear-gradient(var(--breaker-top), var(--bakelite));
-            color: var(--ink);
+            color: var(--text);
             box-shadow:
                 inset 0 0 0 1px rgba(255, 255, 255, 0.05),
                 0 18px 38px rgba(0, 0, 0, 0.55);
@@ -3264,7 +3279,7 @@ const INDEX_HTML: &str = r##"<!doctype html>
 
         .mode-tabs button[aria-pressed="true"] {
             background: rgba(255, 255, 255, 0.1);
-            color: var(--ink);
+            color: var(--text);
         }
 
         .schedule-modal-panel label {
@@ -3283,7 +3298,7 @@ const INDEX_HTML: &str = r##"<!doctype html>
             border: 1px solid rgba(229, 216, 182, 0.28);
             border-radius: 6px;
             background: rgba(0, 0, 0, 0.32);
-            color: var(--ink);
+            color: var(--text);
             font-family: inherit;
             font-size: 13px;
         }
@@ -3320,7 +3335,7 @@ const INDEX_HTML: &str = r##"<!doctype html>
             border: 1px solid rgba(229, 216, 182, 0.28);
             border-radius: 999px;
             background: rgba(0, 0, 0, 0.25);
-            color: var(--ink);
+            color: var(--text);
             font-size: 11px;
             text-transform: none;
             letter-spacing: 0;
@@ -3356,7 +3371,7 @@ const INDEX_HTML: &str = r##"<!doctype html>
         }
 
         .day-picker-presets button:hover {
-            color: var(--ink);
+            color: var(--text);
             border-color: rgba(229, 216, 182, 0.5);
         }
 
@@ -3378,7 +3393,7 @@ const INDEX_HTML: &str = r##"<!doctype html>
             border: 1px solid rgba(229, 216, 182, 0.28);
             border-radius: 6px;
             background: rgba(0, 0, 0, 0.32);
-            color: var(--ink);
+            color: var(--text);
             font-family: inherit;
             font-size: 13px;
         }
@@ -3405,7 +3420,7 @@ const INDEX_HTML: &str = r##"<!doctype html>
             align-items: center;
             gap: 6px;
             font-size: 12px;
-            color: var(--ink);
+            color: var(--text);
             text-transform: none;
             letter-spacing: 0;
         }
@@ -3436,7 +3451,7 @@ const INDEX_HTML: &str = r##"<!doctype html>
             border: 1px solid rgba(229, 216, 182, 0.3);
             border-radius: 6px;
             background: rgba(0, 0, 0, 0.3);
-            color: var(--ink);
+            color: var(--text);
             font-family: inherit;
             font-size: 12px;
             cursor: pointer;
@@ -3670,7 +3685,9 @@ const INDEX_HTML: &str = r##"<!doctype html>
         let switchAudioBufferPromise = null;
         let latestDevices = [];
         let schedulesByDevice = new Map();
+        let schedulesById = new Map();
         let schedulesLoadInFlight = false;
+        let currentEditScheduleId = null;
 
         syncThemeButton();
         syncHistoryRangeButtons();
@@ -3913,6 +3930,19 @@ const INDEX_HTML: &str = r##"<!doctype html>
                 });
             });
 
+            devicesEl.querySelectorAll("button[data-schedule-edit]").forEach((button) => {
+                button.addEventListener("click", () => {
+                    const id = button.dataset.scheduleEdit;
+                    const schedule = schedulesById.get(id);
+                    if (!schedule) {
+                        renderNotice("Schedule not found; reloading.");
+                        loadSchedules();
+                        return;
+                    }
+                    openScheduleModal(schedule.device_name, schedule);
+                });
+            });
+
             devicesEl.querySelectorAll("input[data-schedule-enabled]").forEach((input) => {
                 input.addEventListener("change", async () => {
                     const id = input.dataset.scheduleEnabled;
@@ -3941,13 +3971,16 @@ const INDEX_HTML: &str = r##"<!doctype html>
             try {
                 const payload = await requestJson("/api/schedules");
                 const map = new Map();
+                const byId = new Map();
                 for (const schedule of payload.schedules ?? []) {
                     if (!map.has(schedule.device_name)) {
                         map.set(schedule.device_name, []);
                     }
                     map.get(schedule.device_name).push(schedule);
+                    byId.set(schedule.id, schedule);
                 }
                 schedulesByDevice = map;
+                schedulesById = byId;
                 if (latestDevices.length > 0) {
                     renderDevices(latestDevices);
                 }
@@ -3958,24 +3991,21 @@ const INDEX_HTML: &str = r##"<!doctype html>
             }
         }
 
-        function openScheduleModal(deviceName) {
+        function openScheduleModal(deviceName, schedule = null) {
+            const isEditing = schedule !== null;
+            currentEditScheduleId = isEditing ? schedule.id : null;
+
             scheduleFormDeviceEl.value = deviceName;
-            scheduleModalTitleEl.textContent = `New schedule — ${deviceName}`;
             scheduleFormErrorEl.hidden = true;
             scheduleFormErrorEl.textContent = "";
             scheduleFormSubmitEl.disabled = false;
-            scheduleFormSubmitEl.textContent = "Create";
+            scheduleFormSubmitEl.textContent = isEditing ? "Save" : "Create";
+            scheduleModalTitleEl.textContent = isEditing
+                ? `Edit schedule — ${deviceName}`
+                : `New schedule — ${deviceName}`;
             scheduleFormEl.reset();
             scheduleFormDeviceEl.value = deviceName;
-            scheduleFormEl.querySelectorAll(".mode-panel").forEach((panel) => {
-                panel.hidden = panel.dataset.panel !== "simple";
-            });
-            scheduleFormEl.querySelectorAll(".mode-tabs button").forEach((button) => {
-                button.setAttribute("aria-pressed", String(button.dataset.mode === "simple"));
-            });
-            scheduleFormEl.querySelectorAll('input[name="day"]').forEach((input) => {
-                input.checked = ["1", "2", "3", "4", "5"].includes(input.value);
-            });
+
             scheduleFormEl.querySelector('input[name="time"]').value = "07:00";
             scheduleFormEl.querySelector('select[name="action"]').value = "on";
             scheduleFormEl.querySelector('select[name="action-advanced"]').value = "on";
@@ -3984,14 +4014,113 @@ const INDEX_HTML: &str = r##"<!doctype html>
             scheduleFormEl.querySelector('input[name="off_minutes"]').value = "30";
             scheduleFormEl.querySelector('input[name="start_action"][value="on"]').checked = true;
             scheduleFormEl.querySelector('input[name="label"]').value = "";
+            scheduleFormEl.querySelectorAll('input[name="day"]').forEach((input) => {
+                input.checked = ["1", "2", "3", "4", "5"].includes(input.value);
+            });
+
+            let initialMode = "simple";
+            const tabs = scheduleFormEl.querySelectorAll(".mode-tabs button");
+
+            if (isEditing) {
+                scheduleFormEl.querySelector('input[name="label"]').value = schedule.label ?? "";
+                if (schedule.kind === "interval") {
+                    initialMode = "interval";
+                    scheduleFormEl.querySelector('input[name="on_minutes"]').value = Math.round((schedule.on_seconds ?? 0) / 60);
+                    scheduleFormEl.querySelector('input[name="off_minutes"]').value = Math.round((schedule.off_seconds ?? 0) / 60);
+                    const startInput = scheduleFormEl.querySelector(`input[name="start_action"][value="${schedule.start_action ?? "on"}"]`);
+                    if (startInput) startInput.checked = true;
+                    tabs.forEach((tab) => {
+                        tab.hidden = tab.dataset.mode !== "interval";
+                    });
+                } else {
+                    const simple = schedule.cron ? parseCronToSimple(schedule.cron) : null;
+                    if (simple) {
+                        initialMode = "simple";
+                        scheduleFormEl.querySelector('input[name="time"]').value =
+                            `${String(simple.hour).padStart(2, "0")}:${String(simple.minute).padStart(2, "0")}`;
+                        scheduleFormEl.querySelector('select[name="action"]').value = schedule.action ?? "on";
+                        scheduleFormEl.querySelectorAll('input[name="day"]').forEach((input) => {
+                            input.checked = simple.days.includes(Number(input.value));
+                        });
+                    } else {
+                        initialMode = "advanced";
+                        scheduleFormEl.querySelector('input[name="cron"]').value = schedule.cron ?? "";
+                        scheduleFormEl.querySelector('select[name="action-advanced"]').value = schedule.action ?? "on";
+                    }
+                    tabs.forEach((tab) => {
+                        tab.hidden = tab.dataset.mode === "interval";
+                    });
+                }
+            } else {
+                tabs.forEach((tab) => {
+                    tab.hidden = false;
+                });
+            }
+
+            scheduleFormEl.querySelectorAll(".mode-panel").forEach((panel) => {
+                panel.hidden = panel.dataset.panel !== initialMode;
+            });
+            tabs.forEach((tab) => {
+                tab.setAttribute("aria-pressed", String(tab.dataset.mode === initialMode));
+            });
+
             scheduleModalEl.hidden = false;
             window.setTimeout(() => {
-                scheduleFormEl.querySelector('select[name="action"]').focus();
+                const focusEl = initialMode === "interval"
+                    ? scheduleFormEl.querySelector('input[name="on_minutes"]')
+                    : initialMode === "advanced"
+                        ? scheduleFormEl.querySelector('input[name="cron"]')
+                        : scheduleFormEl.querySelector('select[name="action"]');
+                if (focusEl) focusEl.focus();
             }, 30);
+        }
+
+        function parseCronToSimple(expr) {
+            const fields = expr.trim().split(/\s+/);
+            let minute, hour, dom, month, dow;
+            if (fields.length === 6 || fields.length === 7) {
+                [, minute, hour, dom, month, dow] = fields;
+            } else if (fields.length === 5) {
+                [minute, hour, dom, month, dow] = fields;
+            } else {
+                return null;
+            }
+            if (dom !== "*" || month !== "*") return null;
+            if (!/^\d+$/.test(minute) || !/^\d+$/.test(hour)) return null;
+            const minuteNum = Number.parseInt(minute, 10);
+            const hourNum = Number.parseInt(hour, 10);
+            if (!Number.isFinite(minuteNum) || !Number.isFinite(hourNum)) return null;
+            if (minuteNum > 59 || hourNum > 23) return null;
+            const days = parseDowFieldToList(dow);
+            if (days === null) return null;
+            return { minute: minuteNum, hour: hourNum, days };
+        }
+
+        function parseDowFieldToList(dow) {
+            if (dow === "*" || dow === "?") return [0, 1, 2, 3, 4, 5, 6];
+            const parts = dow.split(",").map((part) => part.trim());
+            const days = new Set();
+            for (const part of parts) {
+                if (part.includes("/")) return null;
+                if (part.includes("-")) {
+                    const [startStr, endStr] = part.split("-");
+                    const start = Number.parseInt(startStr, 10);
+                    const end = Number.parseInt(endStr, 10);
+                    if (!Number.isFinite(start) || !Number.isFinite(end)) return null;
+                    if (start > end) return null;
+                    for (let i = start; i <= end; i += 1) days.add(i % 7);
+                } else {
+                    const value = Number.parseInt(part, 10);
+                    if (!Number.isFinite(value)) return null;
+                    days.add(value % 7);
+                }
+            }
+            return Array.from(days).sort((a, b) => a - b);
         }
 
         function closeScheduleModal() {
             scheduleModalEl.hidden = true;
+            currentEditScheduleId = null;
         }
 
         scheduleModalEl.addEventListener("click", (event) => {
@@ -4106,16 +4235,40 @@ const INDEX_HTML: &str = r##"<!doctype html>
             }
 
             body.label = labelValue === "" ? null : labelValue;
-            body.enabled = true;
+
+            const editingId = currentEditScheduleId;
+            const isEditing = editingId !== null;
+
+            let endpoint;
+            let method;
+            let payload;
+            if (isEditing) {
+                endpoint = `/api/schedules/${encodeURIComponent(editingId)}`;
+                method = "PATCH";
+                payload = { label: body.label };
+                if (body.kind === "cron") {
+                    payload.cron = body.cron;
+                    payload.action = body.action;
+                } else {
+                    payload.on_seconds = body.on_seconds;
+                    payload.off_seconds = body.off_seconds;
+                    payload.start_action = body.start_action;
+                }
+            } else {
+                body.enabled = true;
+                endpoint = "/api/schedules";
+                method = "POST";
+                payload = body;
+            }
 
             scheduleFormSubmitEl.disabled = true;
-            scheduleFormSubmitEl.textContent = "Creating";
+            scheduleFormSubmitEl.textContent = isEditing ? "Saving" : "Creating";
 
             try {
-                await requestJson("/api/schedules", {
-                    method: "POST",
+                await requestJson(endpoint, {
+                    method,
                     headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify(body),
+                    body: JSON.stringify(payload),
                 });
                 closeScheduleModal();
                 await loadSchedules();
@@ -4123,7 +4276,7 @@ const INDEX_HTML: &str = r##"<!doctype html>
                 showScheduleFormError(error.message);
             } finally {
                 scheduleFormSubmitEl.disabled = false;
-                scheduleFormSubmitEl.textContent = "Create";
+                scheduleFormSubmitEl.textContent = isEditing ? "Save" : "Create";
             }
         });
 
@@ -4503,7 +4656,10 @@ const INDEX_HTML: &str = r##"<!doctype html>
                         </span>
                         <span class="schedule-meta">${meta}</span>
                     </div>
-                    <button class="schedule-delete" type="button" data-schedule-delete="${escapeHtml(schedule.id)}" aria-label="Delete schedule" title="Delete">&times;</button>
+                    <div class="schedule-actions">
+                        <button class="schedule-edit" type="button" data-schedule-edit="${escapeHtml(schedule.id)}" aria-label="Edit schedule" title="Edit">&#9998;</button>
+                        <button class="schedule-delete" type="button" data-schedule-delete="${escapeHtml(schedule.id)}" aria-label="Delete schedule" title="Delete">&times;</button>
+                    </div>
                 </li>
             `;
         }
