@@ -245,12 +245,34 @@ enum ScheduleAction {
     Toggle,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+enum ScheduleKind {
+    #[default]
+    Cron,
+    Interval,
+}
+
+const MIN_INTERVAL_CYCLE_SECONDS: u64 = 60;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ScheduleConfig {
     id: String,
     device_name: String,
-    cron: String,
-    action: ScheduleAction,
+    #[serde(default)]
+    kind: ScheduleKind,
+    #[serde(default)]
+    cron: Option<String>,
+    #[serde(default)]
+    action: Option<ScheduleAction>,
+    #[serde(default)]
+    on_seconds: Option<u64>,
+    #[serde(default)]
+    off_seconds: Option<u64>,
+    #[serde(default)]
+    start_action: Option<ScheduleAction>,
+    #[serde(default)]
+    starts_at_ms: Option<u128>,
     #[serde(default = "default_true")]
     enabled: bool,
     #[serde(default)]
@@ -268,14 +290,29 @@ fn default_true() -> bool {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-struct CreateScheduleRequest {
-    device_name: String,
-    cron: String,
-    action: ScheduleAction,
-    #[serde(default)]
-    label: Option<String>,
-    #[serde(default = "default_true")]
-    enabled: bool,
+#[serde(tag = "kind", rename_all = "lowercase")]
+enum CreateScheduleRequest {
+    Cron {
+        device_name: String,
+        cron: String,
+        action: ScheduleAction,
+        #[serde(default)]
+        label: Option<String>,
+        #[serde(default = "default_true")]
+        enabled: bool,
+    },
+    Interval {
+        device_name: String,
+        on_seconds: u64,
+        off_seconds: u64,
+        start_action: ScheduleAction,
+        #[serde(default)]
+        starts_at_ms: Option<u128>,
+        #[serde(default)]
+        label: Option<String>,
+        #[serde(default = "default_true")]
+        enabled: bool,
+    },
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -286,6 +323,12 @@ struct UpdateScheduleRequest {
     cron: Option<String>,
     #[serde(default)]
     action: Option<ScheduleAction>,
+    #[serde(default)]
+    on_seconds: Option<u64>,
+    #[serde(default)]
+    off_seconds: Option<u64>,
+    #[serde(default)]
+    start_action: Option<ScheduleAction>,
     #[serde(default, deserialize_with = "deserialize_optional_label")]
     label: Option<Option<String>>,
 }
@@ -301,8 +344,13 @@ where
 struct ScheduleView {
     id: String,
     device_name: String,
-    cron: String,
-    action: ScheduleAction,
+    kind: ScheduleKind,
+    cron: Option<String>,
+    action: Option<ScheduleAction>,
+    on_seconds: Option<u64>,
+    off_seconds: Option<u64>,
+    start_action: Option<ScheduleAction>,
+    starts_at_ms: Option<u128>,
     enabled: bool,
     label: Option<String>,
     created_at_ms: u128,
@@ -704,29 +752,62 @@ async fn create_schedule(
     State(state): State<AppState>,
     Json(request): Json<CreateScheduleRequest>,
 ) -> Result<(StatusCode, Json<ScheduleView>), AppError> {
-    let normalized_cron = normalize_cron(&request.cron).map_err(AppError)?;
-
-    {
-        let devices = state.devices.read().await;
-        if !devices.contains_key(&request.device_name) {
-            return Err(AppError(anyhow!(
-                "unknown device '{}'",
-                request.device_name
-            )));
+    let now = now_ms();
+    let schedule = match request {
+        CreateScheduleRequest::Cron {
+            device_name,
+            cron,
+            action,
+            label,
+            enabled,
+        } => {
+            ensure_device_exists(&state, &device_name).await?;
+            let normalized_cron = normalize_cron(&cron).map_err(AppError)?;
+            ScheduleConfig {
+                id: new_schedule_id(),
+                device_name,
+                kind: ScheduleKind::Cron,
+                cron: Some(normalized_cron),
+                action: Some(action),
+                on_seconds: None,
+                off_seconds: None,
+                start_action: None,
+                starts_at_ms: None,
+                enabled,
+                label: label.and_then(non_empty_label),
+                created_at_ms: now,
+                last_fired_at_ms: None,
+                last_error: None,
+            }
         }
-    }
-
-    let label = request.label.and_then(non_empty_label);
-    let schedule = ScheduleConfig {
-        id: new_schedule_id(),
-        device_name: request.device_name,
-        cron: normalized_cron,
-        action: request.action,
-        enabled: request.enabled,
-        label,
-        created_at_ms: now_ms(),
-        last_fired_at_ms: None,
-        last_error: None,
+        CreateScheduleRequest::Interval {
+            device_name,
+            on_seconds,
+            off_seconds,
+            start_action,
+            starts_at_ms,
+            label,
+            enabled,
+        } => {
+            ensure_device_exists(&state, &device_name).await?;
+            validate_interval(on_seconds, off_seconds).map_err(AppError)?;
+            ScheduleConfig {
+                id: new_schedule_id(),
+                device_name,
+                kind: ScheduleKind::Interval,
+                cron: None,
+                action: None,
+                on_seconds: Some(on_seconds),
+                off_seconds: Some(off_seconds),
+                start_action: Some(start_action),
+                starts_at_ms: Some(starts_at_ms.unwrap_or(now)),
+                enabled,
+                label: label.and_then(non_empty_label),
+                created_at_ms: now,
+                last_fired_at_ms: None,
+                last_error: None,
+            }
+        }
     };
 
     {
@@ -737,6 +818,27 @@ async fn create_schedule(
     save_persisted_state(&state).await.map_err(AppError)?;
 
     Ok((StatusCode::CREATED, Json(schedule_view(&schedule))))
+}
+
+async fn ensure_device_exists(state: &AppState, device_name: &str) -> Result<(), AppError> {
+    let devices = state.devices.read().await;
+    if !devices.contains_key(device_name) {
+        return Err(AppError(anyhow!("unknown device '{}'", device_name)));
+    }
+    Ok(())
+}
+
+fn validate_interval(on_seconds: u64, off_seconds: u64) -> Result<()> {
+    let cycle = on_seconds.saturating_add(off_seconds);
+    if cycle < MIN_INTERVAL_CYCLE_SECONDS {
+        return Err(anyhow!(
+            "on + off duration must be at least {MIN_INTERVAL_CYCLE_SECONDS} seconds (got {cycle})"
+        ));
+    }
+    if on_seconds == 0 && off_seconds == 0 {
+        return Err(anyhow!("on_seconds and off_seconds cannot both be zero"));
+    }
+    Ok(())
 }
 
 async fn delete_schedule(
@@ -775,12 +877,31 @@ async fn update_schedule(
         if let Some(enabled) = request.enabled {
             schedule.enabled = enabled;
         }
-        if let Some(cron) = normalized_cron {
-            schedule.cron = cron;
-            schedule.last_error = None;
-        }
-        if let Some(action) = request.action {
-            schedule.action = action;
+        match schedule.kind {
+            ScheduleKind::Cron => {
+                if let Some(cron) = normalized_cron {
+                    schedule.cron = Some(cron);
+                    schedule.last_error = None;
+                }
+                if let Some(action) = request.action {
+                    schedule.action = Some(action);
+                }
+            }
+            ScheduleKind::Interval => {
+                let new_on = request.on_seconds.or(schedule.on_seconds).unwrap_or(0);
+                let new_off = request.off_seconds.or(schedule.off_seconds).unwrap_or(0);
+                if request.on_seconds.is_some() || request.off_seconds.is_some() {
+                    validate_interval(new_on, new_off).map_err(AppError)?;
+                    schedule.on_seconds = Some(new_on);
+                    schedule.off_seconds = Some(new_off);
+                    schedule.starts_at_ms = Some(now_ms());
+                    schedule.last_error = None;
+                }
+                if let Some(start_action) = request.start_action {
+                    schedule.start_action = Some(start_action);
+                    schedule.starts_at_ms = Some(now_ms());
+                }
+            }
         }
         if let Some(label) = request.label {
             schedule.label = label.and_then(non_empty_label);
@@ -824,9 +945,73 @@ fn normalize_cron(expression: &str) -> Result<String> {
         }
     };
 
-    CronSchedule::from_str(&candidate)
-        .map(|_| candidate)
+    parse_cron(&candidate).map(|_| candidate)
+}
+
+fn parse_cron(expression: &str) -> Result<CronSchedule> {
+    let translated = translate_cron_to_crate_format(expression);
+    CronSchedule::from_str(&translated)
         .map_err(|error| anyhow!("invalid cron expression: {error}"))
+}
+
+fn translate_cron_to_crate_format(expression: &str) -> String {
+    let trimmed = expression.trim();
+    if trimmed.starts_with('@') {
+        return trimmed.to_string();
+    }
+
+    let mut fields: Vec<String> = trimmed.split_whitespace().map(str::to_string).collect();
+    let dow_index = match fields.len() {
+        5 => 4,
+        6 | 7 => 5,
+        _ => return trimmed.to_string(),
+    };
+
+    if let Some(field) = fields.get_mut(dow_index) {
+        *field = translate_dow_field(field);
+    }
+
+    fields.join(" ")
+}
+
+fn translate_dow_field(field: &str) -> String {
+    field
+        .split(',')
+        .map(translate_dow_part)
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn translate_dow_part(part: &str) -> String {
+    let trimmed = part.trim();
+    if let Some((head, step)) = trimmed.split_once('/') {
+        format!("{}/{}", translate_dow_head(head), step.trim())
+    } else {
+        translate_dow_head(trimmed)
+    }
+}
+
+fn translate_dow_head(value: &str) -> String {
+    let trimmed = value.trim();
+    if trimmed == "*" || trimmed == "?" {
+        return trimmed.to_string();
+    }
+    if let Some((start, end)) = trimmed.split_once('-') {
+        return format!(
+            "{}-{}",
+            translate_dow_value(start),
+            translate_dow_value(end),
+        );
+    }
+    translate_dow_value(trimmed)
+}
+
+fn translate_dow_value(value: &str) -> String {
+    let trimmed = value.trim();
+    if let Ok(n) = trimmed.parse::<u32>() {
+        return ((n % 7) + 1).to_string();
+    }
+    trimmed.to_string()
 }
 
 static SCHEDULE_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -837,16 +1022,26 @@ fn new_schedule_id() -> String {
 }
 
 fn schedule_view(schedule: &ScheduleConfig) -> ScheduleView {
-    let next_fire_at_ms = CronSchedule::from_str(&schedule.cron)
-        .ok()
-        .and_then(|parsed| parsed.upcoming(Local).next())
-        .map(|datetime| datetime.timestamp_millis());
+    let next_fire_at_ms = match schedule.kind {
+        ScheduleKind::Cron => schedule
+            .cron
+            .as_deref()
+            .and_then(|expr| parse_cron(expr).ok())
+            .and_then(|parsed| parsed.upcoming(Local).next())
+            .map(|datetime| datetime.timestamp_millis()),
+        ScheduleKind::Interval => next_interval_fire_ms(schedule, now_ms()).map(|ms| ms as i64),
+    };
 
     ScheduleView {
         id: schedule.id.clone(),
         device_name: schedule.device_name.clone(),
+        kind: schedule.kind,
         cron: schedule.cron.clone(),
         action: schedule.action,
+        on_seconds: schedule.on_seconds,
+        off_seconds: schedule.off_seconds,
+        start_action: schedule.start_action,
+        starts_at_ms: schedule.starts_at_ms,
         enabled: schedule.enabled,
         label: schedule.label.clone(),
         created_at_ms: schedule.created_at_ms,
@@ -854,6 +1049,66 @@ fn schedule_view(schedule: &ScheduleConfig) -> ScheduleView {
         last_error: schedule.last_error.clone(),
         next_fire_at_ms,
     }
+}
+
+fn interval_phase_at(schedule: &ScheduleConfig, at_ms: u128) -> Option<ScheduleAction> {
+    let on_seconds = schedule.on_seconds?;
+    let off_seconds = schedule.off_seconds?;
+    let start_action = schedule.start_action?;
+    let starts_at = schedule.starts_at_ms?;
+    let cycle = (on_seconds as u128).saturating_add(off_seconds as u128) * 1000;
+
+    if cycle == 0 {
+        return None;
+    }
+    if at_ms < starts_at {
+        return None;
+    }
+
+    let offset = (at_ms - starts_at) % cycle;
+    let first_phase_ms = match start_action {
+        ScheduleAction::On | ScheduleAction::Toggle => (on_seconds as u128) * 1000,
+        ScheduleAction::Off => (off_seconds as u128) * 1000,
+    };
+
+    let (primary, secondary) = match start_action {
+        ScheduleAction::Off => (ScheduleAction::Off, ScheduleAction::On),
+        _ => (ScheduleAction::On, ScheduleAction::Off),
+    };
+
+    if offset < first_phase_ms {
+        Some(primary)
+    } else {
+        Some(secondary)
+    }
+}
+
+fn next_interval_fire_ms(schedule: &ScheduleConfig, now: u128) -> Option<u128> {
+    let on_seconds = schedule.on_seconds?;
+    let off_seconds = schedule.off_seconds?;
+    let start_action = schedule.start_action?;
+    let starts_at = schedule.starts_at_ms?;
+    let cycle = (on_seconds as u128).saturating_add(off_seconds as u128) * 1000;
+
+    if cycle == 0 {
+        return None;
+    }
+    if now < starts_at {
+        return Some(starts_at);
+    }
+
+    let offset = (now - starts_at) % cycle;
+    let first_phase_ms = match start_action {
+        ScheduleAction::On | ScheduleAction::Toggle => (on_seconds as u128) * 1000,
+        ScheduleAction::Off => (off_seconds as u128) * 1000,
+    };
+
+    let into_cycle = if offset < first_phase_ms {
+        first_phase_ms - offset
+    } else {
+        cycle - offset
+    };
+    Some(now + into_cycle)
 }
 
 async fn run_scheduler(state: AppState) {
@@ -889,38 +1144,62 @@ async fn evaluate_schedules(
     };
 
     for schedule in candidates {
-        let parsed = match CronSchedule::from_str(&schedule.cron) {
-            Ok(parsed) => parsed,
-            Err(error) => {
-                warn!(
-                    schedule_id = %schedule.id,
-                    cron = %schedule.cron,
-                    %error,
-                    "skipping schedule with unparsable cron expression",
-                );
-                record_schedule_error(state, &schedule.id, format!("invalid cron: {error}")).await;
-                continue;
+        match schedule.kind {
+            ScheduleKind::Cron => {
+                let Some(expr) = schedule.cron.as_deref() else {
+                    record_schedule_error(state, &schedule.id, "missing cron expression".into())
+                        .await;
+                    continue;
+                };
+                let parsed = match parse_cron(expr) {
+                    Ok(parsed) => parsed,
+                    Err(error) => {
+                        warn!(
+                            schedule_id = %schedule.id,
+                            cron = %expr,
+                            %error,
+                            "skipping schedule with unparsable cron expression",
+                        );
+                        record_schedule_error(state, &schedule.id, format!("{error}")).await;
+                        continue;
+                    }
+                };
+
+                let Some(fire_time) = parsed.after(&previous_tick).next() else {
+                    continue;
+                };
+                if fire_time > now {
+                    continue;
+                }
+                if let Some(action) = schedule.action {
+                    fire_schedule(state, &schedule, action).await;
+                }
             }
-        };
+            ScheduleKind::Interval => {
+                let prev_ms = u128::try_from(previous_tick.timestamp_millis().max(0))
+                    .unwrap_or(0);
+                let now_ms_local = u128::try_from(now.timestamp_millis().max(0)).unwrap_or(0);
 
-        let Some(fire_time) = parsed.after(&previous_tick).next() else {
-            continue;
-        };
-
-        if fire_time > now {
-            continue;
+                let Some(target_phase) = interval_phase_at(&schedule, now_ms_local) else {
+                    continue;
+                };
+                let prev_phase = interval_phase_at(&schedule, prev_ms);
+                let needs_fire =
+                    schedule.last_fired_at_ms.is_none() || prev_phase != Some(target_phase);
+                if needs_fire {
+                    fire_schedule(state, &schedule, target_phase).await;
+                }
+            }
         }
-
-        fire_schedule(state, &schedule).await;
     }
 }
 
-async fn fire_schedule(state: &AppState, schedule: &ScheduleConfig) {
+async fn fire_schedule(state: &AppState, schedule: &ScheduleConfig, action: ScheduleAction) {
     info!(
         schedule_id = %schedule.id,
         device = %schedule.device_name,
-        action = ?schedule.action,
-        cron = %schedule.cron,
+        kind = ?schedule.kind,
+        action = ?action,
         "firing schedule",
     );
 
@@ -938,7 +1217,7 @@ async fn fire_schedule(state: &AppState, schedule: &ScheduleConfig) {
     let _operation_guard = operation_lock.lock().await;
 
     let outcome = async {
-        match schedule.action {
+        match action {
             ScheduleAction::On => {
                 retry_tapo_handshake(|| state.controller.set_power(&device, true)).await
             }
@@ -3088,6 +3367,54 @@ const INDEX_HTML: &str = r##"<!doctype html>
             line-height: 1.45;
         }
 
+        .interval-duration-row {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 10px;
+        }
+
+        .schedule-modal-panel input[type="number"] {
+            padding: 7px 9px;
+            border: 1px solid rgba(229, 216, 182, 0.28);
+            border-radius: 6px;
+            background: rgba(0, 0, 0, 0.32);
+            color: var(--ink);
+            font-family: inherit;
+            font-size: 13px;
+        }
+
+        .start-with {
+            display: flex;
+            gap: 12px;
+            padding: 0;
+            margin: 0;
+            border: 0;
+        }
+
+        .start-with legend {
+            font-size: 11px;
+            color: var(--muted);
+            text-transform: uppercase;
+            margin-bottom: 4px;
+            padding: 0;
+            width: 100%;
+        }
+
+        .start-with label {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 12px;
+            color: var(--ink);
+            text-transform: none;
+            letter-spacing: 0;
+        }
+
+        .start-with input[type="radio"] {
+            margin: 0;
+            cursor: pointer;
+        }
+
         .schedule-form-error {
             margin: 0;
             padding: 8px 10px;
@@ -3219,6 +3546,7 @@ const INDEX_HTML: &str = r##"<!doctype html>
             <input type="hidden" name="device_name" id="schedule-form-device" />
             <div class="mode-tabs" role="tablist">
                 <button type="button" data-mode="simple" aria-pressed="true">Simple</button>
+                <button type="button" data-mode="interval" aria-pressed="false">Interval</button>
                 <button type="button" data-mode="advanced" aria-pressed="false">Advanced</button>
             </div>
             <div class="mode-panel" data-panel="simple">
@@ -3250,6 +3578,30 @@ const INDEX_HTML: &str = r##"<!doctype html>
                     <button type="button" data-preset="all">Every day</button>
                     <button type="button" data-preset="none">Clear</button>
                 </div>
+            </div>
+            <div class="mode-panel" data-panel="interval" hidden>
+                <div class="interval-duration-row">
+                    <label>
+                        On for (min)
+                        <input type="number" name="on_minutes" min="0" step="1" value="60" />
+                    </label>
+                    <label>
+                        Off for (min)
+                        <input type="number" name="off_minutes" min="0" step="1" value="30" />
+                    </label>
+                </div>
+                <fieldset class="start-with">
+                    <legend>Start with</legend>
+                    <label><input type="radio" name="start_action" value="on" checked /> On</label>
+                    <label><input type="radio" name="start_action" value="off" /> Off</label>
+                </fieldset>
+                <div class="day-picker-presets">
+                    <button type="button" data-interval-preset="15/15">15m / 15m</button>
+                    <button type="button" data-interval-preset="30/30">30m / 30m</button>
+                    <button type="button" data-interval-preset="60/30">1h / 30m</button>
+                    <button type="button" data-interval-preset="60/60">1h / 1h</button>
+                </div>
+                <p class="cron-hint">Cycle repeats forever. Total on + off must be at least 1 minute.</p>
             </div>
             <div class="mode-panel" data-panel="advanced" hidden>
                 <label>
@@ -3628,6 +3980,9 @@ const INDEX_HTML: &str = r##"<!doctype html>
             scheduleFormEl.querySelector('select[name="action"]').value = "on";
             scheduleFormEl.querySelector('select[name="action-advanced"]').value = "on";
             scheduleFormEl.querySelector('input[name="cron"]').value = "";
+            scheduleFormEl.querySelector('input[name="on_minutes"]').value = "60";
+            scheduleFormEl.querySelector('input[name="off_minutes"]').value = "30";
+            scheduleFormEl.querySelector('input[name="start_action"][value="on"]').checked = true;
             scheduleFormEl.querySelector('input[name="label"]').value = "";
             scheduleModalEl.hidden = false;
             window.setTimeout(() => {
@@ -3663,7 +4018,7 @@ const INDEX_HTML: &str = r##"<!doctype html>
             });
         });
 
-        scheduleFormEl.querySelectorAll(".day-picker-presets button").forEach((button) => {
+        scheduleFormEl.querySelectorAll(".day-picker-presets button[data-preset]").forEach((button) => {
             button.addEventListener("click", () => {
                 const preset = button.dataset.preset;
                 const inputs = scheduleFormEl.querySelectorAll('input[name="day"]');
@@ -3680,6 +4035,14 @@ const INDEX_HTML: &str = r##"<!doctype html>
             });
         });
 
+        scheduleFormEl.querySelectorAll("button[data-interval-preset]").forEach((button) => {
+            button.addEventListener("click", () => {
+                const [on, off] = button.dataset.intervalPreset.split("/");
+                scheduleFormEl.querySelector('input[name="on_minutes"]').value = on;
+                scheduleFormEl.querySelector('input[name="off_minutes"]').value = off;
+            });
+        });
+
         scheduleFormEl.addEventListener("submit", async (event) => {
             event.preventDefault();
             scheduleFormErrorEl.hidden = true;
@@ -3687,24 +4050,43 @@ const INDEX_HTML: &str = r##"<!doctype html>
 
             const deviceName = scheduleFormDeviceEl.value;
             const labelValue = scheduleFormEl.querySelector('input[name="label"]').value.trim();
-            const isAdvanced = scheduleFormEl.querySelector('.mode-tabs button[data-mode="advanced"]').getAttribute("aria-pressed") === "true";
+            const activeMode = scheduleFormEl.querySelector('.mode-tabs button[aria-pressed="true"]').dataset.mode;
 
-            let cron = "";
-            let action = "on";
-            if (isAdvanced) {
-                cron = scheduleFormEl.querySelector('input[name="cron"]').value.trim();
-                action = scheduleFormEl.querySelector('select[name="action-advanced"]').value;
+            let body = null;
+            if (activeMode === "advanced") {
+                const cron = scheduleFormEl.querySelector('input[name="cron"]').value.trim();
+                const action = scheduleFormEl.querySelector('select[name="action-advanced"]').value;
                 if (cron === "") {
                     showScheduleFormError("Cron expression is required.");
                     return;
                 }
+                body = { kind: "cron", device_name: deviceName, cron, action };
+            } else if (activeMode === "interval") {
+                const onMinutes = Number.parseInt(scheduleFormEl.querySelector('input[name="on_minutes"]').value, 10);
+                const offMinutes = Number.parseInt(scheduleFormEl.querySelector('input[name="off_minutes"]').value, 10);
+                if (!Number.isFinite(onMinutes) || !Number.isFinite(offMinutes) || onMinutes < 0 || offMinutes < 0) {
+                    showScheduleFormError("On and off durations must be non-negative whole minutes.");
+                    return;
+                }
+                if (onMinutes + offMinutes < 1) {
+                    showScheduleFormError("On + off must be at least 1 minute.");
+                    return;
+                }
+                const startAction = scheduleFormEl.querySelector('input[name="start_action"]:checked').value;
+                body = {
+                    kind: "interval",
+                    device_name: deviceName,
+                    on_seconds: onMinutes * 60,
+                    off_seconds: offMinutes * 60,
+                    start_action: startAction,
+                };
             } else {
                 const time = scheduleFormEl.querySelector('input[name="time"]').value;
                 if (!time) {
                     showScheduleFormError("Pick a time.");
                     return;
                 }
-                action = scheduleFormEl.querySelector('select[name="action"]').value;
+                const action = scheduleFormEl.querySelector('select[name="action"]').value;
                 const days = Array.from(scheduleFormEl.querySelectorAll('input[name="day"]:checked')).map((input) => input.value);
                 if (days.length === 0) {
                     showScheduleFormError("Pick at least one day.");
@@ -3719,8 +4101,12 @@ const INDEX_HTML: &str = r##"<!doctype html>
                 }
                 const sortedDays = days.map(Number).sort((a, b) => a - b);
                 const dowField = sortedDays.length === 7 ? "*" : sortedDays.join(",");
-                cron = `${minute} ${hour} * * ${dowField}`;
+                const cron = `${minute} ${hour} * * ${dowField}`;
+                body = { kind: "cron", device_name: deviceName, cron, action };
             }
+
+            body.label = labelValue === "" ? null : labelValue;
+            body.enabled = true;
 
             scheduleFormSubmitEl.disabled = true;
             scheduleFormSubmitEl.textContent = "Creating";
@@ -3729,13 +4115,7 @@ const INDEX_HTML: &str = r##"<!doctype html>
                 await requestJson("/api/schedules", {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({
-                        device_name: deviceName,
-                        cron,
-                        action,
-                        label: labelValue === "" ? null : labelValue,
-                        enabled: true,
-                    }),
+                    body: JSON.stringify(body),
                 });
                 closeScheduleModal();
                 await loadSchedules();
@@ -4086,13 +4466,24 @@ const INDEX_HTML: &str = r##"<!doctype html>
         }
 
         function renderScheduleItem(schedule) {
-            const summary = describeCron(schedule.cron);
-            const actionLabel = schedule.action === "on" ? "ON" : schedule.action === "off" ? "OFF" : "TOG";
+            const isInterval = schedule.kind === "interval";
+            const displayAction = isInterval ? "toggle" : (schedule.action ?? "on");
+            const actionBadge = isInterval
+                ? "CYC"
+                : displayAction === "on" ? "ON" : displayAction === "off" ? "OFF" : "TOG";
+            const summary = isInterval
+                ? describeInterval(schedule)
+                : describeCron(schedule.cron ?? "");
+
             const metaParts = [];
             if (schedule.label) {
                 metaParts.push(escapeHtml(schedule.label));
             }
-            metaParts.push(`<code>${escapeHtml(schedule.cron)}</code>`);
+            if (isInterval) {
+                metaParts.push(`starts ${schedule.start_action === "off" ? "off" : "on"}`);
+            } else if (schedule.cron) {
+                metaParts.push(`<code>${escapeHtml(schedule.cron)}</code>`);
+            }
             if (schedule.next_fire_at_ms && schedule.enabled) {
                 metaParts.push(`next ${formatRelative(schedule.next_fire_at_ms)}`);
             }
@@ -4107,7 +4498,7 @@ const INDEX_HTML: &str = r##"<!doctype html>
                     </label>
                     <div class="schedule-body">
                         <span class="schedule-summary">
-                            <span class="schedule-action ${escapeHtml(schedule.action)}">${actionLabel}</span>
+                            <span class="schedule-action ${escapeHtml(displayAction)}">${actionBadge}</span>
                             ${escapeHtml(summary)}
                         </span>
                         <span class="schedule-meta">${meta}</span>
@@ -4115,6 +4506,12 @@ const INDEX_HTML: &str = r##"<!doctype html>
                     <button class="schedule-delete" type="button" data-schedule-delete="${escapeHtml(schedule.id)}" aria-label="Delete schedule" title="Delete">&times;</button>
                 </li>
             `;
+        }
+
+        function describeInterval(schedule) {
+            const onSecs = schedule.on_seconds ?? 0;
+            const offSecs = schedule.off_seconds ?? 0;
+            return `${formatDurationFromSeconds(onSecs)} on / ${formatDurationFromSeconds(offSecs)} off`;
         }
 
         function describeCron(expr) {
@@ -4509,14 +4906,45 @@ mod tests {
     fn normalizes_five_field_cron_with_seconds_prefix() {
         let normalized = normalize_cron("0 7 * * 1-5").unwrap();
         assert_eq!(normalized, "0 0 7 * * 1-5");
-        CronSchedule::from_str(&normalized).unwrap();
+        parse_cron(&normalized).unwrap();
     }
 
     #[test]
     fn passes_six_field_cron_through() {
         let normalized = normalize_cron("30 0 7 * * 1-5").unwrap();
         assert_eq!(normalized, "30 0 7 * * 1-5");
-        CronSchedule::from_str(&normalized).unwrap();
+        parse_cron(&normalized).unwrap();
+    }
+
+    #[test]
+    fn accepts_standard_dow_zero_through_seven() {
+        let normalized = normalize_cron("0 2 * * 0,6").unwrap();
+        assert_eq!(normalized, "0 0 2 * * 0,6");
+        parse_cron(&normalized).unwrap();
+
+        let normalized_seven = normalize_cron("0 2 * * 7").unwrap();
+        parse_cron(&normalized_seven).unwrap();
+    }
+
+    #[test]
+    fn translates_standard_dow_to_crate_dow() {
+        assert_eq!(translate_dow_field("0"), "1");
+        assert_eq!(translate_dow_field("7"), "1");
+        assert_eq!(translate_dow_field("0,6"), "1,7");
+        assert_eq!(translate_dow_field("1-5"), "2-6");
+        assert_eq!(translate_dow_field("*"), "*");
+        assert_eq!(translate_dow_field("*/2"), "*/2");
+        assert_eq!(translate_dow_field("1-5/2"), "2-6/2");
+    }
+
+    #[test]
+    fn weekday_cron_fires_monday_to_friday() {
+        let normalized = normalize_cron("0 7 * * 1-5").unwrap();
+        let parsed = parse_cron(&normalized).unwrap();
+        let sunday_midnight =
+            chrono::DateTime::<chrono::Utc>::from_timestamp(1_704_585_600, 0).unwrap();
+        let next = parsed.after(&sunday_midnight).next().unwrap();
+        assert_eq!(next.timestamp(), 1_704_697_200);
     }
 
     #[test]
@@ -4539,10 +4967,34 @@ mod tests {
                 ScheduleConfig {
                     id: "abc".to_string(),
                     device_name: "lights".to_string(),
-                    cron: "0 0 7 * * 1-5".to_string(),
-                    action: ScheduleAction::On,
+                    kind: ScheduleKind::Cron,
+                    cron: Some("0 0 7 * * 1-5".to_string()),
+                    action: Some(ScheduleAction::On),
+                    on_seconds: None,
+                    off_seconds: None,
+                    start_action: None,
+                    starts_at_ms: None,
                     enabled: true,
                     label: Some("Morning".to_string()),
+                    created_at_ms: 1_700_000_000_000,
+                    last_fired_at_ms: None,
+                    last_error: None,
+                },
+            );
+            schedules.insert(
+                "iv1".to_string(),
+                ScheduleConfig {
+                    id: "iv1".to_string(),
+                    device_name: "lights".to_string(),
+                    kind: ScheduleKind::Interval,
+                    cron: None,
+                    action: None,
+                    on_seconds: Some(3600),
+                    off_seconds: Some(1800),
+                    start_action: Some(ScheduleAction::On),
+                    starts_at_ms: Some(1_700_000_000_000),
+                    enabled: true,
+                    label: Some("1h/30m".to_string()),
                     created_at_ms: 1_700_000_000_000,
                     last_fired_at_ms: None,
                     last_error: None,
@@ -4554,12 +5006,50 @@ mod tests {
         let reloaded = AppState::new(&settings);
         load_persisted_state(&reloaded).await.unwrap();
         let schedules = reloaded.schedules.read().await;
-        let loaded = schedules.get("abc").unwrap();
-        assert_eq!(loaded.device_name, "lights");
-        assert_eq!(loaded.cron, "0 0 7 * * 1-5");
-        assert_eq!(loaded.action, ScheduleAction::On);
-        assert_eq!(loaded.label.as_deref(), Some("Morning"));
+        let cron_loaded = schedules.get("abc").unwrap();
+        assert_eq!(cron_loaded.device_name, "lights");
+        assert_eq!(cron_loaded.cron.as_deref(), Some("0 0 7 * * 1-5"));
+        assert_eq!(cron_loaded.action, Some(ScheduleAction::On));
+        assert_eq!(cron_loaded.label.as_deref(), Some("Morning"));
+
+        let interval_loaded = schedules.get("iv1").unwrap();
+        assert_eq!(interval_loaded.kind, ScheduleKind::Interval);
+        assert_eq!(interval_loaded.on_seconds, Some(3600));
+        assert_eq!(interval_loaded.off_seconds, Some(1800));
+        assert_eq!(interval_loaded.start_action, Some(ScheduleAction::On));
 
         let _ = fs::remove_file(state_path);
+    }
+
+    #[test]
+    fn interval_phase_flips_at_boundary() {
+        let schedule = ScheduleConfig {
+            id: "x".to_string(),
+            device_name: "lights".to_string(),
+            kind: ScheduleKind::Interval,
+            cron: None,
+            action: None,
+            on_seconds: Some(60),
+            off_seconds: Some(120),
+            start_action: Some(ScheduleAction::On),
+            starts_at_ms: Some(1_000),
+            enabled: true,
+            label: None,
+            created_at_ms: 1_000,
+            last_fired_at_ms: None,
+            last_error: None,
+        };
+
+        assert_eq!(interval_phase_at(&schedule, 1_000), Some(ScheduleAction::On));
+        assert_eq!(interval_phase_at(&schedule, 60_000), Some(ScheduleAction::On));
+        assert_eq!(interval_phase_at(&schedule, 61_001), Some(ScheduleAction::Off));
+        assert_eq!(interval_phase_at(&schedule, 180_000), Some(ScheduleAction::Off));
+        assert_eq!(interval_phase_at(&schedule, 181_001), Some(ScheduleAction::On));
+        assert_eq!(interval_phase_at(&schedule, 500), None);
+
+        // Next fire from t=30s should be at t=61s (the on→off transition).
+        assert_eq!(next_interval_fire_ms(&schedule, 30_000), Some(61_000));
+        // Next fire from t=120s should be at t=181s (the off→on transition).
+        assert_eq!(next_interval_fire_ms(&schedule, 120_000), Some(181_000));
     }
 }
