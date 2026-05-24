@@ -5,7 +5,9 @@ use std::future::Future;
 use std::io::ErrorKind;
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path as FsPath, PathBuf};
+use std::str::FromStr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow};
@@ -14,9 +16,10 @@ use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, Query, State};
 use axum::http::{StatusCode, header};
 use axum::response::{Html, IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use axum::{Json, Router};
-use chrono::{DateTime, Datelike, Days, Duration as ChronoDuration, NaiveDate, Utc};
+use chrono::{DateTime, Datelike, Days, Duration as ChronoDuration, Local, NaiveDate, Timelike, Utc};
+use cron::Schedule as CronSchedule;
 use rust_xlsxwriter::{Format, FormatAlign, FormatBorder, Workbook};
 use serde::{Deserialize, Serialize};
 use tapo::{ApiClient, requests::EnergyDataInterval, requests::PowerDataInterval};
@@ -57,6 +60,7 @@ struct AppState {
     devices: Arc<RwLock<BTreeMap<String, ManagedDevice>>>,
     device_locks: Arc<RwLock<BTreeMap<IpAddr, Arc<Mutex<()>>>>>,
     device_events: watch::Sender<DeviceListResponse>,
+    schedules: Arc<RwLock<BTreeMap<String, ScheduleConfig>>>,
     discovery_timeout_seconds: u64,
     discovery_targets: Vec<String>,
     refresh_seconds: u64,
@@ -233,10 +237,91 @@ struct SetPowerRequest {
     on: bool,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+enum ScheduleAction {
+    On,
+    Off,
+    Toggle,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ScheduleConfig {
+    id: String,
+    device_name: String,
+    cron: String,
+    action: ScheduleAction,
+    #[serde(default = "default_true")]
+    enabled: bool,
+    #[serde(default)]
+    label: Option<String>,
+    #[serde(default)]
+    created_at_ms: u128,
+    #[serde(default)]
+    last_fired_at_ms: Option<u128>,
+    #[serde(default)]
+    last_error: Option<String>,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct CreateScheduleRequest {
+    device_name: String,
+    cron: String,
+    action: ScheduleAction,
+    #[serde(default)]
+    label: Option<String>,
+    #[serde(default = "default_true")]
+    enabled: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct UpdateScheduleRequest {
+    #[serde(default)]
+    enabled: Option<bool>,
+    #[serde(default)]
+    cron: Option<String>,
+    #[serde(default)]
+    action: Option<ScheduleAction>,
+    #[serde(default, deserialize_with = "deserialize_optional_label")]
+    label: Option<Option<String>>,
+}
+
+fn deserialize_optional_label<'de, D>(deserializer: D) -> Result<Option<Option<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<Option<String>>::deserialize(deserializer)
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ScheduleView {
+    id: String,
+    device_name: String,
+    cron: String,
+    action: ScheduleAction,
+    enabled: bool,
+    label: Option<String>,
+    created_at_ms: u128,
+    last_fired_at_ms: Option<u128>,
+    last_error: Option<String>,
+    next_fire_at_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ScheduleListResponse {
+    schedules: Vec<ScheduleView>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct PersistedState {
     version: u32,
     devices: BTreeMap<String, DeviceConfig>,
+    #[serde(default)]
+    schedules: BTreeMap<String, ScheduleConfig>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -267,6 +352,7 @@ async fn main() -> Result<()> {
     tokio::spawn(initial_refresh_devices(state.clone()));
     tokio::spawn(monitor_devices(state.clone()));
     tokio::spawn(scan_for_devices(state.clone()));
+    tokio::spawn(run_scheduler(state.clone()));
 
     let app = Router::new()
         .route("/", get(index))
@@ -280,6 +366,11 @@ async fn main() -> Result<()> {
         .route("/api/scan", post(scan_devices))
         .route("/api/devices/{name}/toggle", post(toggle_device))
         .route("/api/devices/{name}/power", post(set_device_power))
+        .route("/api/schedules", get(list_schedules).post(create_schedule))
+        .route(
+            "/api/schedules/{id}",
+            delete(delete_schedule).patch(update_schedule),
+        )
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind(settings.bind_address)
@@ -374,6 +465,7 @@ impl AppState {
             devices: Arc::new(RwLock::new(BTreeMap::new())),
             device_locks: Arc::new(RwLock::new(BTreeMap::new())),
             device_events,
+            schedules: Arc::new(RwLock::new(BTreeMap::new())),
             discovery_timeout_seconds: settings.discovery_timeout_seconds,
             discovery_targets: settings.discovery_targets.clone(),
             refresh_seconds: settings.refresh_seconds,
@@ -596,6 +688,330 @@ async fn set_device_power(
         .map_err(AppError)
 }
 
+async fn list_schedules(State(state): State<AppState>) -> Json<ScheduleListResponse> {
+    let schedules = state.schedules.read().await;
+    let mut views: Vec<ScheduleView> = schedules.values().map(schedule_view).collect();
+    views.sort_by(|a, b| {
+        a.device_name
+            .cmp(&b.device_name)
+            .then(a.created_at_ms.cmp(&b.created_at_ms))
+    });
+
+    Json(ScheduleListResponse { schedules: views })
+}
+
+async fn create_schedule(
+    State(state): State<AppState>,
+    Json(request): Json<CreateScheduleRequest>,
+) -> Result<(StatusCode, Json<ScheduleView>), AppError> {
+    let normalized_cron = normalize_cron(&request.cron).map_err(AppError)?;
+
+    {
+        let devices = state.devices.read().await;
+        if !devices.contains_key(&request.device_name) {
+            return Err(AppError(anyhow!(
+                "unknown device '{}'",
+                request.device_name
+            )));
+        }
+    }
+
+    let label = request.label.and_then(non_empty_label);
+    let schedule = ScheduleConfig {
+        id: new_schedule_id(),
+        device_name: request.device_name,
+        cron: normalized_cron,
+        action: request.action,
+        enabled: request.enabled,
+        label,
+        created_at_ms: now_ms(),
+        last_fired_at_ms: None,
+        last_error: None,
+    };
+
+    {
+        let mut schedules = state.schedules.write().await;
+        schedules.insert(schedule.id.clone(), schedule.clone());
+    }
+
+    save_persisted_state(&state).await.map_err(AppError)?;
+
+    Ok((StatusCode::CREATED, Json(schedule_view(&schedule))))
+}
+
+async fn delete_schedule(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, AppError> {
+    let removed = {
+        let mut schedules = state.schedules.write().await;
+        schedules.remove(&id).is_some()
+    };
+
+    if !removed {
+        return Err(AppError(anyhow!("unknown schedule '{}'", id)));
+    }
+
+    save_persisted_state(&state).await.map_err(AppError)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn update_schedule(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(request): Json<UpdateScheduleRequest>,
+) -> Result<Json<ScheduleView>, AppError> {
+    let normalized_cron = match request.cron.as_deref() {
+        Some(expr) => Some(normalize_cron(expr).map_err(AppError)?),
+        None => None,
+    };
+
+    let updated = {
+        let mut schedules = state.schedules.write().await;
+        let schedule = schedules
+            .get_mut(&id)
+            .ok_or_else(|| AppError(anyhow!("unknown schedule '{}'", id)))?;
+
+        if let Some(enabled) = request.enabled {
+            schedule.enabled = enabled;
+        }
+        if let Some(cron) = normalized_cron {
+            schedule.cron = cron;
+            schedule.last_error = None;
+        }
+        if let Some(action) = request.action {
+            schedule.action = action;
+        }
+        if let Some(label) = request.label {
+            schedule.label = label.and_then(non_empty_label);
+        }
+
+        schedule.clone()
+    };
+
+    save_persisted_state(&state).await.map_err(AppError)?;
+    Ok(Json(schedule_view(&updated)))
+}
+
+fn non_empty_label(label: String) -> Option<String> {
+    let trimmed = label.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+fn normalize_cron(expression: &str) -> Result<String> {
+    let trimmed = expression.trim();
+    if trimmed.is_empty() {
+        return Err(anyhow!("cron expression is empty"));
+    }
+
+    let candidate = if trimmed.starts_with('@') {
+        trimmed.to_string()
+    } else {
+        let field_count = trimmed.split_whitespace().count();
+        match field_count {
+            5 => format!("0 {}", trimmed),
+            6 | 7 => trimmed.to_string(),
+            _ => {
+                return Err(anyhow!(
+                    "cron expression must have 5, 6, or 7 fields (got {})",
+                    field_count
+                ));
+            }
+        }
+    };
+
+    CronSchedule::from_str(&candidate)
+        .map(|_| candidate)
+        .map_err(|error| anyhow!("invalid cron expression: {error}"))
+}
+
+static SCHEDULE_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+fn new_schedule_id() -> String {
+    let seq = SCHEDULE_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("{:x}-{:x}", now_ms(), seq)
+}
+
+fn schedule_view(schedule: &ScheduleConfig) -> ScheduleView {
+    let next_fire_at_ms = CronSchedule::from_str(&schedule.cron)
+        .ok()
+        .and_then(|parsed| parsed.upcoming(Local).next())
+        .map(|datetime| datetime.timestamp_millis());
+
+    ScheduleView {
+        id: schedule.id.clone(),
+        device_name: schedule.device_name.clone(),
+        cron: schedule.cron.clone(),
+        action: schedule.action,
+        enabled: schedule.enabled,
+        label: schedule.label.clone(),
+        created_at_ms: schedule.created_at_ms,
+        last_fired_at_ms: schedule.last_fired_at_ms,
+        last_error: schedule.last_error.clone(),
+        next_fire_at_ms,
+    }
+}
+
+async fn run_scheduler(state: AppState) {
+    let mut previous_tick = Local::now();
+
+    loop {
+        let now = Local::now();
+        let seconds_into_minute = u64::from(now.second());
+        let nanos_into_second = u64::from(now.nanosecond());
+        let wait_seconds = 60u64.saturating_sub(seconds_into_minute);
+        let wait = Duration::from_secs(wait_seconds)
+            .saturating_sub(Duration::from_nanos(nanos_into_second));
+        sleep(wait).await;
+
+        let tick_time = Local::now();
+        evaluate_schedules(&state, previous_tick, tick_time).await;
+        previous_tick = tick_time;
+    }
+}
+
+async fn evaluate_schedules(
+    state: &AppState,
+    previous_tick: DateTime<Local>,
+    now: DateTime<Local>,
+) {
+    let candidates: Vec<ScheduleConfig> = {
+        let schedules = state.schedules.read().await;
+        schedules
+            .values()
+            .filter(|schedule| schedule.enabled)
+            .cloned()
+            .collect()
+    };
+
+    for schedule in candidates {
+        let parsed = match CronSchedule::from_str(&schedule.cron) {
+            Ok(parsed) => parsed,
+            Err(error) => {
+                warn!(
+                    schedule_id = %schedule.id,
+                    cron = %schedule.cron,
+                    %error,
+                    "skipping schedule with unparsable cron expression",
+                );
+                record_schedule_error(state, &schedule.id, format!("invalid cron: {error}")).await;
+                continue;
+            }
+        };
+
+        let Some(fire_time) = parsed.after(&previous_tick).next() else {
+            continue;
+        };
+
+        if fire_time > now {
+            continue;
+        }
+
+        fire_schedule(state, &schedule).await;
+    }
+}
+
+async fn fire_schedule(state: &AppState, schedule: &ScheduleConfig) {
+    info!(
+        schedule_id = %schedule.id,
+        device = %schedule.device_name,
+        action = ?schedule.action,
+        cron = %schedule.cron,
+        "firing schedule",
+    );
+
+    let device = match get_device_config(state, &schedule.device_name).await {
+        Ok(device) => device,
+        Err(error) => {
+            let message = format!("device lookup failed: {error}");
+            warn!(schedule_id = %schedule.id, %error, "schedule firing failed");
+            record_schedule_error(state, &schedule.id, message).await;
+            return;
+        }
+    };
+
+    let operation_lock = device_operation_lock(state, &device).await;
+    let _operation_guard = operation_lock.lock().await;
+
+    let outcome = async {
+        match schedule.action {
+            ScheduleAction::On => {
+                retry_tapo_handshake(|| state.controller.set_power(&device, true)).await
+            }
+            ScheduleAction::Off => {
+                retry_tapo_handshake(|| state.controller.set_power(&device, false)).await
+            }
+            ScheduleAction::Toggle => {
+                let current =
+                    retry_tapo_handshake(|| state.controller.read_device(&device)).await?;
+                retry_tapo_handshake(|| state.controller.set_power(&device, !current.device_on))
+                    .await
+            }
+        }
+    }
+    .await;
+
+    if let Err(error) = outcome {
+        let message = format!("{error:#}");
+        warn!(schedule_id = %schedule.id, %error, "schedule action failed");
+        record_schedule_error(state, &schedule.id, message).await;
+        return;
+    }
+
+    match retry_tapo_handshake(|| state.controller.read_device(&device)).await {
+        Ok(snapshot) => {
+            update_device_snapshot(state, &schedule.device_name, snapshot, None).await;
+        }
+        Err(error) => {
+            warn!(schedule_id = %schedule.id, %error, "post-fire device read failed");
+        }
+    }
+
+    record_schedule_success(state, &schedule.id).await;
+}
+
+async fn record_schedule_success(state: &AppState, id: &str) {
+    let updated = {
+        let mut schedules = state.schedules.write().await;
+        if let Some(schedule) = schedules.get_mut(id) {
+            schedule.last_fired_at_ms = Some(now_ms());
+            schedule.last_error = None;
+            true
+        } else {
+            false
+        }
+    };
+
+    if updated {
+        if let Err(error) = save_persisted_state(state).await {
+            warn!(%error, "failed to persist schedule run state");
+        }
+    }
+}
+
+async fn record_schedule_error(state: &AppState, id: &str, message: String) {
+    let updated = {
+        let mut schedules = state.schedules.write().await;
+        if let Some(schedule) = schedules.get_mut(id) {
+            schedule.last_fired_at_ms = Some(now_ms());
+            schedule.last_error = Some(message);
+            true
+        } else {
+            false
+        }
+    };
+
+    if updated {
+        if let Err(error) = save_persisted_state(state).await {
+            warn!(%error, "failed to persist schedule error state");
+        }
+    }
+}
+
 async fn monitor_devices(state: AppState) {
     loop {
         sleep(Duration::from_secs(state.refresh_seconds)).await;
@@ -722,19 +1138,35 @@ async fn load_persisted_state(state: &AppState) -> Result<()> {
     }
 
     let loaded_count = persisted.devices.len();
-    let mut devices = state.devices.write().await;
+    let loaded_schedule_count = persisted.schedules.len();
+    {
+        let mut devices = state.devices.write().await;
 
-    for (name, config) in persisted.devices {
-        devices.insert(name.clone(), managed_device_from_config(name, config));
+        for (name, config) in persisted.devices {
+            devices.insert(name.clone(), managed_device_from_config(name, config));
+        }
     }
 
-    info!(loaded_count, path = %state.state_path.display(), "loaded persisted devices");
+    {
+        let mut schedules = state.schedules.write().await;
+        for (id, schedule) in persisted.schedules {
+            schedules.insert(id, schedule);
+        }
+    }
+
+    info!(
+        loaded_count,
+        loaded_schedule_count,
+        path = %state.state_path.display(),
+        "loaded persisted devices",
+    );
     Ok(())
 }
 
 async fn save_persisted_state(state: &AppState) -> Result<()> {
     let persisted = {
         let devices = state.devices.read().await;
+        let schedules = state.schedules.read().await;
 
         PersistedState {
             version: STATE_VERSION,
@@ -742,6 +1174,7 @@ async fn save_persisted_state(state: &AppState) -> Result<()> {
                 .iter()
                 .map(|(name, device)| (name.clone(), device.config.clone()))
                 .collect(),
+            schedules: schedules.clone(),
         }
     };
 
@@ -2322,6 +2755,378 @@ const INDEX_HTML: &str = r##"<!doctype html>
             background: rgba(0, 0, 0, 0.18);
         }
 
+        .schedules {
+            margin-top: 14px;
+            padding: 10px 11px;
+            border-radius: 8px;
+            background: rgba(0, 0, 0, 0.24);
+            font-family: var(--font-data);
+        }
+
+        .schedules-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 8px;
+            margin-bottom: 8px;
+        }
+
+        .schedules-header h3 {
+            margin: 0;
+            font-size: 11px;
+            font-weight: 600;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+            color: var(--muted);
+        }
+
+        .schedule-add {
+            padding: 4px 9px;
+            border: 1px solid rgba(229, 216, 182, 0.3);
+            border-radius: 6px;
+            background: rgba(0, 0, 0, 0.3);
+            color: var(--ink);
+            font-family: inherit;
+            font-size: 11px;
+            cursor: pointer;
+        }
+
+        .schedule-add:hover {
+            border-color: rgba(229, 216, 182, 0.6);
+        }
+
+        .schedule-list {
+            list-style: none;
+            margin: 0;
+            padding: 0;
+            display: grid;
+            gap: 6px;
+        }
+
+        .schedule-item {
+            display: grid;
+            grid-template-columns: auto 1fr auto;
+            align-items: center;
+            gap: 8px;
+            padding: 6px 8px;
+            border-radius: 6px;
+            background: rgba(255, 255, 255, 0.04);
+            font-size: 12px;
+        }
+
+        .schedule-item.disabled {
+            opacity: 0.55;
+        }
+
+        .schedule-enabled {
+            display: inline-flex;
+            align-items: center;
+        }
+
+        .schedule-enabled input[type="checkbox"] {
+            margin: 0;
+            cursor: pointer;
+        }
+
+        .schedule-body {
+            min-width: 0;
+            display: grid;
+            gap: 2px;
+        }
+
+        .schedule-summary {
+            font-weight: 600;
+            color: var(--ink);
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .schedule-meta {
+            color: var(--muted);
+            font-size: 10px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .schedule-action {
+            display: inline-block;
+            margin-right: 4px;
+            padding: 0 4px;
+            border-radius: 3px;
+            font-size: 9px;
+            font-weight: 700;
+            letter-spacing: 0.06em;
+        }
+
+        .schedule-action.on {
+            background: var(--green);
+            color: #0c1a0c;
+        }
+
+        .schedule-action.off {
+            background: var(--red);
+            color: #200807;
+        }
+
+        .schedule-action.toggle {
+            background: var(--amber);
+            color: #1a1306;
+        }
+
+        .schedule-delete {
+            padding: 0;
+            width: 22px;
+            height: 22px;
+            border: 0;
+            border-radius: 4px;
+            background: transparent;
+            color: var(--muted);
+            font-size: 16px;
+            line-height: 1;
+            cursor: pointer;
+        }
+
+        .schedule-delete:hover {
+            color: var(--red);
+            background: rgba(0, 0, 0, 0.3);
+        }
+
+        .schedules-empty {
+            margin: 0;
+            font-size: 11px;
+            color: var(--muted);
+            font-style: italic;
+        }
+
+        .schedule-modal[hidden] {
+            display: none;
+        }
+
+        .schedule-modal {
+            position: fixed;
+            inset: 0;
+            z-index: 100;
+            display: grid;
+            place-items: center;
+            padding: 16px;
+        }
+
+        .schedule-modal-backdrop {
+            position: absolute;
+            inset: 0;
+            background: rgba(0, 0, 0, 0.62);
+            backdrop-filter: blur(2px);
+        }
+
+        .schedule-modal-panel {
+            position: relative;
+            width: min(100%, 420px);
+            max-height: calc(100vh - 32px);
+            overflow: auto;
+            padding: 18px 20px;
+            border: 1px solid #070604;
+            border-radius: 14px;
+            background:
+                linear-gradient(160deg, rgba(255,255,255,0.08), transparent 32%),
+                linear-gradient(var(--breaker-top), var(--bakelite));
+            color: var(--ink);
+            box-shadow:
+                inset 0 0 0 1px rgba(255, 255, 255, 0.05),
+                0 18px 38px rgba(0, 0, 0, 0.55);
+            font-family: var(--font-data);
+            display: grid;
+            gap: 12px;
+        }
+
+        .schedule-modal-panel header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .schedule-modal-panel h3 {
+            margin: 0;
+            font-size: 14px;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+
+        .schedule-modal-close {
+            padding: 4px 8px;
+            border: 0;
+            border-radius: 4px;
+            background: transparent;
+            color: var(--muted);
+            font-size: 18px;
+            cursor: pointer;
+        }
+
+        .mode-tabs {
+            display: inline-flex;
+            border: 1px solid rgba(229, 216, 182, 0.3);
+            border-radius: 6px;
+            overflow: hidden;
+            width: fit-content;
+        }
+
+        .mode-tabs button {
+            padding: 5px 12px;
+            border: 0;
+            background: transparent;
+            color: var(--muted);
+            font-family: inherit;
+            font-size: 11px;
+            text-transform: uppercase;
+            cursor: pointer;
+        }
+
+        .mode-tabs button[aria-pressed="true"] {
+            background: rgba(255, 255, 255, 0.1);
+            color: var(--ink);
+        }
+
+        .schedule-modal-panel label {
+            display: grid;
+            gap: 4px;
+            font-size: 11px;
+            color: var(--muted);
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+        }
+
+        .schedule-modal-panel input[type="text"],
+        .schedule-modal-panel input[type="time"],
+        .schedule-modal-panel select {
+            padding: 7px 9px;
+            border: 1px solid rgba(229, 216, 182, 0.28);
+            border-radius: 6px;
+            background: rgba(0, 0, 0, 0.32);
+            color: var(--ink);
+            font-family: inherit;
+            font-size: 13px;
+        }
+
+        .schedule-modal-panel input[type="text"]:focus,
+        .schedule-modal-panel input[type="time"]:focus,
+        .schedule-modal-panel select:focus {
+            outline: 2px solid rgba(229, 216, 182, 0.5);
+            outline-offset: 1px;
+        }
+
+        .day-picker {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+            padding: 0;
+            margin: 0;
+            border: 0;
+        }
+
+        .day-picker legend {
+            font-size: 11px;
+            color: var(--muted);
+            text-transform: uppercase;
+            margin-bottom: 4px;
+            padding: 0;
+        }
+
+        .day-picker label {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            padding: 5px 9px;
+            border: 1px solid rgba(229, 216, 182, 0.28);
+            border-radius: 999px;
+            background: rgba(0, 0, 0, 0.25);
+            color: var(--ink);
+            font-size: 11px;
+            text-transform: none;
+            letter-spacing: 0;
+            cursor: pointer;
+        }
+
+        .day-picker label:has(input:checked) {
+            border-color: var(--green);
+            background: color-mix(in srgb, var(--green) 18%, transparent);
+        }
+
+        .day-picker input[type="checkbox"] {
+            display: none;
+        }
+
+        .day-picker-presets {
+            display: flex;
+            gap: 6px;
+            margin-top: 4px;
+            flex-wrap: wrap;
+        }
+
+        .day-picker-presets button {
+            padding: 3px 8px;
+            border: 1px solid rgba(229, 216, 182, 0.2);
+            border-radius: 4px;
+            background: transparent;
+            color: var(--muted);
+            font-family: inherit;
+            font-size: 10px;
+            cursor: pointer;
+            text-transform: uppercase;
+        }
+
+        .day-picker-presets button:hover {
+            color: var(--ink);
+            border-color: rgba(229, 216, 182, 0.5);
+        }
+
+        .cron-hint {
+            margin: 0;
+            font-size: 11px;
+            color: var(--muted);
+            line-height: 1.45;
+        }
+
+        .schedule-form-error {
+            margin: 0;
+            padding: 8px 10px;
+            border: 1px solid rgba(229, 119, 119, 0.45);
+            border-radius: 6px;
+            background: rgba(80, 16, 16, 0.5);
+            color: #ffd4d4;
+            font-size: 12px;
+        }
+
+        .schedule-form-actions {
+            display: flex;
+            justify-content: flex-end;
+            gap: 8px;
+        }
+
+        .schedule-form-actions button {
+            padding: 7px 14px;
+            border: 1px solid rgba(229, 216, 182, 0.3);
+            border-radius: 6px;
+            background: rgba(0, 0, 0, 0.3);
+            color: var(--ink);
+            font-family: inherit;
+            font-size: 12px;
+            cursor: pointer;
+        }
+
+        .schedule-form-actions button[type="submit"] {
+            background: var(--green);
+            color: #0c1a0c;
+            border-color: transparent;
+            font-weight: 700;
+        }
+
+        .schedule-form-actions button:disabled {
+            opacity: 0.6;
+            cursor: progress;
+        }
+
         @media (max-width: 760px) {
             .header,
             .meter-row {
@@ -2404,6 +3209,75 @@ const INDEX_HTML: &str = r##"<!doctype html>
         </section>
     </main>
 
+    <div class="schedule-modal" id="schedule-modal" hidden role="dialog" aria-modal="true" aria-labelledby="schedule-modal-title">
+        <div class="schedule-modal-backdrop" data-close-schedule-modal></div>
+        <form class="schedule-modal-panel" id="schedule-form">
+            <header>
+                <h3 id="schedule-modal-title">New schedule</h3>
+                <button class="schedule-modal-close" type="button" data-close-schedule-modal aria-label="Close">&times;</button>
+            </header>
+            <input type="hidden" name="device_name" id="schedule-form-device" />
+            <div class="mode-tabs" role="tablist">
+                <button type="button" data-mode="simple" aria-pressed="true">Simple</button>
+                <button type="button" data-mode="advanced" aria-pressed="false">Advanced</button>
+            </div>
+            <div class="mode-panel" data-panel="simple">
+                <label>
+                    Action
+                    <select name="action">
+                        <option value="on">Turn on</option>
+                        <option value="off">Turn off</option>
+                        <option value="toggle">Toggle</option>
+                    </select>
+                </label>
+                <label>
+                    Time
+                    <input type="time" name="time" value="07:00" required />
+                </label>
+                <fieldset class="day-picker">
+                    <legend>Days</legend>
+                    <label><input type="checkbox" name="day" value="1" checked /> Mon</label>
+                    <label><input type="checkbox" name="day" value="2" checked /> Tue</label>
+                    <label><input type="checkbox" name="day" value="3" checked /> Wed</label>
+                    <label><input type="checkbox" name="day" value="4" checked /> Thu</label>
+                    <label><input type="checkbox" name="day" value="5" checked /> Fri</label>
+                    <label><input type="checkbox" name="day" value="6" /> Sat</label>
+                    <label><input type="checkbox" name="day" value="0" /> Sun</label>
+                </fieldset>
+                <div class="day-picker-presets">
+                    <button type="button" data-preset="weekdays">Weekdays</button>
+                    <button type="button" data-preset="weekends">Weekends</button>
+                    <button type="button" data-preset="all">Every day</button>
+                    <button type="button" data-preset="none">Clear</button>
+                </div>
+            </div>
+            <div class="mode-panel" data-panel="advanced" hidden>
+                <label>
+                    Action
+                    <select name="action-advanced">
+                        <option value="on">Turn on</option>
+                        <option value="off">Turn off</option>
+                        <option value="toggle">Toggle</option>
+                    </select>
+                </label>
+                <label>
+                    Cron expression
+                    <input type="text" name="cron" placeholder="0 7 * * 1-5" autocomplete="off" spellcheck="false" />
+                </label>
+                <p class="cron-hint">Standard 5-field cron: <code>min hour day-of-month month day-of-week</code>. Examples: <code>*/15 * * * *</code>, <code>0 22 * * 0,6</code>, <code>30 7 1 * *</code>.</p>
+            </div>
+            <label>
+                Label (optional)
+                <input type="text" name="label" maxlength="80" placeholder="Morning lights" autocomplete="off" />
+            </label>
+            <p class="schedule-form-error" id="schedule-form-error" hidden></p>
+            <div class="schedule-form-actions">
+                <button type="button" data-close-schedule-modal>Cancel</button>
+                <button type="submit" id="schedule-form-submit">Create</button>
+            </div>
+        </form>
+    </div>
+
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.5.1/dist/chart.umd.min.js"></script>
     <script>
         const devicesEl = document.querySelector("#devices");
@@ -2420,6 +3294,12 @@ const INDEX_HTML: &str = r##"<!doctype html>
         const usageEmptyEl = document.querySelector("#usage-empty");
         const usageRangeEl = document.querySelector("#usage-range");
         const usageRangeControlsEl = document.querySelector("#usage-range-controls");
+        const scheduleModalEl = document.querySelector("#schedule-modal");
+        const scheduleFormEl = document.querySelector("#schedule-form");
+        const scheduleFormDeviceEl = document.querySelector("#schedule-form-device");
+        const scheduleFormErrorEl = document.querySelector("#schedule-form-error");
+        const scheduleFormSubmitEl = document.querySelector("#schedule-form-submit");
+        const scheduleModalTitleEl = document.querySelector("#schedule-modal-title");
         const deviceStreamReconnectMs = 2000;
         const switchSoundUrl = "/assets/switch.wav";
         const chartPalettes = {
@@ -2427,6 +3307,7 @@ const INDEX_HTML: &str = r##"<!doctype html>
             dark: ["#e5b75b", "#7bb7ff", "#f06b5c", "#c99cff", "#62d6d1", "#ff9d66", "#b6e36a", "#f38ad3"],
         };
         const defaultHistoryRange = "7d";
+        const dayNames = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
         let selectedHistoryRange = defaultHistoryRange;
         let powerChart = null;
         let deviceRequestInFlight = false;
@@ -2435,6 +3316,9 @@ const INDEX_HTML: &str = r##"<!doctype html>
         let deviceSocketReconnect = null;
         let switchAudioContext = null;
         let switchAudioBufferPromise = null;
+        let latestDevices = [];
+        let schedulesByDevice = new Map();
+        let schedulesLoadInFlight = false;
 
         syncThemeButton();
         syncHistoryRangeButtons();
@@ -2586,6 +3470,7 @@ const INDEX_HTML: &str = r##"<!doctype html>
 
         function renderDevicePayload(payload) {
             const devices = payload.devices ?? [];
+            latestDevices = devices;
             renderDevices(devices);
             renderNotice(payload.scan_error);
         }
@@ -2612,7 +3497,7 @@ const INDEX_HTML: &str = r##"<!doctype html>
                 return { totalPower, todayEnergy, todayCost };
             }
 
-            devicesEl.innerHTML = devices.map(renderDevice).join("");
+            devicesEl.innerHTML = devices.map((device) => renderDevice(device, schedulesByDevice.get(device.name) ?? [])).join("");
             devicesEl.querySelectorAll("button[data-device]").forEach((button) => {
                 button.addEventListener("click", async () => {
                     const wasOn = button.dataset.on === "true";
@@ -2645,7 +3530,226 @@ const INDEX_HTML: &str = r##"<!doctype html>
                 });
             });
 
+            wireScheduleControls();
+
             return { totalPower, todayEnergy, todayCost };
+        }
+
+        function wireScheduleControls() {
+            devicesEl.querySelectorAll("button[data-add-schedule]").forEach((button) => {
+                button.addEventListener("click", () => {
+                    openScheduleModal(button.dataset.addSchedule);
+                });
+            });
+
+            devicesEl.querySelectorAll("button[data-schedule-delete]").forEach((button) => {
+                button.addEventListener("click", async () => {
+                    const id = button.dataset.scheduleDelete;
+                    button.disabled = true;
+                    try {
+                        const response = await fetch(`/api/schedules/${encodeURIComponent(id)}`, { method: "DELETE" });
+                        if (!response.ok && response.status !== 204) {
+                            const payload = await response.json().catch(() => null);
+                            throw new Error(payload?.error?.message ?? `Delete failed (${response.status})`);
+                        }
+                        await loadSchedules();
+                    } catch (error) {
+                        renderNotice(error.message);
+                    } finally {
+                        button.disabled = false;
+                    }
+                });
+            });
+
+            devicesEl.querySelectorAll("input[data-schedule-enabled]").forEach((input) => {
+                input.addEventListener("change", async () => {
+                    const id = input.dataset.scheduleEnabled;
+                    const enabled = input.checked;
+                    input.disabled = true;
+                    try {
+                        await requestJson(`/api/schedules/${encodeURIComponent(id)}`, {
+                            method: "PATCH",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify({ enabled }),
+                        });
+                        await loadSchedules();
+                    } catch (error) {
+                        input.checked = !enabled;
+                        renderNotice(error.message);
+                    } finally {
+                        input.disabled = false;
+                    }
+                });
+            });
+        }
+
+        async function loadSchedules() {
+            if (schedulesLoadInFlight) return;
+            schedulesLoadInFlight = true;
+            try {
+                const payload = await requestJson("/api/schedules");
+                const map = new Map();
+                for (const schedule of payload.schedules ?? []) {
+                    if (!map.has(schedule.device_name)) {
+                        map.set(schedule.device_name, []);
+                    }
+                    map.get(schedule.device_name).push(schedule);
+                }
+                schedulesByDevice = map;
+                if (latestDevices.length > 0) {
+                    renderDevices(latestDevices);
+                }
+            } catch (error) {
+                renderNotice(error.message);
+            } finally {
+                schedulesLoadInFlight = false;
+            }
+        }
+
+        function openScheduleModal(deviceName) {
+            scheduleFormDeviceEl.value = deviceName;
+            scheduleModalTitleEl.textContent = `New schedule — ${deviceName}`;
+            scheduleFormErrorEl.hidden = true;
+            scheduleFormErrorEl.textContent = "";
+            scheduleFormSubmitEl.disabled = false;
+            scheduleFormSubmitEl.textContent = "Create";
+            scheduleFormEl.reset();
+            scheduleFormDeviceEl.value = deviceName;
+            scheduleFormEl.querySelectorAll(".mode-panel").forEach((panel) => {
+                panel.hidden = panel.dataset.panel !== "simple";
+            });
+            scheduleFormEl.querySelectorAll(".mode-tabs button").forEach((button) => {
+                button.setAttribute("aria-pressed", String(button.dataset.mode === "simple"));
+            });
+            scheduleFormEl.querySelectorAll('input[name="day"]').forEach((input) => {
+                input.checked = ["1", "2", "3", "4", "5"].includes(input.value);
+            });
+            scheduleFormEl.querySelector('input[name="time"]').value = "07:00";
+            scheduleFormEl.querySelector('select[name="action"]').value = "on";
+            scheduleFormEl.querySelector('select[name="action-advanced"]').value = "on";
+            scheduleFormEl.querySelector('input[name="cron"]').value = "";
+            scheduleFormEl.querySelector('input[name="label"]').value = "";
+            scheduleModalEl.hidden = false;
+            window.setTimeout(() => {
+                scheduleFormEl.querySelector('select[name="action"]').focus();
+            }, 30);
+        }
+
+        function closeScheduleModal() {
+            scheduleModalEl.hidden = true;
+        }
+
+        scheduleModalEl.addEventListener("click", (event) => {
+            if (event.target.matches("[data-close-schedule-modal]")) {
+                closeScheduleModal();
+            }
+        });
+
+        document.addEventListener("keydown", (event) => {
+            if (event.key === "Escape" && !scheduleModalEl.hidden) {
+                closeScheduleModal();
+            }
+        });
+
+        scheduleFormEl.querySelectorAll(".mode-tabs button").forEach((button) => {
+            button.addEventListener("click", () => {
+                const mode = button.dataset.mode;
+                scheduleFormEl.querySelectorAll(".mode-tabs button").forEach((other) => {
+                    other.setAttribute("aria-pressed", String(other.dataset.mode === mode));
+                });
+                scheduleFormEl.querySelectorAll(".mode-panel").forEach((panel) => {
+                    panel.hidden = panel.dataset.panel !== mode;
+                });
+            });
+        });
+
+        scheduleFormEl.querySelectorAll(".day-picker-presets button").forEach((button) => {
+            button.addEventListener("click", () => {
+                const preset = button.dataset.preset;
+                const inputs = scheduleFormEl.querySelectorAll('input[name="day"]');
+                const presets = {
+                    weekdays: ["1", "2", "3", "4", "5"],
+                    weekends: ["0", "6"],
+                    all: ["0", "1", "2", "3", "4", "5", "6"],
+                    none: [],
+                };
+                const values = presets[preset] ?? [];
+                inputs.forEach((input) => {
+                    input.checked = values.includes(input.value);
+                });
+            });
+        });
+
+        scheduleFormEl.addEventListener("submit", async (event) => {
+            event.preventDefault();
+            scheduleFormErrorEl.hidden = true;
+            scheduleFormErrorEl.textContent = "";
+
+            const deviceName = scheduleFormDeviceEl.value;
+            const labelValue = scheduleFormEl.querySelector('input[name="label"]').value.trim();
+            const isAdvanced = scheduleFormEl.querySelector('.mode-tabs button[data-mode="advanced"]').getAttribute("aria-pressed") === "true";
+
+            let cron = "";
+            let action = "on";
+            if (isAdvanced) {
+                cron = scheduleFormEl.querySelector('input[name="cron"]').value.trim();
+                action = scheduleFormEl.querySelector('select[name="action-advanced"]').value;
+                if (cron === "") {
+                    showScheduleFormError("Cron expression is required.");
+                    return;
+                }
+            } else {
+                const time = scheduleFormEl.querySelector('input[name="time"]').value;
+                if (!time) {
+                    showScheduleFormError("Pick a time.");
+                    return;
+                }
+                action = scheduleFormEl.querySelector('select[name="action"]').value;
+                const days = Array.from(scheduleFormEl.querySelectorAll('input[name="day"]:checked')).map((input) => input.value);
+                if (days.length === 0) {
+                    showScheduleFormError("Pick at least one day.");
+                    return;
+                }
+                const [hourStr, minuteStr] = time.split(":");
+                const hour = Number.parseInt(hourStr, 10);
+                const minute = Number.parseInt(minuteStr, 10);
+                if (!Number.isFinite(hour) || !Number.isFinite(minute)) {
+                    showScheduleFormError("Time format is invalid.");
+                    return;
+                }
+                const sortedDays = days.map(Number).sort((a, b) => a - b);
+                const dowField = sortedDays.length === 7 ? "*" : sortedDays.join(",");
+                cron = `${minute} ${hour} * * ${dowField}`;
+            }
+
+            scheduleFormSubmitEl.disabled = true;
+            scheduleFormSubmitEl.textContent = "Creating";
+
+            try {
+                await requestJson("/api/schedules", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                        device_name: deviceName,
+                        cron,
+                        action,
+                        label: labelValue === "" ? null : labelValue,
+                        enabled: true,
+                    }),
+                });
+                closeScheduleModal();
+                await loadSchedules();
+            } catch (error) {
+                showScheduleFormError(error.message);
+            } finally {
+                scheduleFormSubmitEl.disabled = false;
+                scheduleFormSubmitEl.textContent = "Create";
+            }
+        });
+
+        function showScheduleFormError(message) {
+            scheduleFormErrorEl.textContent = message;
+            scheduleFormErrorEl.hidden = false;
         }
 
         function playSwitchClick(nextIsOn) {
@@ -2929,7 +4033,7 @@ const INDEX_HTML: &str = r##"<!doctype html>
             });
         }
 
-        function renderDevice(device) {
+        function renderDevice(device, schedules) {
             const isOn = device.device_on === true;
             const isOffline = device.last_error !== null;
             const energy = device.energy;
@@ -2959,9 +4063,124 @@ const INDEX_HTML: &str = r##"<!doctype html>
                         <div class="reading"><span>Month cost</span>${energy ? formatCost(energy.month_cost_pence) : "-"}</div>
                         <div class="reading"><span>Today runtime</span>${energy ? formatDurationFromMinutes(energy.today_runtime_minutes) : "-"}</div>
                     </div>
+                    ${renderSchedulesSection(device, schedules ?? [])}
                     ${isOffline ? `<p class="device-meta">${escapeHtml(device.last_error)}</p>` : ""}
                 </article>
             `;
+        }
+
+        function renderSchedulesSection(device, schedules) {
+            const items = schedules.map(renderScheduleItem).join("");
+            const body = schedules.length === 0
+                ? `<p class="schedules-empty">No schedules yet.</p>`
+                : `<ul class="schedule-list">${items}</ul>`;
+            return `
+                <section class="schedules" aria-label="Schedules for ${escapeHtml(device.nickname)}">
+                    <div class="schedules-header">
+                        <h3>Schedules</h3>
+                        <button class="schedule-add" type="button" data-add-schedule="${escapeHtml(device.name)}">+ Add</button>
+                    </div>
+                    ${body}
+                </section>
+            `;
+        }
+
+        function renderScheduleItem(schedule) {
+            const summary = describeCron(schedule.cron);
+            const actionLabel = schedule.action === "on" ? "ON" : schedule.action === "off" ? "OFF" : "TOG";
+            const metaParts = [];
+            if (schedule.label) {
+                metaParts.push(escapeHtml(schedule.label));
+            }
+            metaParts.push(`<code>${escapeHtml(schedule.cron)}</code>`);
+            if (schedule.next_fire_at_ms && schedule.enabled) {
+                metaParts.push(`next ${formatRelative(schedule.next_fire_at_ms)}`);
+            }
+            if (schedule.last_error) {
+                metaParts.push(`<span style="color: var(--red);">${escapeHtml(schedule.last_error)}</span>`);
+            }
+            const meta = metaParts.join(" / ");
+            return `
+                <li class="schedule-item ${schedule.enabled ? "" : "disabled"}">
+                    <label class="schedule-enabled" title="Enable / disable">
+                        <input type="checkbox" data-schedule-enabled="${escapeHtml(schedule.id)}" ${schedule.enabled ? "checked" : ""} />
+                    </label>
+                    <div class="schedule-body">
+                        <span class="schedule-summary">
+                            <span class="schedule-action ${escapeHtml(schedule.action)}">${actionLabel}</span>
+                            ${escapeHtml(summary)}
+                        </span>
+                        <span class="schedule-meta">${meta}</span>
+                    </div>
+                    <button class="schedule-delete" type="button" data-schedule-delete="${escapeHtml(schedule.id)}" aria-label="Delete schedule" title="Delete">&times;</button>
+                </li>
+            `;
+        }
+
+        function describeCron(expr) {
+            const fields = expr.trim().split(/\s+/);
+            // Strip seconds prefix if present (6 or 7 fields).
+            let minute, hour, dom, month, dow;
+            if (fields.length === 6 || fields.length === 7) {
+                [, minute, hour, dom, month, dow] = fields;
+            } else if (fields.length === 5) {
+                [minute, hour, dom, month, dow] = fields;
+            } else {
+                return expr;
+            }
+
+            const isSimpleTime = !minute.includes(",") && !minute.includes("/") && !minute.includes("-") && minute !== "*"
+                && !hour.includes(",") && !hour.includes("/") && !hour.includes("-") && hour !== "*"
+                && dom === "*" && month === "*";
+            if (!isSimpleTime) {
+                if (minute.startsWith("*/") && hour === "*" && dom === "*" && month === "*" && dow === "*") {
+                    return `Every ${minute.slice(2)} min`;
+                }
+                return expr;
+            }
+
+            const time = `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`;
+            const dayLabel = describeDow(dow);
+            return `${dayLabel} ${time}`;
+        }
+
+        function describeDow(dow) {
+            if (dow === "*" || dow === "?") return "Daily";
+            if (dow === "1-5") return "Weekdays";
+            if (dow === "0,6" || dow === "6,0" || dow === "0-0,6-6") return "Weekends";
+
+            const parts = dow.split(",").map((part) => part.trim());
+            const days = [];
+            for (const part of parts) {
+                if (part.includes("-")) {
+                    const [startStr, endStr] = part.split("-");
+                    const start = Number.parseInt(startStr, 10);
+                    const end = Number.parseInt(endStr, 10);
+                    if (!Number.isFinite(start) || !Number.isFinite(end)) return dow;
+                    for (let i = start; i <= end; i += 1) {
+                        days.push(i % 7);
+                    }
+                } else {
+                    const value = Number.parseInt(part, 10);
+                    if (!Number.isFinite(value)) return dow;
+                    days.push(value % 7);
+                }
+            }
+            days.sort((a, b) => a - b);
+            const unique = Array.from(new Set(days));
+            if (unique.length === 7) return "Daily";
+            return unique.map((day) => dayNames[day]).join(" ");
+        }
+
+        function formatRelative(timestampMs) {
+            const diff = timestampMs - Date.now();
+            if (diff <= 0) return "due";
+            const minutes = Math.round(diff / 60000);
+            if (minutes < 60) return `in ${minutes}m`;
+            const hours = Math.round(minutes / 60);
+            if (hours < 48) return `in ${hours}h`;
+            const days = Math.round(hours / 24);
+            return `in ${days}d`;
         }
 
         function formatDurationFromSeconds(seconds) {
@@ -3022,7 +4241,9 @@ const INDEX_HTML: &str = r##"<!doctype html>
 
         loadDevices();
         loadUsageHistory();
+        loadSchedules();
         connectDeviceStream();
+        window.setInterval(loadSchedules, 60_000);
     </script>
 </body>
 </html>
@@ -3282,5 +4503,63 @@ mod tests {
             energy_price_pence_per_kwh: DEFAULT_ENERGY_PRICE_PENCE_PER_KWH,
             state_path,
         }
+    }
+
+    #[test]
+    fn normalizes_five_field_cron_with_seconds_prefix() {
+        let normalized = normalize_cron("0 7 * * 1-5").unwrap();
+        assert_eq!(normalized, "0 0 7 * * 1-5");
+        CronSchedule::from_str(&normalized).unwrap();
+    }
+
+    #[test]
+    fn passes_six_field_cron_through() {
+        let normalized = normalize_cron("30 0 7 * * 1-5").unwrap();
+        assert_eq!(normalized, "30 0 7 * * 1-5");
+        CronSchedule::from_str(&normalized).unwrap();
+    }
+
+    #[test]
+    fn rejects_invalid_cron_expressions() {
+        assert!(normalize_cron("").is_err());
+        assert!(normalize_cron("not a cron").is_err());
+        assert!(normalize_cron("99 99 * * *").is_err());
+    }
+
+    #[tokio::test]
+    async fn persists_schedule_across_reload() {
+        let state_path = test_state_path("schedules");
+        let settings = test_settings(state_path.clone());
+        let state = AppState::new(&settings);
+
+        {
+            let mut schedules = state.schedules.write().await;
+            schedules.insert(
+                "abc".to_string(),
+                ScheduleConfig {
+                    id: "abc".to_string(),
+                    device_name: "lights".to_string(),
+                    cron: "0 0 7 * * 1-5".to_string(),
+                    action: ScheduleAction::On,
+                    enabled: true,
+                    label: Some("Morning".to_string()),
+                    created_at_ms: 1_700_000_000_000,
+                    last_fired_at_ms: None,
+                    last_error: None,
+                },
+            );
+        }
+        save_persisted_state(&state).await.unwrap();
+
+        let reloaded = AppState::new(&settings);
+        load_persisted_state(&reloaded).await.unwrap();
+        let schedules = reloaded.schedules.read().await;
+        let loaded = schedules.get("abc").unwrap();
+        assert_eq!(loaded.device_name, "lights");
+        assert_eq!(loaded.cron, "0 0 7 * * 1-5");
+        assert_eq!(loaded.action, ScheduleAction::On);
+        assert_eq!(loaded.label.as_deref(), Some("Morning"));
+
+        let _ = fs::remove_file(state_path);
     }
 }
