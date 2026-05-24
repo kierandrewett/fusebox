@@ -1730,47 +1730,81 @@ async fn read_response_body(response: reqwest::Response) -> Result<String> {
     Ok(String::from_utf8_lossy(truncated).into_owned())
 }
 
+fn condition_probe_key(condition: &ConditionConfig) -> String {
+    let headers = condition
+        .headers
+        .iter()
+        .map(|(key, value)| format!("{key}={value}"))
+        .collect::<Vec<_>>()
+        .join("\x1f");
+    format!(
+        "{}\x1e{}\x1e{}\x1e{}\x1e{}\x1e{}",
+        condition.method.to_uppercase(),
+        condition.url,
+        headers,
+        condition.body.as_deref().unwrap_or(""),
+        condition.status_match,
+        condition.body_contains.as_deref().unwrap_or(""),
+    )
+}
+
 async fn probe_and_record(state: &AppState, id: &str) {
-    let condition = {
+    let representative = {
         let conditions = state.conditions.read().await;
         conditions.get(id).cloned()
     };
-    let Some(condition) = condition else {
+    let Some(representative) = representative else {
         return;
     };
-    if !condition.enabled {
+    if !representative.enabled {
         return;
     }
 
-    let previous_passing = condition.last_passing;
-    let outcome = probe_condition_once(&state.http_client, &condition).await;
+    let key = condition_probe_key(&representative);
 
-    let updated = {
+    // Snapshot every enabled condition that shares this probe key, along with
+    // its current last_passing so we can detect transitions afterwards.
+    let group: Vec<(ConditionConfig, Option<bool>)> = {
+        let conditions = state.conditions.read().await;
+        conditions
+            .values()
+            .filter(|condition| condition.enabled && condition_probe_key(condition) == key)
+            .map(|condition| (condition.clone(), condition.last_passing))
+            .collect()
+    };
+    if group.is_empty() {
+        return;
+    }
+
+    let outcome = probe_condition_once(&state.http_client, &representative).await;
+    let now = now_ms();
+
+    {
         let mut conditions = state.conditions.write().await;
-        if let Some(stored) = conditions.get_mut(id) {
-            stored.last_checked_at_ms = Some(now_ms());
-            stored.last_passing = Some(outcome.passing);
-            stored.last_status_code = outcome.status_code;
-            stored.last_error = outcome.error;
-            true
-        } else {
-            false
+        for (condition, _) in &group {
+            if let Some(stored) = conditions.get_mut(&condition.id) {
+                stored.last_checked_at_ms = Some(now);
+                stored.last_passing = Some(outcome.passing);
+                stored.last_status_code = outcome.status_code;
+                stored.last_error = outcome.error.clone();
+            }
         }
-    };
-    if !updated {
-        return;
     }
 
-    let transitioned = previous_passing != Some(outcome.passing);
-    let action = if outcome.passing {
-        condition.action_on_pass
-    } else {
-        condition.action_on_fail
-    };
-
-    if transitioned {
+    // Fire actions for any condition that transitioned in this probe.
+    for (condition, previous_passing) in group {
+        if previous_passing == Some(outcome.passing) {
+            continue;
+        }
+        let action = if outcome.passing {
+            condition.action_on_pass
+        } else {
+            condition.action_on_fail
+        };
         if let Some(action) = action {
-            apply_condition_action(state, &condition, action).await;
+            let mut snapshot = condition.clone();
+            snapshot.last_passing = Some(outcome.passing);
+            apply_condition_action(state, &snapshot, action).await;
         }
     }
 
@@ -1845,30 +1879,36 @@ async fn drive_device_power(
 async fn run_condition_poller(state: AppState) {
     sleep(Duration::from_secs(2)).await;
     loop {
-        let candidates: Vec<(String, u64, Option<u128>)> = {
+        let groups: BTreeMap<String, Vec<(String, u64, Option<u128>)>> = {
             let conditions = state.conditions.read().await;
-            conditions
-                .values()
-                .filter(|condition| condition.enabled)
-                .map(|condition| {
-                    (
+            let mut by_key: BTreeMap<String, Vec<(String, u64, Option<u128>)>> = BTreeMap::new();
+            for condition in conditions.values().filter(|c| c.enabled) {
+                by_key
+                    .entry(condition_probe_key(condition))
+                    .or_default()
+                    .push((
                         condition.id.clone(),
                         condition.poll_seconds,
                         condition.last_checked_at_ms,
-                    )
-                })
-                .collect()
+                    ));
+            }
+            by_key
         };
 
         let now = now_ms();
-        for (id, poll_seconds, last_checked_at_ms) in candidates {
-            let interval_ms = (poll_seconds as u128) * 1000;
-            let due = match last_checked_at_ms {
-                None => true,
-                Some(last) => now.saturating_sub(last) >= interval_ms,
-            };
-            if due {
-                probe_and_record(&state, &id).await;
+        for (_key, members) in groups {
+            let due = members.iter().any(|(_id, poll_seconds, last_checked_at_ms)| {
+                let interval_ms = (*poll_seconds as u128) * 1000;
+                match last_checked_at_ms {
+                    None => true,
+                    Some(last) => now.saturating_sub(*last) >= interval_ms,
+                }
+            });
+            if !due {
+                continue;
+            }
+            if let Some((representative_id, _, _)) = members.first() {
+                probe_and_record(&state, representative_id).await;
             }
         }
 
@@ -6912,5 +6952,56 @@ mod tests {
         assert!(check_required_conditions(&state, &schedule).await.is_ok());
 
         let _ = fs::remove_file(state_path);
+    }
+
+    #[test]
+    fn probe_key_groups_identical_requests() {
+        let base = || ConditionConfig {
+            id: "x".to_string(),
+            name: "n".to_string(),
+            device_name: "dev".to_string(),
+            url: "https://example.test/api".to_string(),
+            method: "GET".to_string(),
+            headers: BTreeMap::new(),
+            body: None,
+            status_match: "200".to_string(),
+            body_contains: None,
+            poll_seconds: 30,
+            enabled: true,
+            action_on_pass: None,
+            action_on_fail: None,
+            created_at_ms: 0,
+            last_checked_at_ms: None,
+            last_passing: None,
+            last_status_code: None,
+            last_error: None,
+            last_action_at_ms: None,
+            last_action: None,
+            last_action_error: None,
+        };
+
+        let mut a = base();
+        a.id = "a".to_string();
+        let mut b = base();
+        b.id = "b".to_string();
+        // Different device, different poll cadence — still the same probe.
+        b.device_name = "other".to_string();
+        b.poll_seconds = 5;
+        let mut different_url = base();
+        different_url.url = "https://example.test/other".to_string();
+        let mut different_status = base();
+        different_status.status_match = "200-299".to_string();
+        let mut different_method = base();
+        different_method.method = "POST".to_string();
+        let mut different_headers = base();
+        different_headers
+            .headers
+            .insert("Authorization".to_string(), "Bearer x".to_string());
+
+        assert_eq!(condition_probe_key(&a), condition_probe_key(&b));
+        assert_ne!(condition_probe_key(&a), condition_probe_key(&different_url));
+        assert_ne!(condition_probe_key(&a), condition_probe_key(&different_status));
+        assert_ne!(condition_probe_key(&a), condition_probe_key(&different_method));
+        assert_ne!(condition_probe_key(&a), condition_probe_key(&different_headers));
     }
 }
