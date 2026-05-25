@@ -2294,7 +2294,19 @@ async fn reconcile_device(state: &AppState, device_name: &str, source: HookSourc
         (current, nickname, model)
     };
     if current_state == Some(target) {
+        info!(
+            device = %device_name,
+            target,
+            "reconcile noop: device already at target state, no hook will fire"
+        );
         return;
+    }
+    if current_state.is_none() {
+        warn!(
+            device = %device_name,
+            target,
+            "reconciling without a prior snapshot; set_power may fail if device is offline"
+        );
     }
 
     info!(
