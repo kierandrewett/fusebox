@@ -63,6 +63,7 @@ struct AppState {
     device_events: watch::Sender<DeviceListResponse>,
     schedules: Arc<RwLock<BTreeMap<String, ScheduleConfig>>>,
     conditions: Arc<RwLock<BTreeMap<String, ConditionConfig>>>,
+    device_intents: Arc<RwLock<BTreeMap<String, DeviceIntent>>>,
     http_client: reqwest::Client,
     discovery_timeout_seconds: u64,
     discovery_targets: Vec<String>,
@@ -104,6 +105,10 @@ struct DeviceView {
     last_error: Option<String>,
     discovered_at_ms: u128,
     updated_at_ms: Option<u128>,
+    manual_override: Option<bool>,
+    schedule_intent: Option<bool>,
+    condition_intent: Option<bool>,
+    effective_intent: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -544,6 +549,16 @@ struct PersistedState {
     schedules: BTreeMap<String, ScheduleConfig>,
     #[serde(default)]
     conditions: BTreeMap<String, ConditionConfig>,
+    #[serde(default)]
+    device_intents: BTreeMap<String, DeviceIntent>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct DeviceIntent {
+    #[serde(default)]
+    schedule_intent: Option<bool>,
+    #[serde(default)]
+    manual_override: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -589,6 +604,7 @@ async fn main() -> Result<()> {
         .route("/api/scan", post(scan_devices))
         .route("/api/devices/{name}/toggle", post(toggle_device))
         .route("/api/devices/{name}/power", post(set_device_power))
+        .route("/api/devices/{name}/release-override", post(release_device_override))
         .route("/api/schedules", get(list_schedules).post(create_schedule))
         .route(
             "/api/schedules/{id}",
@@ -705,6 +721,7 @@ impl AppState {
             device_events,
             schedules: Arc::new(RwLock::new(BTreeMap::new())),
             conditions: Arc::new(RwLock::new(BTreeMap::new())),
+            device_intents: Arc::new(RwLock::new(BTreeMap::new())),
             http_client,
             discovery_timeout_seconds: settings.discovery_timeout_seconds,
             discovery_targets: settings.discovery_targets.clone(),
@@ -717,8 +734,15 @@ impl AppState {
 }
 
 impl ManagedDevice {
-    fn view(&self, energy_price_pence_per_kwh: f64) -> DeviceView {
+    fn view(
+        &self,
+        energy_price_pence_per_kwh: f64,
+        intent: DeviceIntent,
+        condition_intent: Option<bool>,
+    ) -> DeviceView {
         let snapshot = self.snapshot.as_ref();
+        let effective_intent =
+            compute_effective(intent.manual_override, intent.schedule_intent, condition_intent);
 
         DeviceView {
             name: self.name.clone(),
@@ -756,6 +780,10 @@ impl ManagedDevice {
             last_error: self.last_error.clone(),
             discovered_at_ms: self.discovered_at_ms,
             updated_at_ms: self.updated_at_ms,
+            manual_override: intent.manual_override,
+            schedule_intent: intent.schedule_intent,
+            condition_intent,
+            effective_intent,
         }
     }
 }
@@ -895,14 +923,15 @@ async fn toggle_device(
     let operation_lock = device_operation_lock(&state, &device).await;
     let _operation_guard = operation_lock.lock().await;
     let current_snapshot = retry_tapo_handshake(|| state.controller.read_device(&device)).await?;
-    retry_tapo_handshake(|| {
-        state
-            .controller
-            .set_power(&device, !current_snapshot.device_on)
-    })
-    .await?;
+    let target = !current_snapshot.device_on;
+    retry_tapo_handshake(|| state.controller.set_power(&device, target)).await?;
     let snapshot = retry_tapo_handshake(|| state.controller.read_device(&device)).await?;
     update_device_snapshot(&state, &name, snapshot, None).await;
+
+    set_manual_override(&state, &name, target).await;
+    if let Err(error) = save_persisted_state(&state).await {
+        warn!(%error, device = %name, "failed to persist manual override");
+    }
 
     get_device_view(&state, &name)
         .await
@@ -921,6 +950,34 @@ async fn set_device_power(
     retry_tapo_handshake(|| state.controller.set_power(&device, request.on)).await?;
     let snapshot = retry_tapo_handshake(|| state.controller.read_device(&device)).await?;
     update_device_snapshot(&state, &name, snapshot, None).await;
+
+    set_manual_override(&state, &name, request.on).await;
+    if let Err(error) = save_persisted_state(&state).await {
+        warn!(%error, device = %name, "failed to persist manual override");
+    }
+
+    get_device_view(&state, &name)
+        .await
+        .map(Json)
+        .map_err(AppError)
+}
+
+async fn release_device_override(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> Result<Json<DeviceView>, AppError> {
+    {
+        let devices = state.devices.read().await;
+        if !devices.contains_key(&name) {
+            return Err(AppError(anyhow!("unknown device '{}'", name)));
+        }
+    }
+
+    clear_manual_override(&state, &name).await;
+    if let Err(error) = save_persisted_state(&state).await {
+        warn!(%error, device = %name, "failed to persist override release");
+    }
+    reconcile_device(&state, &name).await;
 
     get_device_view(&state, &name)
         .await
@@ -1791,89 +1848,149 @@ async fn probe_and_record(state: &AppState, id: &str) {
         }
     }
 
-    // Fire actions for any condition that transitioned in this probe.
-    for (condition, previous_passing) in group {
-        if previous_passing == Some(outcome.passing) {
-            continue;
-        }
-        let action = if outcome.passing {
-            condition.action_on_pass
-        } else {
-            condition.action_on_fail
-        };
-        if let Some(action) = action {
-            let mut snapshot = condition.clone();
-            snapshot.last_passing = Some(outcome.passing);
-            apply_condition_action(state, &snapshot, action).await;
+    // Collect the distinct devices touched by this probe group so we can
+    // reconcile each one if its condition intent flipped.
+    let mut devices_to_reconcile: Vec<String> = Vec::new();
+    for (condition, previous_passing) in &group {
+        if previous_passing != &Some(outcome.passing) && !condition.device_name.is_empty() {
+            if !devices_to_reconcile.contains(&condition.device_name) {
+                devices_to_reconcile.push(condition.device_name.clone());
+            }
         }
     }
 
     if let Err(error) = save_persisted_state(state).await {
         warn!(%error, condition_id = %id, "failed to persist condition probe result");
     }
+
+    for device_name in devices_to_reconcile {
+        reconcile_device(state, &device_name).await;
+    }
 }
 
-async fn apply_condition_action(
-    state: &AppState,
-    condition: &ConditionConfig,
-    action: ConditionAction,
-) {
-    if condition.device_name.is_empty() {
+/// Compute the effective desired power state for a device given its
+/// inputs. None means "no opinion — don't touch the device".
+fn compute_effective(
+    manual_override: Option<bool>,
+    schedule_intent: Option<bool>,
+    condition_intent: Option<bool>,
+) -> Option<bool> {
+    if let Some(manual) = manual_override {
+        return Some(manual);
+    }
+    if condition_intent == Some(false) {
+        return Some(false);
+    }
+    if let Some(schedule) = schedule_intent {
+        return Some(schedule);
+    }
+    condition_intent
+}
+
+/// Returns the condition intent for the device:
+///   - None if no enabled conditions target the device
+///   - Some(false) if any enabled condition is failing or has never been probed (fail closed)
+///   - Some(true) if at least one enabled condition exists and all are passing
+async fn condition_intent_for_device(state: &AppState, device_name: &str) -> Option<bool> {
+    let conditions = state.conditions.read().await;
+    let mut have_any = false;
+    let mut all_passing = true;
+    for condition in conditions.values() {
+        if !condition.enabled || condition.device_name != device_name {
+            continue;
+        }
+        have_any = true;
+        match condition.last_passing {
+            Some(true) => continue,
+            Some(false) | None => {
+                all_passing = false;
+                break;
+            }
+        }
+    }
+    if !have_any {
+        None
+    } else if all_passing {
+        Some(true)
+    } else {
+        Some(false)
+    }
+}
+
+/// Reconcile a device's actual state with the computed effective state.
+/// Skips if the device doesn't exist or if the effective state is None.
+async fn reconcile_device(state: &AppState, device_name: &str) {
+    let device_cfg = match get_device_config(state, device_name).await {
+        Ok(cfg) => cfg,
+        Err(_) => return,
+    };
+
+    let intent = {
+        let intents = state.device_intents.read().await;
+        intents.get(device_name).cloned().unwrap_or_default()
+    };
+    let condition_intent = condition_intent_for_device(state, device_name).await;
+    let effective = compute_effective(
+        intent.manual_override,
+        intent.schedule_intent,
+        condition_intent,
+    );
+    let Some(target) = effective else {
+        return;
+    };
+
+    let current_state = {
+        let devices = state.devices.read().await;
+        devices
+            .get(device_name)
+            .and_then(|d| d.snapshot.as_ref().map(|s| s.device_on))
+    };
+    if current_state == Some(target) {
         return;
     }
 
-    let outcome = drive_device_power(state, &condition.device_name, action).await;
-    let (last_action, last_action_error) = match outcome {
-        Ok(()) => {
-            info!(
-                condition_id = %condition.id,
-                device = %condition.device_name,
-                action = ?action,
-                "condition fired action",
-            );
-            (Some(action), None)
-        }
-        Err(error) => {
-            warn!(
-                condition_id = %condition.id,
-                device = %condition.device_name,
-                %error,
-                "condition action failed",
-            );
-            (None, Some(format!("{error:#}")))
-        }
-    };
+    info!(
+        device = %device_name,
+        manual = ?intent.manual_override,
+        schedule = ?intent.schedule_intent,
+        condition = ?condition_intent,
+        target,
+        "reconciling device state",
+    );
 
-    let mut conditions = state.conditions.write().await;
-    if let Some(stored) = conditions.get_mut(&condition.id) {
-        stored.last_action_at_ms = Some(now_ms());
-        if last_action.is_some() {
-            stored.last_action = last_action;
-            stored.last_action_error = None;
-        }
-        if let Some(err) = last_action_error {
-            stored.last_action_error = Some(err);
-        }
+    let operation_lock = device_operation_lock(state, &device_cfg).await;
+    let _operation_guard = operation_lock.lock().await;
+
+    if let Err(error) = retry_tapo_handshake(|| state.controller.set_power(&device_cfg, target)).await
+    {
+        warn!(device = %device_name, %error, "reconcile set_power failed");
+        return;
+    }
+
+    if let Ok(snapshot) = retry_tapo_handshake(|| state.controller.read_device(&device_cfg)).await {
+        update_device_snapshot(state, device_name, snapshot, None).await;
     }
 }
 
-async fn drive_device_power(
-    state: &AppState,
-    device_name: &str,
-    action: ConditionAction,
-) -> Result<()> {
-    let device = get_device_config(state, device_name).await?;
-    let operation_lock = device_operation_lock(state, &device).await;
-    let _operation_guard = operation_lock.lock().await;
+async fn set_schedule_intent(state: &AppState, device_name: &str, intent: bool) {
+    let mut intents = state.device_intents.write().await;
+    let entry = intents.entry(device_name.to_string()).or_default();
+    entry.schedule_intent = Some(intent);
+    // Schedule firing automatically releases any manual override.
+    entry.manual_override = None;
+}
 
-    let target = matches!(action, ConditionAction::On);
-    retry_tapo_handshake(|| state.controller.set_power(&device, target)).await?;
+async fn set_manual_override(state: &AppState, device_name: &str, target: bool) {
+    let mut intents = state.device_intents.write().await;
+    let entry = intents.entry(device_name.to_string()).or_default();
+    entry.manual_override = Some(target);
+}
 
-    if let Ok(snapshot) = retry_tapo_handshake(|| state.controller.read_device(&device)).await {
-        update_device_snapshot(state, device_name, snapshot, None).await;
+async fn clear_manual_override(state: &AppState, device_name: &str) {
+    let mut intents = state.device_intents.write().await;
+    if let Some(entry) = intents.get_mut(device_name) {
+        entry.manual_override = None;
     }
-
-    Ok(())
 }
 
 async fn run_condition_poller(state: AppState) {
@@ -2008,113 +2125,38 @@ async fn fire_schedule(state: &AppState, schedule: &ScheduleConfig, action: Sche
         "firing schedule",
     );
 
-    if matches!(action, ScheduleAction::On) {
-        if let Err(reason) = check_required_conditions(state, schedule).await {
-            warn!(
-                schedule_id = %schedule.id,
-                reason = %reason,
-                "schedule gated by conditions"
-            );
-            record_schedule_error(state, &schedule.id, format!("gated: {reason}")).await;
-            return;
-        }
-    }
-
-    let device = match get_device_config(state, &schedule.device_name).await {
-        Ok(device) => device,
-        Err(error) => {
-            let message = format!("device lookup failed: {error}");
-            warn!(schedule_id = %schedule.id, %error, "schedule firing failed");
-            record_schedule_error(state, &schedule.id, message).await;
-            return;
-        }
-    };
-
-    let operation_lock = device_operation_lock(state, &device).await;
-    let _operation_guard = operation_lock.lock().await;
-
-    let target_state: bool = match action {
+    let target_intent: bool = match action {
         ScheduleAction::On => true,
         ScheduleAction::Off => false,
         ScheduleAction::Toggle => {
-            let current = match retry_tapo_handshake(|| state.controller.read_device(&device)).await
-            {
-                Ok(snapshot) => snapshot,
-                Err(error) => {
-                    let message = format!("{error:#}");
-                    warn!(schedule_id = %schedule.id, %error, "schedule pre-toggle read failed");
+            // For a toggle we need to know the device's current state.
+            let current = {
+                let devices = state.devices.read().await;
+                devices
+                    .get(&schedule.device_name)
+                    .and_then(|d| d.snapshot.as_ref().map(|s| s.device_on))
+            };
+            match current {
+                Some(on) => !on,
+                None => {
+                    let message = "device snapshot unavailable for toggle".to_string();
+                    warn!(schedule_id = %schedule.id, "skipping toggle without snapshot");
                     record_schedule_error(state, &schedule.id, message).await;
                     return;
                 }
-            };
-            let target = !current.device_on;
-            if target {
-                if let Err(reason) = check_required_conditions(state, schedule).await {
-                    warn!(
-                        schedule_id = %schedule.id,
-                        reason = %reason,
-                        "toggle-to-on gated by conditions",
-                    );
-                    record_schedule_error(state, &schedule.id, format!("gated: {reason}")).await;
-                    return;
-                }
             }
-            target
         }
     };
 
-    if let Err(error) =
-        retry_tapo_handshake(|| state.controller.set_power(&device, target_state)).await
-    {
-        let message = format!("{error:#}");
-        warn!(schedule_id = %schedule.id, %error, "schedule action failed");
-        record_schedule_error(state, &schedule.id, message).await;
-        return;
-    }
+    set_schedule_intent(state, &schedule.device_name, target_intent).await;
 
-    match retry_tapo_handshake(|| state.controller.read_device(&device)).await {
-        Ok(snapshot) => {
-            update_device_snapshot(state, &schedule.device_name, snapshot, None).await;
-        }
-        Err(error) => {
-            warn!(schedule_id = %schedule.id, %error, "post-fire device read failed");
-        }
+    if let Err(error) = save_persisted_state(state).await {
+        warn!(%error, schedule_id = %schedule.id, "failed to persist schedule intent");
     }
 
     record_schedule_success(state, &schedule.id).await;
-}
 
-async fn check_required_conditions(
-    state: &AppState,
-    schedule: &ScheduleConfig,
-) -> Result<(), String> {
-    if schedule.condition_ids.is_empty() {
-        return Ok(());
-    }
-    let conditions = state.conditions.read().await;
-    for id in &schedule.condition_ids {
-        match conditions.get(id) {
-            None => return Err(format!("required condition '{id}' is missing")),
-            Some(condition) => {
-                if !condition.enabled {
-                    return Err(format!("condition '{}' is disabled", condition.name));
-                }
-                match condition.last_passing {
-                    Some(true) => continue,
-                    Some(false) => {
-                        return Err(format!("condition '{}' is not passing", condition.name));
-                    }
-                    None => {
-                        return Err(format!(
-                            "condition '{}' has not been probed yet",
-                            condition.name
-                        ));
-                    }
-                }
-            }
-        }
-    }
-    Ok(())
+    reconcile_device(state, &schedule.device_name).await;
 }
 
 async fn record_schedule_success(state: &AppState, id: &str) {
@@ -2305,6 +2347,13 @@ async fn load_persisted_state(state: &AppState) -> Result<()> {
         }
     }
 
+    {
+        let mut intents = state.device_intents.write().await;
+        for (name, intent) in persisted.device_intents {
+            intents.insert(name, intent);
+        }
+    }
+
     info!(
         loaded_count,
         loaded_schedule_count,
@@ -2320,6 +2369,7 @@ async fn save_persisted_state(state: &AppState) -> Result<()> {
         let devices = state.devices.read().await;
         let schedules = state.schedules.read().await;
         let conditions = state.conditions.read().await;
+        let intents = state.device_intents.read().await;
 
         PersistedState {
             version: STATE_VERSION,
@@ -2329,6 +2379,7 @@ async fn save_persisted_state(state: &AppState) -> Result<()> {
                 .collect(),
             schedules: schedules.clone(),
             conditions: conditions.clone(),
+            device_intents: intents.clone(),
         }
     };
 
@@ -2502,12 +2553,18 @@ async fn existing_config(state: &AppState) -> TapoConfig {
 }
 
 async fn device_views(state: &AppState) -> Vec<DeviceView> {
-    let devices = state.devices.read().await;
+    let device_names: Vec<String> = {
+        let devices = state.devices.read().await;
+        devices.keys().cloned().collect()
+    };
 
-    devices
-        .values()
-        .map(|device| device.view(state.energy_price_pence_per_kwh))
-        .collect()
+    let mut views = Vec::with_capacity(device_names.len());
+    for name in device_names {
+        if let Ok(view) = get_device_view(state, &name).await {
+            views.push(view);
+        }
+    }
+    views
 }
 
 async fn device_list_response(state: &AppState, scan_error: Option<String>) -> DeviceListResponse {
@@ -2538,11 +2595,16 @@ async fn get_device_config(state: &AppState, name: &str) -> Result<DeviceConfig>
 }
 
 async fn get_device_view(state: &AppState, name: &str) -> Result<DeviceView> {
+    let intent = {
+        let intents = state.device_intents.read().await;
+        intents.get(name).cloned().unwrap_or_default()
+    };
+    let condition_intent = condition_intent_for_device(state, name).await;
     let devices = state.devices.read().await;
 
     devices
         .get(name)
-        .map(|device| device.view(state.energy_price_pence_per_kwh))
+        .map(|device| device.view(state.energy_price_pence_per_kwh, intent, condition_intent))
         .ok_or_else(|| anyhow!("device '{name}' was not found"))
 }
 
@@ -3833,6 +3895,49 @@ const INDEX_HTML: &str = r##"<!doctype html>
             font-size: 12px;
         }
 
+        .device-mode-badge {
+            margin: 6px 0 0;
+            padding: 4px 8px;
+            border-radius: 6px;
+            font-family: var(--font-data);
+            font-size: 10px;
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 8px;
+        }
+
+        .device-mode-badge.manual {
+            background: color-mix(in srgb, var(--amber) 18%, rgba(0, 0, 0, 0.25));
+            color: var(--text);
+            border: 1px solid color-mix(in srgb, var(--amber) 60%, transparent);
+        }
+
+        .device-mode-badge.manual button {
+            padding: 2px 8px;
+            border: 1px solid color-mix(in srgb, var(--amber) 60%, transparent);
+            border-radius: 4px;
+            background: rgba(0, 0, 0, 0.3);
+            color: var(--text);
+            font-family: inherit;
+            font-size: 10px;
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+            cursor: pointer;
+        }
+
+        .device-mode-badge.manual button:hover {
+            background: rgba(0, 0, 0, 0.45);
+        }
+
+        .device-mode-badge.condition-blocked {
+            background: color-mix(in srgb, var(--red) 14%, rgba(0, 0, 0, 0.25));
+            color: var(--text);
+            border: 1px solid color-mix(in srgb, var(--red) 45%, transparent);
+        }
+
         .lamp {
             display: inline-flex;
             align-items: center;
@@ -4750,25 +4855,7 @@ const INDEX_HTML: &str = r##"<!doctype html>
                 Body must contain (optional)
                 <input type="text" name="body_contains" autocomplete="off" />
             </label>
-            <div class="interval-duration-row">
-                <label>
-                    When passing
-                    <select name="action_on_pass">
-                        <option value="">No action</option>
-                        <option value="on">Turn on</option>
-                        <option value="off">Turn off</option>
-                    </select>
-                </label>
-                <label>
-                    When failing
-                    <select name="action_on_fail">
-                        <option value="">No action</option>
-                        <option value="on">Turn on</option>
-                        <option value="off">Turn off</option>
-                    </select>
-                </label>
-            </div>
-            <p class="cron-hint">Status match: codes or ranges (e.g. <code>200</code>, <code>200-299</code>). Actions fire only when the probe result transitions.</p>
+            <p class="cron-hint">Status match: codes or ranges (e.g. <code>200</code>, <code>200-299</code>). While this condition is failing, the device it belongs to is forced OFF. When passing again, the device returns to whatever the schedule wants.</p>
             <p class="schedule-form-error" id="condition-form-error" hidden></p>
             <div class="schedule-form-actions">
                 <button type="button" data-close-condition-modal>Cancel</button>
@@ -4863,12 +4950,6 @@ const INDEX_HTML: &str = r##"<!doctype html>
                 Label (optional)
                 <input type="text" name="label" maxlength="80" placeholder="Morning lights" autocomplete="off" />
             </label>
-            <fieldset class="requires-picker" id="schedule-requires-fieldset">
-                <legend>Required conditions (ON only)</legend>
-                <div class="requires-list" id="schedule-requires-list">
-                    <span class="requires-empty">No conditions defined yet.</span>
-                </div>
-            </fieldset>
             <p class="schedule-form-error" id="schedule-form-error" hidden></p>
             <div class="schedule-form-actions">
                 <button type="button" data-close-schedule-modal>Cancel</button>
@@ -5138,8 +5219,28 @@ const INDEX_HTML: &str = r##"<!doctype html>
             wireScheduleControls();
             wireConditionControls();
             wireSectionAccordions();
+            wireReleaseOverrideButtons();
 
             return { totalPower, todayEnergy, todayCost };
+        }
+
+        function wireReleaseOverrideButtons() {
+            devicesEl.querySelectorAll("button[data-release-override]").forEach((button) => {
+                button.addEventListener("click", async () => {
+                    const name = button.dataset.releaseOverride;
+                    button.disabled = true;
+                    try {
+                        await requestJson(`/api/devices/${encodeURIComponent(name)}/release-override`, {
+                            method: "POST",
+                        });
+                        await loadDevices();
+                    } catch (error) {
+                        renderNotice(error.message);
+                    } finally {
+                        button.disabled = false;
+                    }
+                });
+            });
         }
 
         function wireSectionAccordions() {
@@ -5268,7 +5369,6 @@ const INDEX_HTML: &str = r##"<!doctype html>
                 if (latestDevices.length > 0) {
                     renderDevices(latestDevices);
                 }
-                refreshRequiresPicker();
             } catch (error) {
                 renderNotice(error.message);
             } finally {
@@ -5393,21 +5493,6 @@ const INDEX_HTML: &str = r##"<!doctype html>
             });
         }
 
-        function refreshRequiresPicker(selectedIds = null) {
-            const container = document.querySelector("#schedule-requires-list");
-            if (!container) return;
-            const checkedIds = selectedIds ?? Array.from(container.querySelectorAll("input[type='checkbox']:checked")).map((input) => input.value);
-            const deviceName = scheduleFormDeviceEl?.value ?? "";
-            const candidates = conditionsList.filter((c) => c.device_name === deviceName);
-            if (candidates.length === 0) {
-                container.innerHTML = `<span class="requires-empty">No conditions for this device.</span>`;
-                return;
-            }
-            container.innerHTML = candidates
-                .map((c) => `<label><input type="checkbox" name="condition_id" value="${escapeHtml(c.id)}" ${checkedIds.includes(c.id) ? "checked" : ""} /> ${escapeHtml(c.name)}</label>`)
-                .join("");
-        }
-
         function openConditionModal(deviceName, condition = null) {
             const isEditing = condition !== null;
             currentEditConditionId = isEditing ? condition.id : null;
@@ -5438,16 +5523,12 @@ const INDEX_HTML: &str = r##"<!doctype html>
                 set('input[name="poll_seconds"]', String(condition.poll_seconds));
                 set('input[name="body_contains"]', condition.body_contains ?? "");
                 set('textarea[name="body"]', condition.body ?? "");
-                set('select[name="action_on_pass"]', condition.action_on_pass ?? "");
-                set('select[name="action_on_fail"]', condition.action_on_fail ?? "");
                 const headerLines = Object.entries(condition.headers || {}).map(([k, v]) => `${k}: ${v}`).join("\n");
                 set('textarea[name="headers"]', headerLines);
             } else {
                 set('select[name="method"]', "GET");
                 set('input[name="status_match"]', "200-299");
                 set('input[name="poll_seconds"]', "60");
-                set('select[name="action_on_pass"]', "");
-                set('select[name="action_on_fail"]', "");
             }
 
             conditionModalEl.hidden = false;
@@ -5487,8 +5568,6 @@ const INDEX_HTML: &str = r##"<!doctype html>
             const bodyContains = conditionFormEl.querySelector('input[name="body_contains"]').value;
             const body = conditionFormEl.querySelector('textarea[name="body"]').value;
             const headersRaw = conditionFormEl.querySelector('textarea[name="headers"]').value;
-            const actionOnPassRaw = conditionFormEl.querySelector('select[name="action_on_pass"]').value;
-            const actionOnFailRaw = conditionFormEl.querySelector('select[name="action_on_fail"]').value;
 
             if (!name) return showConditionFormError("Name is required.");
             if (!url) return showConditionFormError("URL is required.");
@@ -5509,9 +5588,6 @@ const INDEX_HTML: &str = r##"<!doctype html>
                 headers[key] = value;
             }
 
-            const actionOnPass = actionOnPassRaw === "" ? null : actionOnPassRaw;
-            const actionOnFail = actionOnFailRaw === "" ? null : actionOnFailRaw;
-
             const isEditing = currentEditConditionId !== null;
             const endpoint = isEditing
                 ? `/api/conditions/${encodeURIComponent(currentEditConditionId)}`
@@ -5527,8 +5603,6 @@ const INDEX_HTML: &str = r##"<!doctype html>
                 status_match: statusMatch,
                 body_contains: bodyContains === "" ? null : bodyContains,
                 poll_seconds: pollSeconds,
-                action_on_pass: actionOnPass,
-                action_on_fail: actionOnFail,
             };
             if (!isEditing) payload.enabled = true;
 
@@ -5631,8 +5705,6 @@ const INDEX_HTML: &str = r##"<!doctype html>
             tabs.forEach((tab) => {
                 tab.setAttribute("aria-pressed", String(tab.dataset.mode === initialMode));
             });
-
-            refreshRequiresPicker(isEditing ? (schedule.condition_ids ?? []) : []);
 
             scheduleModalEl.hidden = false;
             window.setTimeout(() => {
@@ -5806,10 +5878,6 @@ const INDEX_HTML: &str = r##"<!doctype html>
 
             body.label = labelValue === "" ? null : labelValue;
 
-            const conditionIds = Array.from(
-                scheduleFormEl.querySelectorAll('input[name="condition_id"]:checked'),
-            ).map((input) => input.value);
-
             const editingId = currentEditScheduleId;
             const isEditing = editingId !== null;
 
@@ -5819,7 +5887,7 @@ const INDEX_HTML: &str = r##"<!doctype html>
             if (isEditing) {
                 endpoint = `/api/schedules/${encodeURIComponent(editingId)}`;
                 method = "PATCH";
-                payload = { label: body.label, condition_ids: conditionIds };
+                payload = { label: body.label };
                 if (body.kind === "cron") {
                     payload.cron = body.cron;
                     payload.action = body.action;
@@ -5830,7 +5898,6 @@ const INDEX_HTML: &str = r##"<!doctype html>
                 }
             } else {
                 body.enabled = true;
-                body.condition_ids = conditionIds;
                 endpoint = "/api/schedules";
                 method = "POST";
                 payload = body;
@@ -6147,6 +6214,9 @@ const INDEX_HTML: &str = r##"<!doctype html>
             const energy = device.energy;
             const statusClass = isOffline ? "offline" : isOn ? "on" : "off";
             const statusText = isOffline ? "offline" : isOn ? "on" : "off";
+            const manualOverride = device.manual_override;
+            const isManual = manualOverride === true || manualOverride === false;
+            const conditionBlock = device.condition_intent === false && !isManual;
 
             return `
                 <article class="breaker ${isOffline ? "offline" : ""}">
@@ -6159,6 +6229,8 @@ const INDEX_HTML: &str = r##"<!doctype html>
                             <span class="lever" aria-hidden="true"></span>
                         </button>
                     </div>
+                    ${isManual ? `<div class="device-mode-badge manual"><span>Manual</span><button type="button" data-release-override="${escapeHtml(device.name)}" title="Hand control back to schedules &amp; conditions">Auto</button></div>` : ""}
+                    ${conditionBlock ? `<div class="device-mode-badge condition-blocked"><span>Blocked by condition</span></div>` : ""}
                     <div class="status-strip">
                         <span class="lamp ${statusClass}">${statusText}</span>
                         <span>${formatDurationFromSeconds(device.on_time_seconds)}</span>
@@ -6270,11 +6342,6 @@ const INDEX_HTML: &str = r##"<!doctype html>
             }
             if (schedule.next_fire_at_ms && schedule.enabled) {
                 metaParts.push(`next ${formatRelative(schedule.next_fire_at_ms)}`);
-            }
-            const requireIds = schedule.condition_ids ?? [];
-            if (requireIds.length > 0) {
-                const requireNames = requireIds.map((id) => conditionsById.get(id)?.name ?? id);
-                metaParts.push(`requires ${escapeHtml(requireNames.join(", "))}`);
             }
             if (schedule.last_error) {
                 metaParts.push(`<span style="color: var(--red);">${escapeHtml(schedule.last_error)}</span>`);
@@ -6538,7 +6605,7 @@ mod tests {
             updated_at_ms: Some(2),
         };
 
-        let view = device.view(30.0);
+        let view = device.view(30.0, DeviceIntent::default(), None);
 
         assert_eq!(view.name, "lights");
         assert_eq!(view.nickname, "Lights");
@@ -6881,79 +6948,6 @@ mod tests {
         assert!(parse_status_match("500-400").is_err());
     }
 
-    #[tokio::test]
-    async fn condition_gate_blocks_on_until_passing() {
-        let state_path = test_state_path("condition-gate");
-        let settings = test_settings(state_path.clone());
-        let state = AppState::new(&settings);
-
-        let condition = ConditionConfig {
-            id: "cond1".to_string(),
-            name: "test".to_string(),
-            device_name: "lights".to_string(),
-            url: "http://example.invalid".to_string(),
-            method: "GET".to_string(),
-            headers: BTreeMap::new(),
-            body: None,
-            status_match: "200".to_string(),
-            body_contains: None,
-            poll_seconds: 60,
-            enabled: true,
-            action_on_pass: None,
-            action_on_fail: None,
-            created_at_ms: 0,
-            last_checked_at_ms: None,
-            last_passing: None,
-            last_status_code: None,
-            last_error: None,
-            last_action_at_ms: None,
-            last_action: None,
-            last_action_error: None,
-        };
-        let schedule = ScheduleConfig {
-            id: "sched1".to_string(),
-            device_name: "lights".to_string(),
-            kind: ScheduleKind::Cron,
-            cron: Some("0 0 7 * * 1-5".to_string()),
-            action: Some(ScheduleAction::On),
-            on_seconds: None,
-            off_seconds: None,
-            start_action: None,
-            starts_at_ms: None,
-            enabled: true,
-            label: None,
-            condition_ids: vec!["cond1".to_string()],
-            created_at_ms: 0,
-            last_fired_at_ms: None,
-            last_error: None,
-        };
-
-        {
-            let mut conditions = state.conditions.write().await;
-            conditions.insert("cond1".to_string(), condition.clone());
-            let mut schedules = state.schedules.write().await;
-            schedules.insert("sched1".to_string(), schedule.clone());
-        }
-
-        // last_passing = None → gate fails.
-        let blocked = check_required_conditions(&state, &schedule).await;
-        assert!(blocked.is_err(), "expected gate to fail when never probed");
-
-        {
-            let mut conditions = state.conditions.write().await;
-            conditions.get_mut("cond1").unwrap().last_passing = Some(false);
-        }
-        assert!(check_required_conditions(&state, &schedule).await.is_err());
-
-        {
-            let mut conditions = state.conditions.write().await;
-            conditions.get_mut("cond1").unwrap().last_passing = Some(true);
-        }
-        assert!(check_required_conditions(&state, &schedule).await.is_ok());
-
-        let _ = fs::remove_file(state_path);
-    }
-
     #[test]
     fn probe_key_groups_identical_requests() {
         let base = || ConditionConfig {
@@ -7003,5 +6997,108 @@ mod tests {
         assert_ne!(condition_probe_key(&a), condition_probe_key(&different_status));
         assert_ne!(condition_probe_key(&a), condition_probe_key(&different_method));
         assert_ne!(condition_probe_key(&a), condition_probe_key(&different_headers));
+    }
+
+    #[test]
+    fn effective_state_truth_table() {
+        // (manual, schedule, condition) -> expected
+        let cases = [
+            // No inputs at all: no opinion.
+            ((None, None, None), None),
+            // Pure condition control (e.g. AC).
+            ((None, None, Some(true)), Some(true)),
+            ((None, None, Some(false)), Some(false)),
+            // Schedule alone.
+            ((None, Some(true), None), Some(true)),
+            ((None, Some(false), None), Some(false)),
+            // Schedule says ON, condition agrees.
+            ((None, Some(true), Some(true)), Some(true)),
+            // Schedule says ON, condition forces OFF.
+            ((None, Some(true), Some(false)), Some(false)),
+            // Schedule says OFF, condition irrelevant.
+            ((None, Some(false), Some(true)), Some(false)),
+            ((None, Some(false), Some(false)), Some(false)),
+            // Manual override beats every other input.
+            ((Some(true), Some(false), Some(false)), Some(true)),
+            ((Some(false), Some(true), Some(true)), Some(false)),
+            ((Some(true), None, Some(false)), Some(true)),
+        ];
+
+        for ((manual, schedule, condition), expected) in cases {
+            assert_eq!(
+                compute_effective(manual, schedule, condition),
+                expected,
+                "compute_effective(manual={:?}, schedule={:?}, condition={:?})",
+                manual,
+                schedule,
+                condition,
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn condition_intent_fail_closed_for_unprobed_required_condition() {
+        let state_path = test_state_path("intent-fail-closed");
+        let settings = test_settings(state_path.clone());
+        let state = AppState::new(&settings);
+
+        let make = |last: Option<bool>| ConditionConfig {
+            id: "c".to_string(),
+            name: "n".to_string(),
+            device_name: "lights".to_string(),
+            url: "http://example.invalid".to_string(),
+            method: "GET".to_string(),
+            headers: BTreeMap::new(),
+            body: None,
+            status_match: "200".to_string(),
+            body_contains: None,
+            poll_seconds: 60,
+            enabled: true,
+            action_on_pass: None,
+            action_on_fail: None,
+            created_at_ms: 0,
+            last_checked_at_ms: None,
+            last_passing: last,
+            last_status_code: None,
+            last_error: None,
+            last_action_at_ms: None,
+            last_action: None,
+            last_action_error: None,
+        };
+
+        // No conditions targeting lights -> no opinion.
+        assert_eq!(condition_intent_for_device(&state, "lights").await, None);
+
+        // Never probed -> Some(false) (fail closed).
+        {
+            let mut conditions = state.conditions.write().await;
+            conditions.insert("c".to_string(), make(None));
+        }
+        assert_eq!(
+            condition_intent_for_device(&state, "lights").await,
+            Some(false)
+        );
+
+        // Passing -> Some(true).
+        {
+            let mut conditions = state.conditions.write().await;
+            conditions.get_mut("c").unwrap().last_passing = Some(true);
+        }
+        assert_eq!(
+            condition_intent_for_device(&state, "lights").await,
+            Some(true)
+        );
+
+        // Failing -> Some(false).
+        {
+            let mut conditions = state.conditions.write().await;
+            conditions.get_mut("c").unwrap().last_passing = Some(false);
+        }
+        assert_eq!(
+            condition_intent_for_device(&state, "lights").await,
+            Some(false)
+        );
+
+        let _ = fs::remove_file(state_path);
     }
 }
