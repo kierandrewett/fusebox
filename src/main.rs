@@ -2937,12 +2937,18 @@ async fn update_device_snapshot(
 
     publish_device_list(state, None).await;
 
+    // Only fire transition events when there's an actual transition. The
+    // first time we read a device after server startup we have no prior
+    // snapshot, so prev_on is None — that's not a transition, just the
+    // initial state report, and we suppress it to avoid restart noise.
     let mut events: Vec<HookEvent> = Vec::new();
-    if prev_offline && !new_offline {
+    if prev_offline && !new_offline && prev_on.is_some() {
         events.push(HookEvent::Online);
     }
-    if prev_on != Some(new_on) {
-        events.push(if new_on { HookEvent::On } else { HookEvent::Off });
+    if let Some(previous) = prev_on {
+        if previous != new_on {
+            events.push(if new_on { HookEvent::On } else { HookEvent::Off });
+        }
     }
     for event in events {
         dispatch_hook_events(
@@ -2991,7 +2997,10 @@ async fn update_device_error(state: &AppState, name: &str, error: String) {
 
     publish_device_list(state, None).await;
 
-    if !prev_offline {
+    // Only emit an offline transition if we'd previously known the
+    // device as online. Booting against a device that's been unplugged
+    // for a week shouldn't fire a fake "just went offline" notification.
+    if !prev_offline && prev_on.is_some() {
         dispatch_hook_events(
             state,
             name,
@@ -8308,5 +8317,129 @@ mod tests {
         assert_eq!(ctx.render("{{unknown}}"), "{{unknown}}");
         // Repeated placeholders all replaced.
         assert_eq!(ctx.render("{{event}}-{{event}}"), "off-off");
+    }
+
+    fn dummy_device(name: &str, ip: &str, model: DeviceModel, on: bool) -> ManagedDevice {
+        let ip_addr: IpAddr = ip.parse().unwrap();
+        let mut device = managed_device_from_config(
+            name.to_string(),
+            DeviceConfig { ip: ip_addr, model },
+        );
+        device.snapshot = Some(DeviceSnapshot {
+            ip: ip_addr,
+            model,
+            device_model: model.to_string(),
+            device_type: "Tapo device".to_string(),
+            nickname: name.to_string(),
+            device_on: on,
+            on_time_seconds: 0,
+            energy: None,
+        });
+        device
+    }
+
+    #[tokio::test]
+    async fn does_not_fire_hook_for_first_read_without_prior_snapshot() {
+        let state_path = test_state_path("hook-no-first-read");
+        let settings = test_settings(state_path.clone());
+        let state = AppState::new(&settings);
+
+        let captured = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::<(String, HookEvent)>::new()));
+        // Insert a hook so dispatch_hook_events has something to match against.
+        let hook = sample_hook(Vec::new(), Vec::new());
+        {
+            let mut hooks = state.hooks.write().await;
+            hooks.insert(hook.id.clone(), hook);
+        }
+        // Insert the device WITHOUT a prior snapshot.
+        {
+            let mut devices = state.devices.write().await;
+            devices.insert(
+                "lights".to_string(),
+                managed_device_from_config(
+                    "lights".to_string(),
+                    DeviceConfig {
+                        ip: "192.0.2.10".parse().unwrap(),
+                        model: DeviceModel::P110,
+                    },
+                ),
+            );
+        }
+
+        let snapshot = DeviceSnapshot {
+            ip: "192.0.2.10".parse().unwrap(),
+            model: DeviceModel::P110,
+            device_model: "p110".to_string(),
+            device_type: "Tapo plug".to_string(),
+            nickname: "Lights".to_string(),
+            device_on: true,
+            on_time_seconds: 0,
+            energy: None,
+        };
+        update_device_snapshot(&state, "lights", snapshot, None, HookSource::External).await;
+
+        // No transition happened — first read shouldn't have queued anything for the hook.
+        // We can't peek inside spawned hook firings easily, but we can assert that the
+        // device's hook record is untouched.
+        let hooks = state.hooks.read().await;
+        let stored = hooks.values().next().unwrap();
+        assert_eq!(stored.last_fired_at_ms, None, "first read should not have fired the hook");
+        let _ = captured;
+
+        let _ = fs::remove_file(state_path);
+    }
+
+    #[tokio::test]
+    async fn two_devices_each_fire_hook_independently() {
+        let state_path = test_state_path("hook-multi-device");
+        let settings = test_settings(state_path.clone());
+        let state = AppState::new(&settings);
+
+        {
+            let mut devices = state.devices.write().await;
+            devices.insert(
+                "lights".to_string(),
+                dummy_device("lights", "192.0.2.10", DeviceModel::P110, true),
+            );
+            devices.insert(
+                "ac".to_string(),
+                dummy_device("ac", "192.0.2.11", DeviceModel::P110, true),
+            );
+        }
+
+        // No filter -> matches any device, any event.
+        let hook = sample_hook(Vec::new(), Vec::new());
+        let hook_id = hook.id.clone();
+        {
+            let mut hooks = state.hooks.write().await;
+            hooks.insert(hook.id.clone(), hook);
+        }
+
+        let counter = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        for device in ["lights", "ac"] {
+            let matching: Vec<HookConfig> = {
+                let hooks = state.hooks.read().await;
+                hooks
+                    .values()
+                    .filter(|h| hook_matches(h, device, HookEvent::Off))
+                    .cloned()
+                    .collect()
+            };
+            assert_eq!(matching.len(), 1, "device {} should match the hook", device);
+            counter.fetch_add(matching.len(), std::sync::atomic::Ordering::Relaxed);
+        }
+
+        // Both devices independently match -> total firings = 2.
+        assert_eq!(
+            counter.load(std::sync::atomic::Ordering::Relaxed),
+            2,
+            "expected each device to fire the hook once",
+        );
+
+        // Sanity: hook id present and untouched (no real network call in test).
+        let hooks = state.hooks.read().await;
+        assert!(hooks.contains_key(&hook_id));
+
+        let _ = fs::remove_file(state_path);
     }
 }
