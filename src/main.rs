@@ -5721,10 +5721,12 @@ const INDEX_HTML: &str = r##"<!doctype html>
                 Body (optional, sends default JSON if blank)
                 <textarea name="body" rows="3" placeholder='{"text":"{{device}} -> {{event}}"}' spellcheck="false"></textarea>
             </label>
-            <label>
-                Device filter (comma-separated, blank = any)
-                <input type="text" name="device_filter" placeholder="lights, ac" autocomplete="off" />
-            </label>
+            <fieldset class="day-picker" id="hook-device-filter-fieldset">
+                <legend>Device filter (none ticked = all)</legend>
+                <div class="requires-list" id="hook-device-filter-list">
+                    <span class="requires-empty">No devices discovered yet.</span>
+                </div>
+            </fieldset>
             <fieldset class="day-picker">
                 <legend>Event filter (none ticked = all)</legend>
                 <label><input type="checkbox" name="event" value="on" /> On</label>
@@ -6705,18 +6707,19 @@ const INDEX_HTML: &str = r##"<!doctype html>
                 set('select[name="enabled"]', String(hook.enabled));
                 set('input[name="url"]', hook.url);
                 set('textarea[name="body"]', hook.body ?? "");
-                set('input[name="device_filter"]', hook.device_filter.join(", "));
                 const headerLines = Object.entries(hook.headers || {}).map(([k, v]) => `${k}: ${v}`).join("\n");
                 set('textarea[name="headers"]', headerLines);
                 hookFormEl.querySelectorAll('input[name="event"]').forEach((input) => {
                     input.checked = hook.event_filter.includes(input.value);
                 });
+                renderHookDeviceFilter(hook.device_filter ?? []);
             } else {
                 set('select[name="method"]', "POST");
                 set('select[name="enabled"]', "true");
                 hookFormEl.querySelectorAll('input[name="event"]').forEach((input) => {
                     input.checked = false;
                 });
+                renderHookDeviceFilter([]);
             }
 
             hookModalEl.hidden = false;
@@ -6728,6 +6731,32 @@ const INDEX_HTML: &str = r##"<!doctype html>
         function closeHookModal() {
             hookModalEl.hidden = true;
             currentEditHookId = null;
+        }
+
+        function renderHookDeviceFilter(selectedNames) {
+            const container = document.querySelector("#hook-device-filter-list");
+            if (!container) return;
+            const selected = new Set(selectedNames);
+            const knownNames = new Set(latestDevices.map((d) => d.name));
+            const lines = [];
+            if (latestDevices.length === 0) {
+                lines.push(`<span class="requires-empty">No devices discovered yet.</span>`);
+            } else {
+                for (const device of latestDevices) {
+                    const checked = selected.has(device.name) ? "checked" : "";
+                    const labelText = device.nickname && device.nickname !== device.name
+                        ? `${escapeHtml(device.nickname)} <span style="color: var(--muted);">(${escapeHtml(device.name)})</span>`
+                        : escapeHtml(device.name);
+                    lines.push(`<label><input type="checkbox" name="device_filter" value="${escapeHtml(device.name)}" ${checked} /> ${labelText}</label>`);
+                }
+            }
+            // Surface any saved names that no longer correspond to a known device.
+            for (const name of selectedNames) {
+                if (!knownNames.has(name)) {
+                    lines.push(`<label title="Device not currently discovered"><input type="checkbox" name="device_filter" value="${escapeHtml(name)}" checked /> ${escapeHtml(name)} <span style="color: var(--red);">(missing)</span></label>`);
+                }
+            }
+            container.innerHTML = lines.join("");
         }
 
         hookModalEl.addEventListener("click", (event) => {
@@ -6755,7 +6784,7 @@ const INDEX_HTML: &str = r##"<!doctype html>
             const url = hookFormEl.querySelector('input[name="url"]').value.trim();
             const body = hookFormEl.querySelector('textarea[name="body"]').value;
             const headersRaw = hookFormEl.querySelector('textarea[name="headers"]').value;
-            const deviceFilterRaw = hookFormEl.querySelector('input[name="device_filter"]').value;
+            const deviceFilter = Array.from(hookFormEl.querySelectorAll('input[name="device_filter"]:checked')).map((input) => input.value);
             const eventFilter = Array.from(hookFormEl.querySelectorAll('input[name="event"]:checked')).map((input) => input.value);
 
             if (!name) return showHookFormError("Name is required.");
@@ -6772,11 +6801,6 @@ const INDEX_HTML: &str = r##"<!doctype html>
                 if (key === "") return showHookFormError("Header key cannot be empty.");
                 headers[key] = value;
             }
-
-            const deviceFilter = deviceFilterRaw
-                .split(",")
-                .map((part) => part.trim())
-                .filter((part) => part !== "");
 
             const isEditing = currentEditHookId !== null;
             const endpoint = isEditing
