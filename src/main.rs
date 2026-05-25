@@ -64,6 +64,7 @@ struct AppState {
     schedules: Arc<RwLock<BTreeMap<String, ScheduleConfig>>>,
     conditions: Arc<RwLock<BTreeMap<String, ConditionConfig>>>,
     device_intents: Arc<RwLock<BTreeMap<String, DeviceIntent>>>,
+    hooks: Arc<RwLock<BTreeMap<String, HookConfig>>>,
     http_client: reqwest::Client,
     discovery_timeout_seconds: u64,
     discovery_targets: Vec<String>,
@@ -551,6 +552,8 @@ struct PersistedState {
     conditions: BTreeMap<String, ConditionConfig>,
     #[serde(default)]
     device_intents: BTreeMap<String, DeviceIntent>,
+    #[serde(default)]
+    hooks: BTreeMap<String, HookConfig>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -559,6 +562,57 @@ struct DeviceIntent {
     schedule_intent: Option<bool>,
     #[serde(default)]
     manual_override: Option<bool>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+enum HookEvent {
+    On,
+    Off,
+    Online,
+    Offline,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+enum HookSource {
+    Manual,
+    Schedule,
+    Condition,
+    External,
+    Discovery,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct HookConfig {
+    id: String,
+    name: String,
+    #[serde(default = "default_true")]
+    enabled: bool,
+    url: String,
+    #[serde(default = "default_http_method")]
+    method: String,
+    #[serde(default)]
+    headers: BTreeMap<String, String>,
+    /// Optional body. If absent, a default JSON payload is sent.
+    #[serde(default)]
+    body: Option<String>,
+    /// Empty = matches every device.
+    #[serde(default)]
+    device_filter: Vec<String>,
+    /// Empty = matches every event.
+    #[serde(default)]
+    event_filter: Vec<HookEvent>,
+    #[serde(default)]
+    created_at_ms: u128,
+    #[serde(default)]
+    last_fired_at_ms: Option<u128>,
+    #[serde(default)]
+    last_event: Option<HookEvent>,
+    #[serde(default)]
+    last_status_code: Option<u16>,
+    #[serde(default)]
+    last_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -619,6 +673,12 @@ async fn main() -> Result<()> {
             delete(delete_condition).patch(update_condition),
         )
         .route("/api/conditions/{id}/probe", post(probe_condition))
+        .route("/api/hooks", get(list_hooks).post(create_hook))
+        .route(
+            "/api/hooks/{id}",
+            delete(delete_hook).patch(update_hook),
+        )
+        .route("/api/hooks/{id}/test", post(test_hook))
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind(settings.bind_address)
@@ -722,6 +782,7 @@ impl AppState {
             schedules: Arc::new(RwLock::new(BTreeMap::new())),
             conditions: Arc::new(RwLock::new(BTreeMap::new())),
             device_intents: Arc::new(RwLock::new(BTreeMap::new())),
+            hooks: Arc::new(RwLock::new(BTreeMap::new())),
             http_client,
             discovery_timeout_seconds: settings.discovery_timeout_seconds,
             discovery_targets: settings.discovery_targets.clone(),
@@ -926,7 +987,7 @@ async fn toggle_device(
     let target = !current_snapshot.device_on;
     retry_tapo_handshake(|| state.controller.set_power(&device, target)).await?;
     let snapshot = retry_tapo_handshake(|| state.controller.read_device(&device)).await?;
-    update_device_snapshot(&state, &name, snapshot, None).await;
+    update_device_snapshot(&state, &name, snapshot, None, HookSource::Manual).await;
 
     set_manual_override(&state, &name, target).await;
     if let Err(error) = save_persisted_state(&state).await {
@@ -949,7 +1010,7 @@ async fn set_device_power(
     let _operation_guard = operation_lock.lock().await;
     retry_tapo_handshake(|| state.controller.set_power(&device, request.on)).await?;
     let snapshot = retry_tapo_handshake(|| state.controller.read_device(&device)).await?;
-    update_device_snapshot(&state, &name, snapshot, None).await;
+    update_device_snapshot(&state, &name, snapshot, None, HookSource::Manual).await;
 
     set_manual_override(&state, &name, request.on).await;
     if let Err(error) = save_persisted_state(&state).await {
@@ -977,7 +1038,7 @@ async fn release_device_override(
     if let Err(error) = save_persisted_state(&state).await {
         warn!(%error, device = %name, "failed to persist override release");
     }
-    reconcile_device(&state, &name).await;
+    reconcile_device(&state, &name, HookSource::Manual).await;
 
     get_device_view(&state, &name)
         .await
@@ -1624,6 +1685,256 @@ fn new_condition_id() -> String {
     format!("c{:x}-{:x}", now_ms(), seq)
 }
 
+#[derive(Debug, Clone, Deserialize)]
+struct CreateHookRequest {
+    name: String,
+    url: String,
+    #[serde(default = "default_http_method")]
+    method: String,
+    #[serde(default)]
+    headers: BTreeMap<String, String>,
+    #[serde(default)]
+    body: Option<String>,
+    #[serde(default)]
+    device_filter: Vec<String>,
+    #[serde(default)]
+    event_filter: Vec<HookEvent>,
+    #[serde(default = "default_true")]
+    enabled: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct UpdateHookRequest {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    url: Option<String>,
+    #[serde(default)]
+    method: Option<String>,
+    #[serde(default)]
+    headers: Option<BTreeMap<String, String>>,
+    #[serde(default, deserialize_with = "deserialize_optional_label")]
+    body: Option<Option<String>>,
+    #[serde(default)]
+    device_filter: Option<Vec<String>>,
+    #[serde(default)]
+    event_filter: Option<Vec<HookEvent>>,
+    #[serde(default)]
+    enabled: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct HookView {
+    id: String,
+    name: String,
+    enabled: bool,
+    url: String,
+    method: String,
+    headers: BTreeMap<String, String>,
+    body: Option<String>,
+    device_filter: Vec<String>,
+    event_filter: Vec<HookEvent>,
+    created_at_ms: u128,
+    last_fired_at_ms: Option<u128>,
+    last_event: Option<HookEvent>,
+    last_status_code: Option<u16>,
+    last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct HookListResponse {
+    hooks: Vec<HookView>,
+}
+
+fn hook_view(hook: &HookConfig) -> HookView {
+    HookView {
+        id: hook.id.clone(),
+        name: hook.name.clone(),
+        enabled: hook.enabled,
+        url: hook.url.clone(),
+        method: hook.method.clone(),
+        headers: hook.headers.clone(),
+        body: hook.body.clone(),
+        device_filter: hook.device_filter.clone(),
+        event_filter: hook.event_filter.clone(),
+        created_at_ms: hook.created_at_ms,
+        last_fired_at_ms: hook.last_fired_at_ms,
+        last_event: hook.last_event,
+        last_status_code: hook.last_status_code,
+        last_error: hook.last_error.clone(),
+    }
+}
+
+static HOOK_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+fn new_hook_id() -> String {
+    let seq = HOOK_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("h{:x}-{:x}", now_ms(), seq)
+}
+
+async fn list_hooks(State(state): State<AppState>) -> Json<HookListResponse> {
+    let hooks = state.hooks.read().await;
+    let mut views: Vec<HookView> = hooks.values().map(hook_view).collect();
+    views.sort_by(|a, b| a.name.cmp(&b.name).then(a.created_at_ms.cmp(&b.created_at_ms)));
+    Json(HookListResponse { hooks: views })
+}
+
+async fn create_hook(
+    State(state): State<AppState>,
+    Json(request): Json<CreateHookRequest>,
+) -> Result<(StatusCode, Json<HookView>), AppError> {
+    let name = request.name.trim().to_string();
+    if name.is_empty() {
+        return Err(AppError(anyhow!("hook name is required")));
+    }
+    validate_http_method(&request.method).map_err(AppError)?;
+    validate_url(&request.url).map_err(AppError)?;
+
+    let hook = HookConfig {
+        id: new_hook_id(),
+        name,
+        enabled: request.enabled,
+        url: request.url,
+        method: request.method.to_uppercase(),
+        headers: request.headers,
+        body: request.body.and_then(non_empty_label),
+        device_filter: request.device_filter,
+        event_filter: request.event_filter,
+        created_at_ms: now_ms(),
+        last_fired_at_ms: None,
+        last_event: None,
+        last_status_code: None,
+        last_error: None,
+    };
+
+    let id = hook.id.clone();
+    {
+        let mut hooks = state.hooks.write().await;
+        hooks.insert(id.clone(), hook);
+    }
+    save_persisted_state(&state).await.map_err(AppError)?;
+
+    let view = {
+        let hooks = state.hooks.read().await;
+        hooks
+            .get(&id)
+            .map(hook_view)
+            .ok_or_else(|| AppError(anyhow!("hook vanished after create")))?
+    };
+    Ok((StatusCode::CREATED, Json(view)))
+}
+
+async fn update_hook(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(request): Json<UpdateHookRequest>,
+) -> Result<Json<HookView>, AppError> {
+    if let Some(method) = request.method.as_deref() {
+        validate_http_method(method).map_err(AppError)?;
+    }
+    if let Some(url) = request.url.as_deref() {
+        validate_url(url).map_err(AppError)?;
+    }
+
+    {
+        let mut hooks = state.hooks.write().await;
+        let hook = hooks
+            .get_mut(&id)
+            .ok_or_else(|| AppError(anyhow!("unknown hook '{}'", id)))?;
+
+        if let Some(name) = request.name {
+            let trimmed = name.trim();
+            if trimmed.is_empty() {
+                return Err(AppError(anyhow!("hook name cannot be empty")));
+            }
+            hook.name = trimmed.to_string();
+        }
+        if let Some(url) = request.url {
+            hook.url = url;
+            hook.last_error = None;
+        }
+        if let Some(method) = request.method {
+            hook.method = method.to_uppercase();
+        }
+        if let Some(headers) = request.headers {
+            hook.headers = headers;
+        }
+        if let Some(body) = request.body {
+            hook.body = body.and_then(non_empty_label);
+        }
+        if let Some(filter) = request.device_filter {
+            hook.device_filter = filter;
+        }
+        if let Some(filter) = request.event_filter {
+            hook.event_filter = filter;
+        }
+        if let Some(enabled) = request.enabled {
+            hook.enabled = enabled;
+        }
+    }
+
+    save_persisted_state(&state).await.map_err(AppError)?;
+
+    let view = {
+        let hooks = state.hooks.read().await;
+        hooks
+            .get(&id)
+            .map(hook_view)
+            .ok_or_else(|| AppError(anyhow!("hook vanished mid-update")))?
+    };
+    Ok(Json(view))
+}
+
+async fn delete_hook(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, AppError> {
+    let removed = {
+        let mut hooks = state.hooks.write().await;
+        hooks.remove(&id).is_some()
+    };
+    if !removed {
+        return Err(AppError(anyhow!("unknown hook '{}'", id)));
+    }
+    save_persisted_state(&state).await.map_err(AppError)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn test_hook(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<HookView>, AppError> {
+    let hook = {
+        let hooks = state.hooks.read().await;
+        hooks
+            .get(&id)
+            .cloned()
+            .ok_or_else(|| AppError(anyhow!("unknown hook '{}'", id)))?
+    };
+
+    let synthetic = serde_json::json!({
+        "device": "test",
+        "nickname": "Test Device",
+        "model": "p110",
+        "event": HookEvent::On,
+        "source": HookSource::Manual,
+        "previous_on": false,
+        "new_on": true,
+        "timestamp_ms": now_ms() as u64,
+        "test": true,
+    });
+    fire_hook(&state, hook, HookEvent::On, synthetic).await;
+
+    let view = {
+        let hooks = state.hooks.read().await;
+        hooks
+            .get(&id)
+            .map(hook_view)
+            .ok_or_else(|| AppError(anyhow!("hook vanished mid-test")))?
+    };
+    Ok(Json(view))
+}
+
 fn validate_http_method(method: &str) -> Result<()> {
     HttpMethod::from_bytes(method.trim().to_uppercase().as_bytes())
         .map(|_| ())
@@ -1864,7 +2175,7 @@ async fn probe_and_record(state: &AppState, id: &str) {
     }
 
     for device_name in devices_to_reconcile {
-        reconcile_device(state, &device_name).await;
+        reconcile_device(state, &device_name, HookSource::Condition).await;
     }
 }
 
@@ -1919,7 +2230,7 @@ async fn condition_intent_for_device(state: &AppState, device_name: &str) -> Opt
 
 /// Reconcile a device's actual state with the computed effective state.
 /// Skips if the device doesn't exist or if the effective state is None.
-async fn reconcile_device(state: &AppState, device_name: &str) {
+async fn reconcile_device(state: &AppState, device_name: &str, source: HookSource) {
     let device_cfg = match get_device_config(state, device_name).await {
         Ok(cfg) => cfg,
         Err(_) => return,
@@ -1968,7 +2279,7 @@ async fn reconcile_device(state: &AppState, device_name: &str) {
     }
 
     if let Ok(snapshot) = retry_tapo_handshake(|| state.controller.read_device(&device_cfg)).await {
-        update_device_snapshot(state, device_name, snapshot, None).await;
+        update_device_snapshot(state, device_name, snapshot, None, source).await;
     }
 }
 
@@ -2156,7 +2467,7 @@ async fn fire_schedule(state: &AppState, schedule: &ScheduleConfig, action: Sche
 
     record_schedule_success(state, &schedule.id).await;
 
-    reconcile_device(state, &schedule.device_name).await;
+    reconcile_device(state, &schedule.device_name, HookSource::Schedule).await;
 }
 
 async fn record_schedule_success(state: &AppState, id: &str) {
@@ -2354,6 +2665,13 @@ async fn load_persisted_state(state: &AppState) -> Result<()> {
         }
     }
 
+    {
+        let mut hooks = state.hooks.write().await;
+        for (id, hook) in persisted.hooks {
+            hooks.insert(id, hook);
+        }
+    }
+
     info!(
         loaded_count,
         loaded_schedule_count,
@@ -2370,6 +2688,7 @@ async fn save_persisted_state(state: &AppState) -> Result<()> {
         let schedules = state.schedules.read().await;
         let conditions = state.conditions.read().await;
         let intents = state.device_intents.read().await;
+        let hooks = state.hooks.read().await;
 
         PersistedState {
             version: STATE_VERSION,
@@ -2380,6 +2699,7 @@ async fn save_persisted_state(state: &AppState) -> Result<()> {
             schedules: schedules.clone(),
             conditions: conditions.clone(),
             device_intents: intents.clone(),
+            hooks: hooks.clone(),
         }
     };
 
@@ -2459,7 +2779,9 @@ async fn refresh_device(state: &AppState, name: &str, device: DeviceConfig) {
     let _operation_guard = operation_lock.lock().await;
 
     match retry_tapo_handshake(|| state.controller.read_device(&device)).await {
-        Ok(snapshot) => update_device_snapshot(state, name, snapshot, None).await,
+        Ok(snapshot) => {
+            update_device_snapshot(state, name, snapshot, None, HookSource::External).await
+        }
         Err(error) => update_device_error(state, name, error.to_string()).await,
     }
 }
@@ -2513,7 +2835,24 @@ async fn update_device_snapshot(
     name: &str,
     snapshot: DeviceSnapshot,
     last_error: Option<String>,
+    source: HookSource,
 ) {
+    let (prev_on, prev_offline, nickname) = {
+        let devices = state.devices.read().await;
+        let device = devices.get(name);
+        let prev_on = device.and_then(|d| d.snapshot.as_ref()).map(|s| s.device_on);
+        let prev_offline = device.is_some_and(|d| d.last_error.is_some());
+        let nickname = device
+            .and_then(|d| d.snapshot.as_ref())
+            .map(|s| s.nickname.clone())
+            .unwrap_or_else(|| name.to_string());
+        (prev_on, prev_offline, nickname)
+    };
+    let new_on = snapshot.device_on;
+    let new_offline = last_error.is_some();
+
+    let model = snapshot.device_model.clone();
+
     {
         let mut devices = state.devices.write().await;
 
@@ -2525,9 +2864,50 @@ async fn update_device_snapshot(
     }
 
     publish_device_list(state, None).await;
+
+    let mut events: Vec<HookEvent> = Vec::new();
+    if prev_offline && !new_offline {
+        events.push(HookEvent::Online);
+    }
+    if prev_on != Some(new_on) {
+        events.push(if new_on { HookEvent::On } else { HookEvent::Off });
+    }
+    for event in events {
+        dispatch_hook_events(
+            state,
+            name,
+            &nickname,
+            &model,
+            event,
+            source,
+            prev_on,
+            Some(new_on),
+        )
+        .await;
+    }
 }
 
 async fn update_device_error(state: &AppState, name: &str, error: String) {
+    let (prev_on, prev_offline, nickname, model) = {
+        let devices = state.devices.read().await;
+        let device = devices.get(name);
+        let prev_on = device.and_then(|d| d.snapshot.as_ref()).map(|s| s.device_on);
+        let prev_offline = device.is_some_and(|d| d.last_error.is_some());
+        let nickname = device
+            .and_then(|d| d.snapshot.as_ref())
+            .map(|s| s.nickname.clone())
+            .unwrap_or_else(|| name.to_string());
+        let model = device
+            .and_then(|d| d.snapshot.as_ref())
+            .map(|s| s.device_model.clone())
+            .unwrap_or_else(|| {
+                device
+                    .map(|d| d.config.model.to_string())
+                    .unwrap_or_default()
+            });
+        (prev_on, prev_offline, nickname, model)
+    };
+
     {
         let mut devices = state.devices.write().await;
 
@@ -2538,6 +2918,159 @@ async fn update_device_error(state: &AppState, name: &str, error: String) {
     }
 
     publish_device_list(state, None).await;
+
+    if !prev_offline {
+        dispatch_hook_events(
+            state,
+            name,
+            &nickname,
+            &model,
+            HookEvent::Offline,
+            HookSource::External,
+            prev_on,
+            prev_on,
+        )
+        .await;
+    }
+}
+
+fn hook_matches(hook: &HookConfig, device: &str, event: HookEvent) -> bool {
+    if !hook.enabled {
+        return false;
+    }
+    if !hook.device_filter.is_empty() && !hook.device_filter.iter().any(|d| d == device) {
+        return false;
+    }
+    if !hook.event_filter.is_empty() && !hook.event_filter.iter().any(|e| *e == event) {
+        return false;
+    }
+    true
+}
+
+async fn dispatch_hook_events(
+    state: &AppState,
+    device: &str,
+    nickname: &str,
+    model: &str,
+    event: HookEvent,
+    source: HookSource,
+    previous_on: Option<bool>,
+    new_on: Option<bool>,
+) {
+    let matching_hooks: Vec<HookConfig> = {
+        let hooks = state.hooks.read().await;
+        hooks
+            .values()
+            .filter(|hook| hook_matches(hook, device, event))
+            .cloned()
+            .collect()
+    };
+    if matching_hooks.is_empty() {
+        return;
+    }
+
+    let payload_value = serde_json::json!({
+        "device": device,
+        "nickname": nickname,
+        "model": model,
+        "event": event,
+        "source": source,
+        "previous_on": previous_on,
+        "new_on": new_on,
+        "timestamp_ms": now_ms() as u64,
+    });
+
+    info!(
+        device,
+        ?event,
+        ?source,
+        hook_count = matching_hooks.len(),
+        "dispatching device transition to hooks",
+    );
+
+    for hook in matching_hooks {
+        let state = state.clone();
+        let payload_value = payload_value.clone();
+        tokio::spawn(async move {
+            fire_hook(&state, hook, event, payload_value).await;
+        });
+    }
+}
+
+async fn fire_hook(
+    state: &AppState,
+    hook: HookConfig,
+    event: HookEvent,
+    default_payload: serde_json::Value,
+) {
+    let method = match HttpMethod::from_bytes(hook.method.to_uppercase().as_bytes()) {
+        Ok(method) => method,
+        Err(error) => {
+            warn!(hook_id = %hook.id, %error, "hook has invalid HTTP method");
+            update_hook_result(state, &hook.id, event, None, Some(format!("invalid method: {error}"))).await;
+            return;
+        }
+    };
+
+    let mut builder = state.http_client.request(method, &hook.url);
+    let mut content_type_set = false;
+    for (key, value) in &hook.headers {
+        if key.eq_ignore_ascii_case("content-type") {
+            content_type_set = true;
+        }
+        builder = builder.header(key, value);
+    }
+    let body_text = match hook.body.as_deref() {
+        Some(custom) => custom.to_string(),
+        None => default_payload.to_string(),
+    };
+    if !content_type_set && hook.body.is_none() {
+        builder = builder.header("content-type", "application/json");
+    }
+    builder = builder.body(body_text);
+
+    match builder.send().await {
+        Ok(response) => {
+            let status = response.status();
+            let code = Some(status.as_u16());
+            let error_text = if status.is_success() {
+                None
+            } else {
+                Some(format!("non-success status {status}"))
+            };
+            update_hook_result(state, &hook.id, event, code, error_text).await;
+        }
+        Err(error) => {
+            warn!(hook_id = %hook.id, %error, "hook request failed");
+            update_hook_result(state, &hook.id, event, None, Some(format!("{error}"))).await;
+        }
+    }
+}
+
+async fn update_hook_result(
+    state: &AppState,
+    hook_id: &str,
+    event: HookEvent,
+    status_code: Option<u16>,
+    error: Option<String>,
+) {
+    let updated = {
+        let mut hooks = state.hooks.write().await;
+        if let Some(hook) = hooks.get_mut(hook_id) {
+            hook.last_fired_at_ms = Some(now_ms());
+            hook.last_event = Some(event);
+            hook.last_status_code = status_code;
+            hook.last_error = error;
+            true
+        } else {
+            false
+        }
+    };
+    if updated {
+        if let Err(error) = save_persisted_state(state).await {
+            warn!(%error, hook_id, "failed to persist hook result");
+        }
+    }
 }
 
 async fn existing_config(state: &AppState) -> TapoConfig {
@@ -4656,6 +5189,116 @@ const INDEX_HTML: &str = r##"<!doctype html>
             font-style: italic;
         }
 
+        .hooks-panel {
+            margin-bottom: 16px;
+            padding: 14px;
+            border: 1px solid #070604;
+            border-radius: 12px;
+            background:
+                linear-gradient(160deg, rgba(255,255,255,0.06), transparent 32%),
+                linear-gradient(var(--breaker-top), var(--bakelite));
+            color: var(--text);
+            font-family: var(--font-data);
+        }
+
+        .hooks-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 10px;
+        }
+
+        .hooks-header h2 {
+            margin: 0;
+            font-size: 13px;
+            font-weight: 700;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+            color: var(--muted);
+        }
+
+        .hook-list {
+            list-style: none;
+            margin: 0;
+            padding: 0;
+            display: grid;
+            gap: 6px;
+        }
+
+        .hook-item {
+            display: grid;
+            grid-template-columns: 1fr auto;
+            align-items: start;
+            gap: 8px;
+            padding: 8px 10px;
+            border-radius: 8px;
+            background: rgba(255, 255, 255, 0.04);
+            font-size: 12px;
+        }
+
+        .hook-item.disabled {
+            opacity: 0.55;
+        }
+
+        .hook-body {
+            min-width: 0;
+            display: grid;
+            gap: 2px;
+        }
+
+        .hook-name {
+            font-weight: 600;
+            color: var(--text);
+        }
+
+        .hook-target {
+            color: var(--muted);
+            font-size: 10px;
+            overflow-wrap: anywhere;
+            word-break: break-word;
+        }
+
+        .hook-meta {
+            color: var(--muted);
+            font-size: 10px;
+            overflow-wrap: anywhere;
+            word-break: break-word;
+        }
+
+        .hook-actions {
+            display: inline-flex;
+            gap: 2px;
+        }
+
+        .hook-actions button {
+            padding: 0;
+            width: 22px;
+            height: 22px;
+            border: 0;
+            border-radius: 4px;
+            background: transparent;
+            color: var(--muted);
+            font-size: 13px;
+            line-height: 1;
+            cursor: pointer;
+        }
+
+        .hook-actions button:hover {
+            color: var(--text);
+            background: rgba(0, 0, 0, 0.3);
+        }
+
+        .hook-actions .hook-delete:hover {
+            color: var(--red);
+        }
+
+        .hooks-empty {
+            margin: 0;
+            font-size: 11px;
+            color: var(--muted);
+            font-style: italic;
+        }
+
         .schedule-modal-panel textarea {
             padding: 7px 9px;
             border: 1px solid rgba(229, 216, 182, 0.28);
@@ -4804,9 +5447,78 @@ const INDEX_HTML: &str = r##"<!doctype html>
                 </div>
                 <p class="usage-empty" id="usage-empty">Loading power history from Tapo.</p>
             </section>
+            <section class="hooks-panel" aria-label="Hooks">
+                <div class="hooks-header">
+                    <h2>Hooks</h2>
+                    <button class="schedule-add" id="hook-add" type="button">+ Add hook</button>
+                </div>
+                <ul class="hook-list" id="hook-list"></ul>
+                <p class="hooks-empty" id="hooks-empty">No hooks yet. Hooks fire an HTTP request when any device transitions on/off/online/offline.</p>
+            </section>
             <div class="breaker-grid" id="devices"></div>
         </section>
     </main>
+
+    <div class="schedule-modal" id="hook-modal" hidden role="dialog" aria-modal="true" aria-labelledby="hook-modal-title">
+        <div class="schedule-modal-backdrop" data-close-hook-modal></div>
+        <form class="schedule-modal-panel" id="hook-form">
+            <header>
+                <h3 id="hook-modal-title">New hook</h3>
+                <button class="schedule-modal-close" type="button" data-close-hook-modal aria-label="Close">&times;</button>
+            </header>
+            <label>
+                Name
+                <input type="text" name="name" maxlength="60" placeholder="notify ntfy" autocomplete="off" required />
+            </label>
+            <div class="interval-duration-row">
+                <label>
+                    Method
+                    <select name="method">
+                        <option value="POST">POST</option>
+                        <option value="GET">GET</option>
+                        <option value="PUT">PUT</option>
+                        <option value="PATCH">PATCH</option>
+                    </select>
+                </label>
+                <label>
+                    Enabled
+                    <select name="enabled">
+                        <option value="true">Yes</option>
+                        <option value="false">No</option>
+                    </select>
+                </label>
+            </div>
+            <label>
+                URL
+                <input type="text" name="url" placeholder="https://ntfy.example.com/topic" autocomplete="off" spellcheck="false" required />
+            </label>
+            <label>
+                Headers (one per line, "Key: value")
+                <textarea name="headers" rows="2" placeholder="Authorization: Bearer ..." spellcheck="false"></textarea>
+            </label>
+            <label>
+                Body (optional, sends default JSON if blank)
+                <textarea name="body" rows="3" placeholder='{"text":"{{device}} -> {{event}}"}' spellcheck="false"></textarea>
+            </label>
+            <label>
+                Device filter (comma-separated, blank = any)
+                <input type="text" name="device_filter" placeholder="lights, ac" autocomplete="off" />
+            </label>
+            <fieldset class="day-picker">
+                <legend>Event filter (none ticked = all)</legend>
+                <label><input type="checkbox" name="event" value="on" /> On</label>
+                <label><input type="checkbox" name="event" value="off" /> Off</label>
+                <label><input type="checkbox" name="event" value="online" /> Online</label>
+                <label><input type="checkbox" name="event" value="offline" /> Offline</label>
+            </fieldset>
+            <p class="cron-hint">Default payload is JSON: <code>{device, nickname, model, event, source, previous_on, new_on, timestamp_ms}</code>. <code>source</code> is one of <code>manual</code>, <code>schedule</code>, <code>condition</code>, <code>external</code> (e.g. the wall switch), or <code>discovery</code>.</p>
+            <p class="schedule-form-error" id="hook-form-error" hidden></p>
+            <div class="schedule-form-actions">
+                <button type="button" data-close-hook-modal>Cancel</button>
+                <button type="submit" id="hook-form-submit">Create</button>
+            </div>
+        </form>
+    </div>
 
     <div class="schedule-modal" id="condition-modal" hidden role="dialog" aria-modal="true" aria-labelledby="condition-modal-title">
         <div class="schedule-modal-backdrop" data-close-condition-modal></div>
@@ -5628,6 +6340,261 @@ const INDEX_HTML: &str = r##"<!doctype html>
         function showConditionFormError(message) {
             conditionFormErrorEl.textContent = message;
             conditionFormErrorEl.hidden = false;
+        }
+
+        const hookListEl = document.querySelector("#hook-list");
+        const hooksEmptyEl = document.querySelector("#hooks-empty");
+        const hookAddBtn = document.querySelector("#hook-add");
+        const hookModalEl = document.querySelector("#hook-modal");
+        const hookFormEl = document.querySelector("#hook-form");
+        const hookFormErrorEl = document.querySelector("#hook-form-error");
+        const hookFormSubmitEl = document.querySelector("#hook-form-submit");
+        const hookModalTitleEl = document.querySelector("#hook-modal-title");
+        let hooksList = [];
+        let hooksById = new Map();
+        let hooksLoadInFlight = false;
+        let currentEditHookId = null;
+
+        async function loadHooks() {
+            if (hooksLoadInFlight) return;
+            hooksLoadInFlight = true;
+            try {
+                const payload = await requestJson("/api/hooks");
+                hooksList = payload.hooks ?? [];
+                hooksById = new Map(hooksList.map((h) => [h.id, h]));
+                renderHooks(hooksList);
+            } catch (error) {
+                renderNotice(error.message);
+            } finally {
+                hooksLoadInFlight = false;
+            }
+        }
+
+        function renderHooks(hooks) {
+            if (hooks.length === 0) {
+                hookListEl.innerHTML = "";
+                hooksEmptyEl.hidden = false;
+                return;
+            }
+            hooksEmptyEl.hidden = true;
+            hookListEl.innerHTML = hooks.map(renderHookItem).join("");
+            wireHookControls();
+        }
+
+        function renderHookItem(hook) {
+            const stateClass = !hook.enabled ? "disabled" : "";
+            const deviceLabel = hook.device_filter.length === 0 ? "any device" : `device ${escapeHtml(hook.device_filter.join(", "))}`;
+            const eventLabel = hook.event_filter.length === 0 ? "all events" : `events ${escapeHtml(hook.event_filter.join(", "))}`;
+            const meta = [`${escapeHtml(hook.method)} on ${deviceLabel}`, eventLabel];
+            if (hook.last_fired_at_ms) {
+                const label = hook.last_event ? `last ${escapeHtml(hook.last_event)}` : "last fired";
+                meta.push(`${label} ${formatRelative(hook.last_fired_at_ms)}`);
+            }
+            if (hook.last_status_code !== null && hook.last_status_code !== undefined) {
+                meta.push(`HTTP ${hook.last_status_code}`);
+            }
+            if (hook.last_error) {
+                meta.push(`<span style="color: var(--red);">${escapeHtml(hook.last_error)}</span>`);
+            }
+
+            return `
+                <li class="hook-item ${stateClass}">
+                    <div class="hook-body">
+                        <span class="hook-name">${escapeHtml(hook.name)}</span>
+                        <span class="hook-target">${escapeHtml(hook.url)}</span>
+                        <span class="hook-meta">${meta.join(" / ")}</span>
+                    </div>
+                    <div class="hook-actions">
+                        <button class="hook-test" type="button" data-hook-test="${escapeHtml(hook.id)}" aria-label="Test now" title="Send synthetic event">&#9658;</button>
+                        <button class="hook-edit" type="button" data-hook-edit="${escapeHtml(hook.id)}" aria-label="Edit hook" title="Edit">&#9998;</button>
+                        <button class="hook-delete" type="button" data-hook-delete="${escapeHtml(hook.id)}" aria-label="Delete hook" title="Delete">&times;</button>
+                    </div>
+                </li>
+            `;
+        }
+
+        function wireHookControls() {
+            hookListEl.querySelectorAll("button[data-hook-test]").forEach((button) => {
+                button.addEventListener("click", async () => {
+                    const id = button.dataset.hookTest;
+                    button.disabled = true;
+                    try {
+                        await requestJson(`/api/hooks/${encodeURIComponent(id)}/test`, { method: "POST" });
+                        await loadHooks();
+                    } catch (error) {
+                        renderNotice(error.message);
+                    } finally {
+                        button.disabled = false;
+                    }
+                });
+            });
+
+            hookListEl.querySelectorAll("button[data-hook-edit]").forEach((button) => {
+                button.addEventListener("click", () => {
+                    const id = button.dataset.hookEdit;
+                    const hook = hooksById.get(id);
+                    if (!hook) {
+                        renderNotice("Hook not found; reloading.");
+                        loadHooks();
+                        return;
+                    }
+                    openHookModal(hook);
+                });
+            });
+
+            hookListEl.querySelectorAll("button[data-hook-delete]").forEach((button) => {
+                button.addEventListener("click", async () => {
+                    const id = button.dataset.hookDelete;
+                    button.disabled = true;
+                    try {
+                        const response = await fetch(`/api/hooks/${encodeURIComponent(id)}`, { method: "DELETE" });
+                        if (!response.ok && response.status !== 204) {
+                            const payload = await response.json().catch(() => null);
+                            throw new Error(payload?.error?.message ?? `Delete failed (${response.status})`);
+                        }
+                        await loadHooks();
+                    } catch (error) {
+                        renderNotice(error.message);
+                    } finally {
+                        button.disabled = false;
+                    }
+                });
+            });
+        }
+
+        function openHookModal(hook = null) {
+            const isEditing = hook !== null;
+            currentEditHookId = isEditing ? hook.id : null;
+
+            hookFormErrorEl.hidden = true;
+            hookFormErrorEl.textContent = "";
+            hookFormSubmitEl.disabled = false;
+            hookFormSubmitEl.textContent = isEditing ? "Save" : "Create";
+            hookModalTitleEl.textContent = isEditing ? `Edit hook — ${hook.name}` : "New hook";
+            hookFormEl.reset();
+
+            const set = (selector, value) => {
+                const el = hookFormEl.querySelector(selector);
+                if (el !== null && el !== undefined) el.value = value;
+            };
+
+            if (isEditing) {
+                set('input[name="name"]', hook.name);
+                set('select[name="method"]', hook.method);
+                set('select[name="enabled"]', String(hook.enabled));
+                set('input[name="url"]', hook.url);
+                set('textarea[name="body"]', hook.body ?? "");
+                set('input[name="device_filter"]', hook.device_filter.join(", "));
+                const headerLines = Object.entries(hook.headers || {}).map(([k, v]) => `${k}: ${v}`).join("\n");
+                set('textarea[name="headers"]', headerLines);
+                hookFormEl.querySelectorAll('input[name="event"]').forEach((input) => {
+                    input.checked = hook.event_filter.includes(input.value);
+                });
+            } else {
+                set('select[name="method"]', "POST");
+                set('select[name="enabled"]', "true");
+                hookFormEl.querySelectorAll('input[name="event"]').forEach((input) => {
+                    input.checked = false;
+                });
+            }
+
+            hookModalEl.hidden = false;
+            window.setTimeout(() => {
+                hookFormEl.querySelector('input[name="name"]').focus();
+            }, 30);
+        }
+
+        function closeHookModal() {
+            hookModalEl.hidden = true;
+            currentEditHookId = null;
+        }
+
+        hookModalEl.addEventListener("click", (event) => {
+            if (event.target.matches("[data-close-hook-modal]")) {
+                closeHookModal();
+            }
+        });
+
+        document.addEventListener("keydown", (event) => {
+            if (event.key === "Escape" && !hookModalEl.hidden) {
+                closeHookModal();
+            }
+        });
+
+        hookAddBtn.addEventListener("click", () => openHookModal());
+
+        hookFormEl.addEventListener("submit", async (event) => {
+            event.preventDefault();
+            hookFormErrorEl.hidden = true;
+            hookFormErrorEl.textContent = "";
+
+            const name = hookFormEl.querySelector('input[name="name"]').value.trim();
+            const method = hookFormEl.querySelector('select[name="method"]').value;
+            const enabled = hookFormEl.querySelector('select[name="enabled"]').value === "true";
+            const url = hookFormEl.querySelector('input[name="url"]').value.trim();
+            const body = hookFormEl.querySelector('textarea[name="body"]').value;
+            const headersRaw = hookFormEl.querySelector('textarea[name="headers"]').value;
+            const deviceFilterRaw = hookFormEl.querySelector('input[name="device_filter"]').value;
+            const eventFilter = Array.from(hookFormEl.querySelectorAll('input[name="event"]:checked')).map((input) => input.value);
+
+            if (!name) return showHookFormError("Name is required.");
+            if (!url) return showHookFormError("URL is required.");
+
+            const headers = {};
+            for (const line of headersRaw.split("\n")) {
+                const trimmed = line.trim();
+                if (trimmed === "") continue;
+                const sep = trimmed.indexOf(":");
+                if (sep < 0) return showHookFormError(`Bad header line: '${trimmed}' (expected 'Key: value').`);
+                const key = trimmed.slice(0, sep).trim();
+                const value = trimmed.slice(sep + 1).trim();
+                if (key === "") return showHookFormError("Header key cannot be empty.");
+                headers[key] = value;
+            }
+
+            const deviceFilter = deviceFilterRaw
+                .split(",")
+                .map((part) => part.trim())
+                .filter((part) => part !== "");
+
+            const isEditing = currentEditHookId !== null;
+            const endpoint = isEditing
+                ? `/api/hooks/${encodeURIComponent(currentEditHookId)}`
+                : "/api/hooks";
+            const httpMethod = isEditing ? "PATCH" : "POST";
+            const payload = {
+                name,
+                url,
+                method,
+                headers,
+                body: body === "" ? null : body,
+                device_filter: deviceFilter,
+                event_filter: eventFilter,
+                enabled,
+            };
+
+            hookFormSubmitEl.disabled = true;
+            hookFormSubmitEl.textContent = isEditing ? "Saving" : "Creating";
+
+            try {
+                await requestJson(endpoint, {
+                    method: httpMethod,
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify(payload),
+                });
+                closeHookModal();
+                await loadHooks();
+            } catch (error) {
+                showHookFormError(error.message);
+            } finally {
+                hookFormSubmitEl.disabled = false;
+                hookFormSubmitEl.textContent = isEditing ? "Save" : "Create";
+            }
+        });
+
+        function showHookFormError(message) {
+            hookFormErrorEl.textContent = message;
+            hookFormErrorEl.hidden = false;
         }
 
         function openScheduleModal(deviceName, schedule = null) {
@@ -6508,9 +7475,11 @@ const INDEX_HTML: &str = r##"<!doctype html>
         loadUsageHistory();
         loadSchedules();
         loadConditions();
+        loadHooks();
         connectDeviceStream();
         window.setInterval(loadSchedules, 60_000);
         window.setInterval(loadConditions, 15_000);
+        window.setInterval(loadHooks, 30_000);
     </script>
 </body>
 </html>
@@ -7101,5 +8070,55 @@ mod tests {
         );
 
         let _ = fs::remove_file(state_path);
+    }
+
+    fn sample_hook(device_filter: Vec<String>, event_filter: Vec<HookEvent>) -> HookConfig {
+        HookConfig {
+            id: "h".to_string(),
+            name: "n".to_string(),
+            enabled: true,
+            url: "http://example.invalid".to_string(),
+            method: "POST".to_string(),
+            headers: BTreeMap::new(),
+            body: None,
+            device_filter,
+            event_filter,
+            created_at_ms: 0,
+            last_fired_at_ms: None,
+            last_event: None,
+            last_status_code: None,
+            last_error: None,
+        }
+    }
+
+    #[test]
+    fn hook_matches_device_and_event_filters() {
+        let any_device_any_event = sample_hook(Vec::new(), Vec::new());
+        assert!(hook_matches(&any_device_any_event, "ac", HookEvent::On));
+        assert!(hook_matches(
+            &any_device_any_event,
+            "lights",
+            HookEvent::Offline,
+        ));
+
+        let lights_only = sample_hook(vec!["lights".to_string()], Vec::new());
+        assert!(hook_matches(&lights_only, "lights", HookEvent::On));
+        assert!(!hook_matches(&lights_only, "ac", HookEvent::On));
+
+        let offline_only = sample_hook(Vec::new(), vec![HookEvent::Offline]);
+        assert!(hook_matches(&offline_only, "ac", HookEvent::Offline));
+        assert!(!hook_matches(&offline_only, "ac", HookEvent::On));
+
+        let mut disabled = sample_hook(Vec::new(), Vec::new());
+        disabled.enabled = false;
+        assert!(!hook_matches(&disabled, "ac", HookEvent::On));
+
+        let lights_offline = sample_hook(
+            vec!["lights".to_string()],
+            vec![HookEvent::Offline, HookEvent::Online],
+        );
+        assert!(hook_matches(&lights_offline, "lights", HookEvent::Offline));
+        assert!(!hook_matches(&lights_offline, "lights", HookEvent::On));
+        assert!(!hook_matches(&lights_offline, "ac", HookEvent::Offline));
     }
 }
