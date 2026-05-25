@@ -107,6 +107,7 @@ struct DeviceView {
     discovered_at_ms: u128,
     updated_at_ms: Option<u128>,
     manual_override: Option<bool>,
+    manual_override_until_ms: Option<u128>,
     schedule_intent: Option<bool>,
     condition_intent: Option<bool>,
     effective_intent: Option<bool>,
@@ -244,6 +245,14 @@ struct ExportError {
 #[derive(Debug, Clone, Deserialize)]
 struct SetPowerRequest {
     on: bool,
+    #[serde(default)]
+    duration_seconds: Option<u64>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct ToggleDeviceRequest {
+    #[serde(default)]
+    duration_seconds: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -562,7 +571,16 @@ struct DeviceIntent {
     schedule_intent: Option<bool>,
     #[serde(default)]
     manual_override: Option<bool>,
+    /// If set, the manual override is cleared automatically at this
+    /// epoch-ms timestamp. None means the override sticks until the
+    /// user releases it or a schedule fire overwrites it.
+    #[serde(default)]
+    manual_override_until_ms: Option<u128>,
 }
+
+const DEFAULT_MANUAL_OVERRIDE_SECONDS: u64 = 3600;
+const MIN_MANUAL_OVERRIDE_SECONDS: u64 = 30;
+const MAX_MANUAL_OVERRIDE_SECONDS: u64 = 24 * 3600;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -645,6 +663,7 @@ async fn main() -> Result<()> {
     tokio::spawn(scan_for_devices(state.clone()));
     tokio::spawn(run_scheduler(state.clone()));
     tokio::spawn(run_condition_poller(state.clone()));
+    tokio::spawn(run_override_expiry_sweeper(state.clone()));
 
     let app = Router::new()
         .route("/", get(index))
@@ -842,6 +861,7 @@ impl ManagedDevice {
             discovered_at_ms: self.discovered_at_ms,
             updated_at_ms: self.updated_at_ms,
             manual_override: intent.manual_override,
+            manual_override_until_ms: intent.manual_override_until_ms,
             schedule_intent: intent.schedule_intent,
             condition_intent,
             effective_intent,
@@ -979,7 +999,12 @@ async fn export_energy_workbook(State(state): State<AppState>) -> Result<Respons
 async fn toggle_device(
     State(state): State<AppState>,
     Path(name): Path<String>,
+    body: Option<Json<ToggleDeviceRequest>>,
 ) -> Result<Json<DeviceView>, AppError> {
+    let duration = body
+        .map(|Json(req)| req.duration_seconds)
+        .unwrap_or(None)
+        .unwrap_or(DEFAULT_MANUAL_OVERRIDE_SECONDS);
     let device = get_device_config(&state, &name).await?;
     let operation_lock = device_operation_lock(&state, &device).await;
     let _operation_guard = operation_lock.lock().await;
@@ -989,7 +1014,7 @@ async fn toggle_device(
     let snapshot = retry_tapo_handshake(|| state.controller.read_device(&device)).await?;
     update_device_snapshot(&state, &name, snapshot, None, HookSource::Manual).await;
 
-    set_manual_override(&state, &name, target).await;
+    set_manual_override(&state, &name, target, Some(duration)).await;
     if let Err(error) = save_persisted_state(&state).await {
         warn!(%error, device = %name, "failed to persist manual override");
     }
@@ -1005,6 +1030,7 @@ async fn set_device_power(
     Path(name): Path<String>,
     Json(request): Json<SetPowerRequest>,
 ) -> Result<Json<DeviceView>, AppError> {
+    let duration = request.duration_seconds.unwrap_or(DEFAULT_MANUAL_OVERRIDE_SECONDS);
     let device = get_device_config(&state, &name).await?;
     let operation_lock = device_operation_lock(&state, &device).await;
     let _operation_guard = operation_lock.lock().await;
@@ -1012,7 +1038,7 @@ async fn set_device_power(
     let snapshot = retry_tapo_handshake(|| state.controller.read_device(&device)).await?;
     update_device_snapshot(&state, &name, snapshot, None, HookSource::Manual).await;
 
-    set_manual_override(&state, &name, request.on).await;
+    set_manual_override(&state, &name, request.on, Some(duration)).await;
     if let Err(error) = save_persisted_state(&state).await {
         warn!(%error, device = %name, "failed to persist manual override");
     }
@@ -1912,18 +1938,17 @@ async fn test_hook(
             .ok_or_else(|| AppError(anyhow!("unknown hook '{}'", id)))?
     };
 
-    let synthetic = serde_json::json!({
-        "device": "test",
-        "nickname": "Test Device",
-        "model": "p110",
-        "event": HookEvent::On,
-        "source": HookSource::Manual,
-        "previous_on": false,
-        "new_on": true,
-        "timestamp_ms": now_ms() as u64,
-        "test": true,
-    });
-    fire_hook(&state, hook, HookEvent::On, synthetic).await;
+    let ctx = HookTemplateContext {
+        device: "test".to_string(),
+        nickname: "Test Device".to_string(),
+        model: "p110".to_string(),
+        event: HookEvent::On,
+        source: HookSource::Manual,
+        previous_on: Some(false),
+        new_on: Some(true),
+        timestamp_ms: now_ms(),
+    };
+    fire_hook(&state, hook, ctx).await;
 
     let view = {
         let hooks = state.hooks.read().await;
@@ -2289,18 +2314,65 @@ async fn set_schedule_intent(state: &AppState, device_name: &str, intent: bool) 
     entry.schedule_intent = Some(intent);
     // Schedule firing automatically releases any manual override.
     entry.manual_override = None;
+    entry.manual_override_until_ms = None;
 }
 
-async fn set_manual_override(state: &AppState, device_name: &str, target: bool) {
+async fn set_manual_override(
+    state: &AppState,
+    device_name: &str,
+    target: bool,
+    duration_seconds: Option<u64>,
+) {
     let mut intents = state.device_intents.write().await;
     let entry = intents.entry(device_name.to_string()).or_default();
     entry.manual_override = Some(target);
+    entry.manual_override_until_ms = duration_seconds.map(|secs| {
+        let bounded = secs
+            .max(MIN_MANUAL_OVERRIDE_SECONDS)
+            .min(MAX_MANUAL_OVERRIDE_SECONDS);
+        now_ms() + (bounded as u128) * 1000
+    });
 }
 
 async fn clear_manual_override(state: &AppState, device_name: &str) {
     let mut intents = state.device_intents.write().await;
     if let Some(entry) = intents.get_mut(device_name) {
         entry.manual_override = None;
+        entry.manual_override_until_ms = None;
+    }
+}
+
+async fn run_override_expiry_sweeper(state: AppState) {
+    sleep(Duration::from_secs(2)).await;
+    loop {
+        let now = now_ms();
+        let expired: Vec<String> = {
+            let intents = state.device_intents.read().await;
+            intents
+                .iter()
+                .filter_map(|(name, intent)| match intent.manual_override_until_ms {
+                    Some(until) if until <= now && intent.manual_override.is_some() => {
+                        Some(name.clone())
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+
+        if !expired.is_empty() {
+            for name in &expired {
+                clear_manual_override(&state, name).await;
+                info!(device = %name, "manual override expired, returning to auto");
+            }
+            if let Err(error) = save_persisted_state(&state).await {
+                warn!(%error, "failed to persist override expiry");
+            }
+            for name in &expired {
+                reconcile_device(&state, name, HookSource::Manual).await;
+            }
+        }
+
+        sleep(Duration::from_secs(5)).await;
     }
 }
 
@@ -2947,6 +3019,88 @@ fn hook_matches(hook: &HookConfig, device: &str, event: HookEvent) -> bool {
     true
 }
 
+#[derive(Debug, Clone)]
+struct HookTemplateContext {
+    device: String,
+    nickname: String,
+    model: String,
+    event: HookEvent,
+    source: HookSource,
+    previous_on: Option<bool>,
+    new_on: Option<bool>,
+    timestamp_ms: u128,
+}
+
+impl HookTemplateContext {
+    fn vars(&self) -> Vec<(&'static str, String)> {
+        vec![
+            ("device", self.device.clone()),
+            ("nickname", self.nickname.clone()),
+            ("model", self.model.clone()),
+            ("event", hook_event_str(self.event).to_string()),
+            ("source", hook_source_str(self.source).to_string()),
+            ("previous_on", optional_bool_str(self.previous_on)),
+            ("new_on", optional_bool_str(self.new_on)),
+            ("timestamp_ms", self.timestamp_ms.to_string()),
+        ]
+    }
+
+    fn render(&self, input: &str) -> String {
+        render_hook_template(input, &self.vars())
+    }
+
+    fn default_payload_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "device": self.device,
+            "nickname": self.nickname,
+            "model": self.model,
+            "event": self.event,
+            "source": self.source,
+            "previous_on": self.previous_on,
+            "new_on": self.new_on,
+            "timestamp_ms": self.timestamp_ms as u64,
+        })
+    }
+}
+
+fn hook_event_str(event: HookEvent) -> &'static str {
+    match event {
+        HookEvent::On => "on",
+        HookEvent::Off => "off",
+        HookEvent::Online => "online",
+        HookEvent::Offline => "offline",
+    }
+}
+
+fn hook_source_str(source: HookSource) -> &'static str {
+    match source {
+        HookSource::Manual => "manual",
+        HookSource::Schedule => "schedule",
+        HookSource::Condition => "condition",
+        HookSource::External => "external",
+        HookSource::Discovery => "discovery",
+    }
+}
+
+fn optional_bool_str(value: Option<bool>) -> String {
+    match value {
+        Some(true) => "true".to_string(),
+        Some(false) => "false".to_string(),
+        None => String::new(),
+    }
+}
+
+fn render_hook_template(input: &str, vars: &[(&str, String)]) -> String {
+    let mut out = input.to_string();
+    for (key, value) in vars {
+        let placeholder = format!("{{{{{key}}}}}");
+        if out.contains(&placeholder) {
+            out = out.replace(&placeholder, value);
+        }
+    }
+    out
+}
+
 async fn dispatch_hook_events(
     state: &AppState,
     device: &str,
@@ -2969,16 +3123,16 @@ async fn dispatch_hook_events(
         return;
     }
 
-    let payload_value = serde_json::json!({
-        "device": device,
-        "nickname": nickname,
-        "model": model,
-        "event": event,
-        "source": source,
-        "previous_on": previous_on,
-        "new_on": new_on,
-        "timestamp_ms": now_ms() as u64,
-    });
+    let ctx = HookTemplateContext {
+        device: device.to_string(),
+        nickname: nickname.to_string(),
+        model: model.to_string(),
+        event,
+        source,
+        previous_on,
+        new_on,
+        timestamp_ms: now_ms(),
+    };
 
     info!(
         device,
@@ -2990,39 +3144,42 @@ async fn dispatch_hook_events(
 
     for hook in matching_hooks {
         let state = state.clone();
-        let payload_value = payload_value.clone();
+        let ctx = ctx.clone();
         tokio::spawn(async move {
-            fire_hook(&state, hook, event, payload_value).await;
+            fire_hook(&state, hook, ctx).await;
         });
     }
 }
 
-async fn fire_hook(
-    state: &AppState,
-    hook: HookConfig,
-    event: HookEvent,
-    default_payload: serde_json::Value,
-) {
+async fn fire_hook(state: &AppState, hook: HookConfig, ctx: HookTemplateContext) {
     let method = match HttpMethod::from_bytes(hook.method.to_uppercase().as_bytes()) {
         Ok(method) => method,
         Err(error) => {
             warn!(hook_id = %hook.id, %error, "hook has invalid HTTP method");
-            update_hook_result(state, &hook.id, event, None, Some(format!("invalid method: {error}"))).await;
+            update_hook_result(
+                state,
+                &hook.id,
+                ctx.event,
+                None,
+                Some(format!("invalid method: {error}")),
+            )
+            .await;
             return;
         }
     };
 
-    let mut builder = state.http_client.request(method, &hook.url);
+    let url = ctx.render(&hook.url);
+    let mut builder = state.http_client.request(method, &url);
     let mut content_type_set = false;
     for (key, value) in &hook.headers {
         if key.eq_ignore_ascii_case("content-type") {
             content_type_set = true;
         }
-        builder = builder.header(key, value);
+        builder = builder.header(key, ctx.render(value));
     }
     let body_text = match hook.body.as_deref() {
-        Some(custom) => custom.to_string(),
-        None => default_payload.to_string(),
+        Some(custom) => ctx.render(custom),
+        None => ctx.default_payload_json().to_string(),
     };
     if !content_type_set && hook.body.is_none() {
         builder = builder.header("content-type", "application/json");
@@ -3038,11 +3195,11 @@ async fn fire_hook(
             } else {
                 Some(format!("non-success status {status}"))
             };
-            update_hook_result(state, &hook.id, event, code, error_text).await;
+            update_hook_result(state, &hook.id, ctx.event, code, error_text).await;
         }
         Err(error) => {
             warn!(hook_id = %hook.id, %error, "hook request failed");
-            update_hook_result(state, &hook.id, event, None, Some(format!("{error}"))).await;
+            update_hook_result(state, &hook.id, ctx.event, None, Some(format!("{error}"))).await;
         }
     }
 }
@@ -5511,7 +5668,7 @@ const INDEX_HTML: &str = r##"<!doctype html>
                 <label><input type="checkbox" name="event" value="online" /> Online</label>
                 <label><input type="checkbox" name="event" value="offline" /> Offline</label>
             </fieldset>
-            <p class="cron-hint">Default payload is JSON: <code>{device, nickname, model, event, source, previous_on, new_on, timestamp_ms}</code>. <code>source</code> is one of <code>manual</code>, <code>schedule</code>, <code>condition</code>, <code>external</code> (e.g. the wall switch), or <code>discovery</code>.</p>
+            <p class="cron-hint">Default payload is JSON: <code>{device, nickname, model, event, source, previous_on, new_on, timestamp_ms}</code>. <code>source</code> is one of <code>manual</code>, <code>schedule</code>, <code>condition</code>, <code>external</code> (e.g. the wall switch), or <code>discovery</code>. The body, headers, and URL all support <code>{{device}}</code>, <code>{{nickname}}</code>, <code>{{model}}</code>, <code>{{event}}</code>, <code>{{source}}</code>, <code>{{previous_on}}</code>, <code>{{new_on}}</code>, <code>{{timestamp_ms}}</code>.</p>
             <p class="schedule-form-error" id="hook-form-error" hidden></p>
             <div class="schedule-form-actions">
                 <button type="button" data-close-hook-modal>Cancel</button>
@@ -7197,7 +7354,7 @@ const INDEX_HTML: &str = r##"<!doctype html>
                             <span class="lever" aria-hidden="true"></span>
                         </button>
                     </div>
-                    ${isManual ? `<div class="device-mode-badge manual"><span>Manual</span><button type="button" data-release-override="${escapeHtml(device.name)}" title="Hand control back to schedules &amp; conditions">Auto</button></div>` : ""}
+                    ${isManual ? `<div class="device-mode-badge manual"><span class="manual-label">Manual${device.manual_override_until_ms ? ` — auto ${formatRelative(device.manual_override_until_ms)}` : ""}</span><button type="button" data-release-override="${escapeHtml(device.name)}" title="Hand control back to schedules &amp; conditions">Auto</button></div>` : ""}
                     ${conditionBlock ? `<div class="device-mode-badge condition-blocked"><span>Blocked by condition</span></div>` : ""}
                     <div class="status-strip">
                         <span class="lamp ${statusClass}">${statusText}</span>
@@ -8120,5 +8277,36 @@ mod tests {
         assert!(hook_matches(&lights_offline, "lights", HookEvent::Offline));
         assert!(!hook_matches(&lights_offline, "lights", HookEvent::On));
         assert!(!hook_matches(&lights_offline, "ac", HookEvent::Offline));
+    }
+
+    #[test]
+    fn hook_template_substitution_renders_known_vars() {
+        let ctx = HookTemplateContext {
+            device: "lights".to_string(),
+            nickname: "Lights".to_string(),
+            model: "p110".to_string(),
+            event: HookEvent::Off,
+            source: HookSource::Condition,
+            previous_on: Some(true),
+            new_on: Some(false),
+            timestamp_ms: 1_700_000_000_000,
+        };
+
+        assert_eq!(
+            ctx.render("{{nickname}} -> {{event}}"),
+            "Lights -> off",
+        );
+        assert_eq!(
+            ctx.render("https://ntfy.example/topic/{{device}}"),
+            "https://ntfy.example/topic/lights",
+        );
+        assert_eq!(
+            ctx.render("source={{source}} prev={{previous_on}} new={{new_on}} ts={{timestamp_ms}}"),
+            "source=condition prev=true new=false ts=1700000000000",
+        );
+        // Unknown placeholders stay as-is.
+        assert_eq!(ctx.render("{{unknown}}"), "{{unknown}}");
+        // Repeated placeholders all replaced.
+        assert_eq!(ctx.render("{{event}}-{{event}}"), "off-off");
     }
 }
