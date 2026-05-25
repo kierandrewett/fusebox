@@ -2275,11 +2275,23 @@ async fn reconcile_device(state: &AppState, device_name: &str, source: HookSourc
         return;
     };
 
-    let current_state = {
+    let (current_state, nickname, model) = {
         let devices = state.devices.read().await;
-        devices
-            .get(device_name)
-            .and_then(|d| d.snapshot.as_ref().map(|s| s.device_on))
+        let device = devices.get(device_name);
+        let current = device.and_then(|d| d.snapshot.as_ref().map(|s| s.device_on));
+        let nickname = device
+            .and_then(|d| d.snapshot.as_ref())
+            .map(|s| s.nickname.clone())
+            .unwrap_or_else(|| device_name.to_string());
+        let model = device
+            .and_then(|d| d.snapshot.as_ref())
+            .map(|s| s.device_model.clone())
+            .unwrap_or_else(|| {
+                device
+                    .map(|d| d.config.model.to_string())
+                    .unwrap_or_default()
+            });
+        (current, nickname, model)
     };
     if current_state == Some(target) {
         return;
@@ -2303,8 +2315,39 @@ async fn reconcile_device(state: &AppState, device_name: &str, source: HookSourc
         return;
     }
 
+    // Optimistically update the cached snapshot so the later readback
+    // (or absence of one) doesn't re-fire the same transition event.
+    {
+        let mut devices = state.devices.write().await;
+        if let Some(device) = devices.get_mut(device_name) {
+            if let Some(snap) = device.snapshot.as_mut() {
+                snap.device_on = target;
+            }
+            device.updated_at_ms = Some(now_ms());
+        }
+    }
+
+    // Fire the transition hook directly so it isn't dropped if the
+    // post-set readback fails (which can happen on some Tapo plugs).
+    dispatch_hook_events(
+        state,
+        device_name,
+        &nickname,
+        &model,
+        if target { HookEvent::On } else { HookEvent::Off },
+        source,
+        current_state,
+        Some(target),
+    )
+    .await;
+
+    // Readback keeps energy/runtime stats fresh. update_device_snapshot
+    // sees prev_on == new_on (thanks to the optimistic update above) and
+    // won't refire the event.
     if let Ok(snapshot) = retry_tapo_handshake(|| state.controller.read_device(&device_cfg)).await {
         update_device_snapshot(state, device_name, snapshot, None, source).await;
+    } else {
+        publish_device_list(state, None).await;
     }
 }
 
