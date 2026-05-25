@@ -6044,8 +6044,9 @@ const INDEX_HTML: &str = r##"<!doctype html>
             for (const [index, series] of (history.series ?? []).entries()) {
                 const pointsByTimestamp = new Map((series.points ?? []).map((point) => [point.timestamp_ms, point.value]));
                 const color = chartSeriesColor(index, chartTheme);
+                const device = latestDevices.find((entry) => entry.name === series.device_name);
                 datasets.push({
-                    label: series.device_name,
+                    label: device?.nickname || series.device_name,
                     data: timestamps.map((timestamp) => pointsByTimestamp.get(timestamp) ?? null),
                     borderColor: color,
                     backgroundColor: "transparent",
