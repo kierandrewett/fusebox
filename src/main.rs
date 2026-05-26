@@ -82,7 +82,17 @@ struct ManagedDevice {
     last_error: Option<String>,
     discovered_at_ms: u128,
     updated_at_ms: Option<u128>,
+    /// Number of consecutive refresh failures since the last successful
+    /// read. Used to debounce flaky LAN behaviour before declaring the
+    /// device offline. Not persisted — resets on server restart.
+    consecutive_failures: u32,
+    /// True once we've fired an Offline hook event for the current
+    /// outage. Prevents repeated Offline events and gates the next
+    /// Online event.
+    offline_announced: bool,
 }
+
+const DEVICE_OFFLINE_FAILURE_THRESHOLD: u32 = 3;
 
 #[derive(Debug, Clone, Serialize)]
 struct DeviceListResponse {
@@ -2922,6 +2932,8 @@ fn managed_device_from_config(name: String, config: DeviceConfig) -> ManagedDevi
         last_error: None,
         discovered_at_ms: now_ms(),
         updated_at_ms: None,
+        consecutive_failures: 0,
+        offline_announced: false,
     }
 }
 
@@ -3045,19 +3057,18 @@ async fn update_device_snapshot(
     last_error: Option<String>,
     source: HookSource,
 ) {
-    let (prev_on, prev_offline, nickname) = {
+    let (prev_on, was_offline_announced, nickname) = {
         let devices = state.devices.read().await;
         let device = devices.get(name);
         let prev_on = device.and_then(|d| d.snapshot.as_ref()).map(|s| s.device_on);
-        let prev_offline = device.is_some_and(|d| d.last_error.is_some());
+        let was_offline_announced = device.is_some_and(|d| d.offline_announced);
         let nickname = device
             .and_then(|d| d.snapshot.as_ref())
             .map(|s| s.nickname.clone())
             .unwrap_or_else(|| name.to_string());
-        (prev_on, prev_offline, nickname)
+        (prev_on, was_offline_announced, nickname)
     };
     let new_on = snapshot.device_on;
-    let new_offline = last_error.is_some();
 
     let model = snapshot.device_model.clone();
 
@@ -3068,19 +3079,22 @@ async fn update_device_snapshot(
             device.snapshot = Some(snapshot);
             device.last_error = last_error;
             device.updated_at_ms = Some(now_ms());
+            // A successful read clears any in-flight failure debounce.
+            device.consecutive_failures = 0;
+            device.offline_announced = false;
         }
     }
 
     publish_device_list(state, None).await;
 
-    // Only fire transition events when there's an actual transition. The
-    // first time we read a device after server startup we have no prior
-    // snapshot, so prev_on is None — that's not a transition, just the
-    // initial state report, and we suppress it to avoid restart noise.
     let mut events: Vec<HookEvent> = Vec::new();
-    if prev_offline && !new_offline && prev_on.is_some() {
+    // Only emit Online if we'd previously announced Offline — pairs
+    // 1:1 with the offline event we actually sent.
+    if was_offline_announced {
         events.push(HookEvent::Online);
     }
+    // Only fire on/off when there's a real transition. The first read
+    // after startup has prev_on=None and is suppressed.
     if let Some(previous) = prev_on {
         if previous != new_on {
             events.push(if new_on { HookEvent::On } else { HookEvent::Off });
@@ -3102,11 +3116,12 @@ async fn update_device_snapshot(
 }
 
 async fn update_device_error(state: &AppState, name: &str, error: String) {
-    let (prev_on, prev_offline, nickname, model) = {
+    let (prev_on, prev_failures, was_offline_announced, nickname, model) = {
         let devices = state.devices.read().await;
         let device = devices.get(name);
         let prev_on = device.and_then(|d| d.snapshot.as_ref()).map(|s| s.device_on);
-        let prev_offline = device.is_some_and(|d| d.last_error.is_some());
+        let prev_failures = device.map(|d| d.consecutive_failures).unwrap_or(0);
+        let was_offline_announced = device.is_some_and(|d| d.offline_announced);
         let nickname = device
             .and_then(|d| d.snapshot.as_ref())
             .map(|s| s.nickname.clone())
@@ -3119,8 +3134,13 @@ async fn update_device_error(state: &AppState, name: &str, error: String) {
                     .map(|d| d.config.model.to_string())
                     .unwrap_or_default()
             });
-        (prev_on, prev_offline, nickname, model)
+        (prev_on, prev_failures, was_offline_announced, nickname, model)
     };
+
+    let new_failures = prev_failures.saturating_add(1);
+    let should_announce = !was_offline_announced
+        && new_failures >= DEVICE_OFFLINE_FAILURE_THRESHOLD
+        && prev_on.is_some();
 
     {
         let mut devices = state.devices.write().await;
@@ -3128,15 +3148,16 @@ async fn update_device_error(state: &AppState, name: &str, error: String) {
         if let Some(device) = devices.get_mut(name) {
             device.last_error = Some(error);
             device.updated_at_ms = Some(now_ms());
+            device.consecutive_failures = new_failures;
+            if should_announce {
+                device.offline_announced = true;
+            }
         }
     }
 
     publish_device_list(state, None).await;
 
-    // Only emit an offline transition if we'd previously known the
-    // device as online. Booting against a device that's been unplugged
-    // for a week shouldn't fire a fake "just went offline" notification.
-    if !prev_offline && prev_on.is_some() {
+    if should_announce {
         dispatch_hook_events(
             state,
             name,
@@ -7910,6 +7931,8 @@ mod tests {
             last_error: None,
             discovered_at_ms: 1,
             updated_at_ms: Some(2),
+            consecutive_failures: 0,
+            offline_announced: false,
         };
 
         let view = device.view(30.0, DeviceIntent::default(), None);
@@ -8684,6 +8707,71 @@ mod tests {
         // Sanity: hook id present and untouched (no real network call in test).
         let hooks = state.hooks.read().await;
         assert!(hooks.contains_key(&hook_id));
+
+        let _ = fs::remove_file(state_path);
+    }
+
+    #[tokio::test]
+    async fn offline_event_waits_for_consecutive_failures() {
+        let state_path = test_state_path("offline-debounce");
+        let settings = test_settings(state_path.clone());
+        let state = AppState::new(&settings);
+
+        // Device with a prior successful snapshot (so the first-read
+        // suppression doesn't get in the way).
+        {
+            let mut devices = state.devices.write().await;
+            devices.insert(
+                "lights".to_string(),
+                dummy_device("lights", "192.0.2.10", DeviceModel::P110, true),
+            );
+        }
+
+        // First refresh failure: counter goes to 1, no announce.
+        update_device_error(&state, "lights", "transient".to_string()).await;
+        {
+            let devices = state.devices.read().await;
+            let device = devices.get("lights").unwrap();
+            assert_eq!(device.consecutive_failures, 1);
+            assert!(!device.offline_announced);
+        }
+
+        // Second failure: counter goes to 2, still no announce.
+        update_device_error(&state, "lights", "transient".to_string()).await;
+        {
+            let devices = state.devices.read().await;
+            let device = devices.get("lights").unwrap();
+            assert_eq!(device.consecutive_failures, 2);
+            assert!(!device.offline_announced);
+        }
+
+        // Third failure: hits the threshold, announce.
+        update_device_error(&state, "lights", "transient".to_string()).await;
+        {
+            let devices = state.devices.read().await;
+            let device = devices.get("lights").unwrap();
+            assert_eq!(device.consecutive_failures, 3);
+            assert!(device.offline_announced);
+        }
+
+        // Recovery: snapshot success resets the counter and the flag.
+        let snapshot = DeviceSnapshot {
+            ip: "192.0.2.10".parse().unwrap(),
+            model: DeviceModel::P110,
+            device_model: "p110".to_string(),
+            device_type: "Tapo plug".to_string(),
+            nickname: "Lights".to_string(),
+            device_on: true,
+            on_time_seconds: 1,
+            energy: None,
+        };
+        update_device_snapshot(&state, "lights", snapshot, None, HookSource::External).await;
+        {
+            let devices = state.devices.read().await;
+            let device = devices.get("lights").unwrap();
+            assert_eq!(device.consecutive_failures, 0);
+            assert!(!device.offline_announced);
+        }
 
         let _ = fs::remove_file(state_path);
     }
