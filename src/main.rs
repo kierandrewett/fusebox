@@ -8,7 +8,7 @@ use std::path::{Path as FsPath, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
 use axum::body::Body;
@@ -33,6 +33,12 @@ use tokio::sync::{Mutex, RwLock, watch};
 use tokio::time::sleep;
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
+
+mod api_error;
+mod time;
+
+use api_error::AppError;
+use time::{deserialize_optional_label, now_ms};
 
 const STATE_VERSION: u32 = 2;
 const DEFAULT_ENERGY_PRICE_PENCE_PER_KWH: f64 = 27.03;
@@ -369,13 +375,6 @@ struct UpdateScheduleRequest {
     label: Option<Option<String>>,
     #[serde(default)]
     condition_ids: Option<Vec<String>>,
-}
-
-fn deserialize_optional_label<'de, D>(deserializer: D) -> Result<Option<Option<String>>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    Option::<Option<String>>::deserialize(deserializer)
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -834,19 +833,6 @@ struct AutomationListResponse {
     automations: Vec<Automation>,
 }
 
-#[derive(Debug, Clone, Serialize)]
-struct ErrorResponse {
-    error: ApiErrorBody,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct ApiErrorBody {
-    code: &'static str,
-    message: String,
-}
-
-struct AppError(anyhow::Error);
-
 #[tokio::main]
 async fn main() -> Result<()> {
     init_logging();
@@ -1078,25 +1064,6 @@ impl ManagedDevice {
             condition_intent,
             effective_intent,
         }
-    }
-}
-
-impl IntoResponse for AppError {
-    fn into_response(self) -> Response {
-        let body = ErrorResponse {
-            error: ApiErrorBody {
-                code: "FUSEBOX_ERROR",
-                message: self.0.to_string(),
-            },
-        };
-
-        (StatusCode::INTERNAL_SERVER_ERROR, Json(body)).into_response()
-    }
-}
-
-impl From<anyhow::Error> for AppError {
-    fn from(error: anyhow::Error) -> Self {
-        Self(error)
     }
 }
 
@@ -5462,13 +5429,6 @@ fn default_state_path() -> Result<PathBuf> {
     Err(anyhow!(
         "HOME or XDG_CONFIG_HOME must be set, or set FUSEBOX_STATE_PATH explicitly",
     ))
-}
-
-fn now_ms() -> u128 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis()
 }
 
 const INDEX_HTML: &str = r##"<!doctype html>
