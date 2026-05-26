@@ -440,6 +440,19 @@ struct ConditionConfig {
     last_action: Option<ConditionAction>,
     #[serde(default)]
     last_action_error: Option<String>,
+    /// New probe results must remain stable for this many seconds before
+    /// they update `last_passing`. 0 (default for back-compat) means
+    /// react to every change immediately. Prevents flaky probes from
+    /// causing rapid device toggling.
+    #[serde(default)]
+    min_stable_seconds: u64,
+    /// The most recent probe value that differs from `last_passing` and
+    /// is waiting to be promoted. None when the latest probe matched.
+    #[serde(default)]
+    pending_value: Option<bool>,
+    /// When `pending_value` was first observed.
+    #[serde(default)]
+    pending_since_ms: Option<u128>,
 }
 
 fn default_http_method() -> String {
@@ -477,6 +490,8 @@ struct CreateConditionRequest {
     action_on_pass: Option<ConditionAction>,
     #[serde(default)]
     action_on_fail: Option<ConditionAction>,
+    #[serde(default)]
+    min_stable_seconds: u64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -505,6 +520,8 @@ struct UpdateConditionRequest {
     action_on_pass: Option<Option<ConditionAction>>,
     #[serde(default, deserialize_with = "deserialize_optional_condition_action")]
     action_on_fail: Option<Option<ConditionAction>>,
+    #[serde(default)]
+    min_stable_seconds: Option<u64>,
 }
 
 fn deserialize_optional_condition_action<'de, D>(
@@ -539,6 +556,9 @@ struct ConditionView {
     last_action_at_ms: Option<u128>,
     last_action: Option<ConditionAction>,
     last_action_error: Option<String>,
+    min_stable_seconds: u64,
+    pending_value: Option<bool>,
+    pending_since_ms: Option<u128>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1525,6 +1545,9 @@ async fn create_condition(
         last_action_at_ms: None,
         last_action: None,
         last_action_error: None,
+        min_stable_seconds: request.min_stable_seconds,
+        pending_value: None,
+        pending_since_ms: None,
     };
 
     let id = condition.id.clone();
@@ -1618,6 +1641,13 @@ async fn update_condition(
         if let Some(action) = request.action_on_fail {
             condition.action_on_fail = action;
         }
+        if let Some(stable) = request.min_stable_seconds {
+            condition.min_stable_seconds = stable;
+            // Drop any in-flight pending value so the new threshold is
+            // honoured on the next probe rather than reusing stale state.
+            condition.pending_value = None;
+            condition.pending_since_ms = None;
+        }
         condition.clone()
     };
 
@@ -1701,6 +1731,9 @@ fn condition_view(condition: &ConditionConfig) -> ConditionView {
         last_action_at_ms: condition.last_action_at_ms,
         last_action: condition.last_action,
         last_action_error: condition.last_action_error.clone(),
+        min_stable_seconds: condition.min_stable_seconds,
+        pending_value: condition.pending_value,
+        pending_since_ms: condition.pending_since_ms,
     }
 }
 
@@ -2172,26 +2205,74 @@ async fn probe_and_record(state: &AppState, id: &str) {
     let outcome = probe_condition_once(&state.http_client, &representative).await;
     let now = now_ms();
 
+    let mut transitions: Vec<(String, String)> = Vec::new(); // (condition_id, device_name)
     {
         let mut conditions = state.conditions.write().await;
-        for (condition, _) in &group {
-            if let Some(stored) = conditions.get_mut(&condition.id) {
-                stored.last_checked_at_ms = Some(now);
-                stored.last_passing = Some(outcome.passing);
-                stored.last_status_code = outcome.status_code;
-                stored.last_error = outcome.error.clone();
+        for (snapshot, prev_last_passing) in &group {
+            let Some(stored) = conditions.get_mut(&snapshot.id) else {
+                continue;
+            };
+
+            stored.last_checked_at_ms = Some(now);
+            stored.last_status_code = outcome.status_code;
+            stored.last_error = outcome.error.clone();
+
+            let new_value = outcome.passing;
+            let stable_required_ms = (snapshot.min_stable_seconds as u128) * 1000;
+
+            let committed = match prev_last_passing {
+                Some(prev) if *prev == new_value => {
+                    // No change — clear any pending wait.
+                    stored.pending_value = None;
+                    stored.pending_since_ms = None;
+                    false
+                }
+                _ if stable_required_ms == 0 => {
+                    // No hysteresis configured — commit immediately.
+                    stored.last_passing = Some(new_value);
+                    stored.pending_value = None;
+                    stored.pending_since_ms = None;
+                    true
+                }
+                _ => {
+                    // Hysteresis active: track pending value.
+                    match snapshot.pending_value {
+                        Some(pending) if pending == new_value => {
+                            let stable_since = snapshot.pending_since_ms.unwrap_or(now);
+                            let elapsed_ms = now.saturating_sub(stable_since);
+                            if elapsed_ms >= stable_required_ms {
+                                stored.last_passing = Some(new_value);
+                                stored.pending_value = None;
+                                stored.pending_since_ms = None;
+                                true
+                            } else {
+                                stored.pending_value = Some(new_value);
+                                stored.pending_since_ms = Some(stable_since);
+                                false
+                            }
+                        }
+                        _ => {
+                            // First observation of this new value — start the
+                            // stability window.
+                            stored.pending_value = Some(new_value);
+                            stored.pending_since_ms = Some(now);
+                            false
+                        }
+                    }
+                }
+            };
+
+            if committed && !snapshot.device_name.is_empty() {
+                transitions.push((snapshot.id.clone(), snapshot.device_name.clone()));
             }
         }
     }
 
-    // Collect the distinct devices touched by this probe group so we can
-    // reconcile each one if its condition intent flipped.
+    // Collect distinct devices we should reconcile.
     let mut devices_to_reconcile: Vec<String> = Vec::new();
-    for (condition, previous_passing) in &group {
-        if previous_passing != &Some(outcome.passing) && !condition.device_name.is_empty() {
-            if !devices_to_reconcile.contains(&condition.device_name) {
-                devices_to_reconcile.push(condition.device_name.clone());
-            }
+    for (_, device_name) in &transitions {
+        if !devices_to_reconcile.contains(device_name) {
+            devices_to_reconcile.push(device_name.clone());
         }
     }
 
@@ -5790,7 +5871,11 @@ const INDEX_HTML: &str = r##"<!doctype html>
                 Body must contain (optional)
                 <input type="text" name="body_contains" autocomplete="off" />
             </label>
-            <p class="cron-hint">Status match: codes or ranges (e.g. <code>200</code>, <code>200-299</code>). While this condition is failing, the device it belongs to is forced OFF. When passing again, the device returns to whatever the schedule wants.</p>
+            <label>
+                Stable for (s) before transition counts
+                <input type="number" name="min_stable_seconds" min="0" max="3600" value="60" />
+            </label>
+            <p class="cron-hint">Status match: codes or ranges (e.g. <code>200</code>, <code>200-299</code>). While this condition is failing, the device it belongs to is forced OFF. When passing again, the device returns to whatever the schedule wants. "Stable for" is a debounce: a flipped probe result must persist for that many seconds before it triggers a device toggle (0 = react immediately).</p>
             <p class="schedule-form-error" id="condition-form-error" hidden></p>
             <div class="schedule-form-actions">
                 <button type="button" data-close-condition-modal>Cancel</button>
@@ -6457,6 +6542,7 @@ const INDEX_HTML: &str = r##"<!doctype html>
                 set('input[name="status_match"]', condition.status_match);
                 set('input[name="poll_seconds"]', String(condition.poll_seconds));
                 set('input[name="body_contains"]', condition.body_contains ?? "");
+                set('input[name="min_stable_seconds"]', String(condition.min_stable_seconds ?? 0));
                 set('textarea[name="body"]', condition.body ?? "");
                 const headerLines = Object.entries(condition.headers || {}).map(([k, v]) => `${k}: ${v}`).join("\n");
                 set('textarea[name="headers"]', headerLines);
@@ -6464,6 +6550,7 @@ const INDEX_HTML: &str = r##"<!doctype html>
                 set('select[name="method"]', "GET");
                 set('input[name="status_match"]', "200-299");
                 set('input[name="poll_seconds"]', "60");
+                set('input[name="min_stable_seconds"]', "60");
             }
 
             conditionModalEl.hidden = false;
@@ -6503,12 +6590,16 @@ const INDEX_HTML: &str = r##"<!doctype html>
             const bodyContains = conditionFormEl.querySelector('input[name="body_contains"]').value;
             const body = conditionFormEl.querySelector('textarea[name="body"]').value;
             const headersRaw = conditionFormEl.querySelector('textarea[name="headers"]').value;
+            const minStableSeconds = Number.parseInt(conditionFormEl.querySelector('input[name="min_stable_seconds"]').value, 10);
 
             if (!name) return showConditionFormError("Name is required.");
             if (!url) return showConditionFormError("URL is required.");
             if (!statusMatch) return showConditionFormError("Status match is required.");
             if (!Number.isFinite(pollSeconds) || pollSeconds < 5 || pollSeconds > 3600) {
                 return showConditionFormError("Poll interval must be 5-3600 seconds.");
+            }
+            if (!Number.isFinite(minStableSeconds) || minStableSeconds < 0 || minStableSeconds > 3600) {
+                return showConditionFormError("Stable seconds must be between 0 and 3600.");
             }
 
             const headers = {};
@@ -6538,6 +6629,7 @@ const INDEX_HTML: &str = r##"<!doctype html>
                 status_match: statusMatch,
                 body_contains: bodyContains === "" ? null : bodyContains,
                 poll_seconds: pollSeconds,
+                min_stable_seconds: minStableSeconds,
             };
             if (!isEditing) payload.enabled = true;
 
@@ -8187,6 +8279,9 @@ mod tests {
             last_action_at_ms: None,
             last_action: None,
             last_action_error: None,
+            min_stable_seconds: 0,
+            pending_value: None,
+            pending_since_ms: None,
         };
 
         let mut a = base();
@@ -8279,6 +8374,9 @@ mod tests {
             last_action_at_ms: None,
             last_action: None,
             last_action_error: None,
+            min_stable_seconds: 0,
+            pending_value: None,
+            pending_since_ms: None,
         };
 
         // No conditions targeting lights -> no opinion.
@@ -8415,6 +8513,74 @@ mod tests {
             energy: None,
         });
         device
+    }
+
+    #[tokio::test]
+    async fn condition_hysteresis_debounces_flapping_probes() {
+        let state_path = test_state_path("hysteresis");
+        let settings = test_settings(state_path.clone());
+        let state = AppState::new(&settings);
+
+        // Stand up a condition with a 90s stability window pointed at an
+        // unreachable URL — every probe will fail.
+        let mut condition = ConditionConfig {
+            id: "c".to_string(),
+            name: "n".to_string(),
+            device_name: "lights".to_string(),
+            url: "http://127.0.0.1:1/never".to_string(),
+            method: "GET".to_string(),
+            headers: BTreeMap::new(),
+            body: None,
+            status_match: "200".to_string(),
+            body_contains: None,
+            poll_seconds: 5,
+            enabled: true,
+            action_on_pass: None,
+            action_on_fail: None,
+            created_at_ms: 0,
+            last_checked_at_ms: None,
+            last_passing: Some(true),
+            last_status_code: Some(200),
+            last_error: None,
+            last_action_at_ms: None,
+            last_action: None,
+            last_action_error: None,
+            min_stable_seconds: 90,
+            pending_value: None,
+            pending_since_ms: None,
+        };
+        condition.last_passing = Some(true);
+        {
+            let mut conditions = state.conditions.write().await;
+            conditions.insert("c".to_string(), condition.clone());
+        }
+
+        // First probe: result will be Some(false). Hysteresis must NOT
+        // flip last_passing yet, only start a pending wait.
+        probe_and_record(&state, "c").await;
+        {
+            let conditions = state.conditions.read().await;
+            let stored = conditions.get("c").unwrap();
+            assert_eq!(stored.last_passing, Some(true), "hysteresis should hold previous value");
+            assert_eq!(stored.pending_value, Some(false));
+            assert!(stored.pending_since_ms.is_some());
+        }
+
+        // Backdate the pending stamp so the 90s window has elapsed.
+        {
+            let mut conditions = state.conditions.write().await;
+            let stored = conditions.get_mut("c").unwrap();
+            stored.pending_since_ms = Some(now_ms().saturating_sub(95_000));
+        }
+        probe_and_record(&state, "c").await;
+        {
+            let conditions = state.conditions.read().await;
+            let stored = conditions.get("c").unwrap();
+            assert_eq!(stored.last_passing, Some(false), "hysteresis should commit after stable window");
+            assert_eq!(stored.pending_value, None);
+        }
+
+        let _ = fs::remove_file(state_path);
     }
 
     #[tokio::test]
