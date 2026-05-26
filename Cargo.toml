@@ -3,6 +3,7 @@ name = "fusebox"
 version = "0.1.0"
 edition = "2024"
 license = "MPL-2.0"
+build = "build.rs"
 
 [dependencies]
 anyhow = "1.0.102"

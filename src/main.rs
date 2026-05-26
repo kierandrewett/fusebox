@@ -34,12 +34,13 @@ use tokio::time::sleep;
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
-const STATE_VERSION: u32 = 1;
+const STATE_VERSION: u32 = 2;
 const DEFAULT_ENERGY_PRICE_PENCE_PER_KWH: f64 = 27.03;
 const ALL_TIME_USAGE_START_YEAR: i32 = 2020;
 const TAPO_HANDSHAKE_RETRY_ATTEMPTS: usize = 3;
 const TAPO_HANDSHAKE_RETRY_DELAY: Duration = Duration::from_millis(350);
 const SWITCH_SOUND_BYTES: &[u8] = include_bytes!("../assets/348224__tbrook__switch-light-06.wav");
+const AUTOMATIONS_BUNDLE_JS: &str = include_str!("../web/dist/automations.js");
 
 #[derive(Debug, Clone)]
 struct Settings {
@@ -65,6 +66,7 @@ struct AppState {
     conditions: Arc<RwLock<BTreeMap<String, ConditionConfig>>>,
     device_intents: Arc<RwLock<BTreeMap<String, DeviceIntent>>>,
     hooks: Arc<RwLock<BTreeMap<String, HookConfig>>>,
+    automations: Arc<RwLock<BTreeMap<String, Automation>>>,
     http_client: reqwest::Client,
     discovery_timeout_seconds: u64,
     discovery_targets: Vec<String>,
@@ -593,6 +595,8 @@ struct PersistedState {
     device_intents: BTreeMap<String, DeviceIntent>,
     #[serde(default)]
     hooks: BTreeMap<String, HookConfig>,
+    #[serde(default)]
+    automations: BTreeMap<String, Automation>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -663,6 +667,173 @@ struct HookConfig {
     last_error: Option<String>,
 }
 
+// ---------- Automations (flowchart) ----------
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum AutomationNodeConfig {
+    CronTrigger { cron_trigger: CronTriggerCfg },
+    IntervalTrigger { interval_trigger: IntervalTriggerCfg },
+    DeviceEventTrigger { device_event_trigger: DeviceEventTriggerCfg },
+    HttpProbe { http_probe: HttpProbeCfg },
+    LogicAnd,
+    LogicOr,
+    LogicNot,
+    Debounce { debounce: DebounceCfg },
+    SetDevice { set_device: SetDeviceCfg },
+    ToggleDevice { toggle_device: ToggleDeviceCfg },
+    FireHook { fire_hook: FireHookCfg },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct CronTriggerCfg {
+    cron: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct IntervalTriggerCfg {
+    on_seconds: u64,
+    off_seconds: u64,
+    start_action: ScheduleAction,
+    #[serde(default)]
+    starts_at_ms: Option<u128>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct DeviceEventTriggerCfg {
+    device_name: String,
+    event: HookEvent,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct HttpProbeCfg {
+    url: String,
+    #[serde(default = "default_http_method")]
+    method: String,
+    #[serde(default)]
+    headers: BTreeMap<String, String>,
+    #[serde(default)]
+    body: Option<String>,
+    #[serde(default = "default_status_match")]
+    status_match: String,
+    #[serde(default)]
+    body_contains: Option<String>,
+    #[serde(default = "default_condition_poll_seconds")]
+    poll_seconds: u64,
+    #[serde(default)]
+    min_stable_seconds: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct DebounceCfg {
+    hold_seconds: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct SetDeviceCfg {
+    device_name: String,
+    action: ScheduleAction,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct ToggleDeviceCfg {
+    device_name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct FireHookCfg {
+    hook_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AutomationNode {
+    id: String,
+    config: AutomationNodeConfig,
+    #[serde(default)]
+    x: f64,
+    #[serde(default)]
+    y: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AutomationEdge {
+    id: String,
+    source_node: String,
+    target_node: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct NodeRuntimeState {
+    #[serde(default)]
+    last_value: Option<bool>,
+    #[serde(default)]
+    last_fired_at_ms: Option<u128>,
+    #[serde(default)]
+    last_error: Option<String>,
+    // Internal state for cron/interval/probe/debounce — not exposed in the
+    // public view JSON. Reset on server restart.
+    #[serde(skip)]
+    last_checked_at_ms: Option<u128>,
+    #[serde(skip)]
+    pending_value: Option<bool>,
+    #[serde(skip)]
+    pending_since_ms: Option<u128>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct AutomationStatus {
+    #[serde(default)]
+    last_fired_at_ms: Option<u128>,
+    #[serde(default)]
+    last_error: Option<String>,
+    #[serde(default)]
+    node_states: BTreeMap<String, NodeRuntimeState>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct Automation {
+    id: String,
+    name: String,
+    #[serde(default = "default_true")]
+    enabled: bool,
+    #[serde(default)]
+    nodes: Vec<AutomationNode>,
+    #[serde(default)]
+    edges: Vec<AutomationEdge>,
+    #[serde(default)]
+    created_at_ms: u128,
+    #[serde(default)]
+    status: AutomationStatus,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct CreateAutomationRequest {
+    name: String,
+    #[serde(default = "default_true")]
+    enabled: bool,
+    #[serde(default)]
+    nodes: Vec<AutomationNode>,
+    #[serde(default)]
+    edges: Vec<AutomationEdge>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct UpdateAutomationRequest {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    enabled: Option<bool>,
+    #[serde(default)]
+    nodes: Option<Vec<AutomationNode>>,
+    #[serde(default)]
+    edges: Option<Vec<AutomationEdge>>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct AutomationListResponse {
+    automations: Vec<Automation>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 struct ErrorResponse {
     error: ApiErrorBody,
@@ -693,12 +864,14 @@ async fn main() -> Result<()> {
     tokio::spawn(scan_for_devices(state.clone()));
     tokio::spawn(run_scheduler(state.clone()));
     tokio::spawn(run_condition_poller(state.clone()));
+    tokio::spawn(run_automation_engine(state.clone()));
     tokio::spawn(run_override_expiry_sweeper(state.clone()));
 
     let app = Router::new()
         .route("/", get(index))
         .route("/favicon.ico", get(favicon))
         .route("/assets/switch.wav", get(switch_sound))
+        .route("/assets/automations.js", get(automations_bundle))
         .route("/health", get(health))
         .route("/api/devices", get(list_devices))
         .route("/api/energy/history.json", get(energy_history))
@@ -728,6 +901,14 @@ async fn main() -> Result<()> {
             delete(delete_hook).patch(update_hook),
         )
         .route("/api/hooks/{id}/test", post(test_hook))
+        .route(
+            "/api/automations",
+            get(list_automations).post(create_automation),
+        )
+        .route(
+            "/api/automations/{id}",
+            delete(delete_automation).patch(update_automation),
+        )
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind(settings.bind_address)
@@ -832,6 +1013,7 @@ impl AppState {
             conditions: Arc::new(RwLock::new(BTreeMap::new())),
             device_intents: Arc::new(RwLock::new(BTreeMap::new())),
             hooks: Arc::new(RwLock::new(BTreeMap::new())),
+            automations: Arc::new(RwLock::new(BTreeMap::new())),
             http_client,
             discovery_timeout_seconds: settings.discovery_timeout_seconds,
             discovery_targets: settings.discovery_targets.clone(),
@@ -933,6 +1115,15 @@ async fn switch_sound() -> Response {
         .header(header::CACHE_CONTROL, "public, max-age=31536000, immutable")
         .body(Body::from(SWITCH_SOUND_BYTES))
         .expect("static switch sound response should be valid")
+}
+
+async fn automations_bundle() -> Response {
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "application/javascript; charset=utf-8")
+        .header(header::CACHE_CONTROL, "no-cache")
+        .body(Body::from(AUTOMATIONS_BUNDLE_JS))
+        .expect("static automations bundle response should be valid")
 }
 
 async fn health() -> Json<serde_json::Value> {
@@ -2003,6 +2194,233 @@ async fn test_hook(
     Ok(Json(view))
 }
 
+// ---------- Automation HTTP handlers ----------
+
+fn new_automation_id() -> String {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("auto-{}-{}", now_ms(), n)
+}
+
+async fn list_automations(State(state): State<AppState>) -> Json<AutomationListResponse> {
+    let automations = state.automations.read().await;
+    let mut list: Vec<Automation> = automations.values().cloned().collect();
+    list.sort_by(|a, b| a.created_at_ms.cmp(&b.created_at_ms));
+    Json(AutomationListResponse { automations: list })
+}
+
+async fn create_automation(
+    State(state): State<AppState>,
+    Json(request): Json<CreateAutomationRequest>,
+) -> Result<(StatusCode, Json<Automation>), AppError> {
+    let name = request.name.trim();
+    if name.is_empty() {
+        return Err(AppError(anyhow!("name cannot be empty")));
+    }
+    validate_automation_graph(&request.nodes, &request.edges)?;
+
+    let id = new_automation_id();
+    let automation = Automation {
+        id: id.clone(),
+        name: name.to_string(),
+        enabled: request.enabled,
+        nodes: request.nodes,
+        edges: request.edges,
+        created_at_ms: now_ms(),
+        status: AutomationStatus::default(),
+    };
+    {
+        let mut automations = state.automations.write().await;
+        automations.insert(id, automation.clone());
+    }
+    if let Err(error) = save_persisted_state(&state).await {
+        warn!(%error, "failed to persist newly created automation");
+    }
+    Ok((StatusCode::CREATED, Json(automation)))
+}
+
+async fn update_automation(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(request): Json<UpdateAutomationRequest>,
+) -> Result<Json<Automation>, AppError> {
+    if let (Some(nodes), Some(edges)) = (request.nodes.as_ref(), request.edges.as_ref()) {
+        validate_automation_graph(nodes, edges)?;
+    } else if let Some(nodes) = request.nodes.as_ref() {
+        // Validate against current edges
+        let existing = state.automations.read().await;
+        let cur = existing
+            .get(&id)
+            .ok_or_else(|| AppError(anyhow!("unknown automation '{}'", id)))?;
+        validate_automation_graph(nodes, &cur.edges)?;
+    } else if let Some(edges) = request.edges.as_ref() {
+        let existing = state.automations.read().await;
+        let cur = existing
+            .get(&id)
+            .ok_or_else(|| AppError(anyhow!("unknown automation '{}'", id)))?;
+        validate_automation_graph(&cur.nodes, edges)?;
+    }
+
+    let updated = {
+        let mut automations = state.automations.write().await;
+        let automation = automations
+            .get_mut(&id)
+            .ok_or_else(|| AppError(anyhow!("unknown automation '{}'", id)))?;
+        if let Some(name) = request.name {
+            let trimmed = name.trim();
+            if trimmed.is_empty() {
+                return Err(AppError(anyhow!("name cannot be empty")));
+            }
+            automation.name = trimmed.to_string();
+        }
+        if let Some(enabled) = request.enabled {
+            automation.enabled = enabled;
+        }
+        if let Some(nodes) = request.nodes {
+            automation.nodes = nodes;
+            // Editing the graph clears stale per-node runtime state.
+            automation.status.node_states.clear();
+            automation.status.last_error = None;
+        }
+        if let Some(edges) = request.edges {
+            automation.edges = edges;
+        }
+        automation.clone()
+    };
+    if let Err(error) = save_persisted_state(&state).await {
+        warn!(%error, "failed to persist automation update");
+    }
+    Ok(Json(updated))
+}
+
+async fn delete_automation(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, AppError> {
+    let removed = {
+        let mut automations = state.automations.write().await;
+        automations.remove(&id).is_some()
+    };
+    if !removed {
+        return Err(AppError(anyhow!("unknown automation '{}'", id)));
+    }
+    if let Err(error) = save_persisted_state(&state).await {
+        warn!(%error, "failed to persist automation deletion");
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+fn validate_automation_graph(nodes: &[AutomationNode], edges: &[AutomationEdge]) -> Result<()> {
+    use std::collections::HashSet;
+    let mut ids: HashSet<&str> = HashSet::new();
+    for n in nodes {
+        if !ids.insert(n.id.as_str()) {
+            return Err(anyhow!("duplicate node id '{}'", n.id));
+        }
+        validate_node_config(&n.config)?;
+    }
+    for e in edges {
+        if !ids.contains(e.source_node.as_str()) {
+            return Err(anyhow!("edge source '{}' not found", e.source_node));
+        }
+        if !ids.contains(e.target_node.as_str()) {
+            return Err(anyhow!("edge target '{}' not found", e.target_node));
+        }
+        if e.source_node == e.target_node {
+            return Err(anyhow!("self-edge on node '{}' is not allowed", e.source_node));
+        }
+    }
+    // Cycle detection (DFS): trigger -> action graphs must be acyclic.
+    let mut adj: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    for e in edges {
+        adj.entry(e.source_node.as_str())
+            .or_default()
+            .push(e.target_node.as_str());
+    }
+    let mut state_map: BTreeMap<&str, u8> = BTreeMap::new();
+    for n in nodes {
+        if !state_map.contains_key(n.id.as_str()) {
+            if has_cycle_dfs(n.id.as_str(), &adj, &mut state_map) {
+                return Err(anyhow!("automation graph contains a cycle"));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn has_cycle_dfs<'a>(
+    node: &'a str,
+    adj: &BTreeMap<&'a str, Vec<&'a str>>,
+    state: &mut BTreeMap<&'a str, u8>,
+) -> bool {
+    state.insert(node, 1);
+    if let Some(neighbours) = adj.get(node) {
+        for next in neighbours {
+            match state.get(next) {
+                Some(1) => return true,
+                Some(2) => continue,
+                _ => {
+                    if has_cycle_dfs(next, adj, state) {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    state.insert(node, 2);
+    false
+}
+
+fn validate_node_config(config: &AutomationNodeConfig) -> Result<()> {
+    match config {
+        AutomationNodeConfig::CronTrigger { cron_trigger } => {
+            parse_cron(&cron_trigger.cron)
+                .with_context(|| format!("invalid cron '{}'", cron_trigger.cron))?;
+        }
+        AutomationNodeConfig::IntervalTrigger { interval_trigger } => {
+            let total = interval_trigger
+                .on_seconds
+                .saturating_add(interval_trigger.off_seconds);
+            if total < MIN_INTERVAL_CYCLE_SECONDS {
+                return Err(anyhow!(
+                    "interval cycle (on+off) must be at least {MIN_INTERVAL_CYCLE_SECONDS}s"
+                ));
+            }
+        }
+        AutomationNodeConfig::HttpProbe { http_probe } => {
+            validate_url(&http_probe.url)?;
+            validate_http_method(&http_probe.method)?;
+            parse_status_match(&http_probe.status_match)?;
+            clamp_poll_seconds(http_probe.poll_seconds)?;
+        }
+        AutomationNodeConfig::DeviceEventTrigger { device_event_trigger } => {
+            if device_event_trigger.device_name.is_empty() {
+                return Err(anyhow!("device event trigger requires a device_name"));
+            }
+        }
+        AutomationNodeConfig::SetDevice { set_device } => {
+            if set_device.device_name.is_empty() {
+                return Err(anyhow!("set_device requires a device_name"));
+            }
+        }
+        AutomationNodeConfig::ToggleDevice { toggle_device } => {
+            if toggle_device.device_name.is_empty() {
+                return Err(anyhow!("toggle_device requires a device_name"));
+            }
+        }
+        AutomationNodeConfig::FireHook { fire_hook } => {
+            if fire_hook.hook_id.is_empty() {
+                return Err(anyhow!("fire_hook requires a hook_id"));
+            }
+        }
+        AutomationNodeConfig::LogicAnd
+        | AutomationNodeConfig::LogicOr
+        | AutomationNodeConfig::LogicNot
+        | AutomationNodeConfig::Debounce { .. } => {}
+    }
+    Ok(())
+}
+
 fn validate_http_method(method: &str) -> Result<()> {
     HttpMethod::from_bytes(method.trim().to_uppercase().as_bytes())
         .map(|_| ())
@@ -2522,6 +2940,578 @@ async fn run_override_expiry_sweeper(state: AppState) {
     }
 }
 
+// ---------- Automation execution engine ----------
+
+async fn run_automation_engine(state: AppState) {
+    sleep(Duration::from_secs(2)).await;
+    let mut previous_tick_ms = now_ms();
+    loop {
+        let tick_ms = now_ms();
+        if let Err(error) = evaluate_all_automations(&state, previous_tick_ms, tick_ms).await {
+            warn!(%error, "automation engine tick failed");
+        }
+        previous_tick_ms = tick_ms;
+        sleep(Duration::from_secs(1)).await;
+    }
+}
+
+async fn evaluate_all_automations(
+    state: &AppState,
+    previous_tick_ms: u128,
+    tick_ms: u128,
+) -> Result<()> {
+    let snapshots: Vec<Automation> = {
+        let automations = state.automations.read().await;
+        automations.values().filter(|a| a.enabled).cloned().collect()
+    };
+
+    for automation in snapshots {
+        evaluate_one_automation(state, automation, previous_tick_ms, tick_ms).await;
+    }
+
+    Ok(())
+}
+
+async fn evaluate_one_automation(
+    state: &AppState,
+    automation: Automation,
+    previous_tick_ms: u128,
+    tick_ms: u128,
+) {
+    let order = match topo_sort_nodes(&automation.nodes, &automation.edges) {
+        Some(order) => order,
+        None => {
+            // Graph contains a cycle. Validation should prevent this, but skip
+            // defensively rather than panicking.
+            warn!(automation_id = %automation.id, "skipping automation with cyclic graph");
+            return;
+        }
+    };
+
+    let mut incoming: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for n in &automation.nodes {
+        incoming.entry(n.id.clone()).or_default();
+    }
+    for e in &automation.edges {
+        incoming
+            .entry(e.target_node.clone())
+            .or_default()
+            .push(e.source_node.clone());
+    }
+
+    let mut outputs: BTreeMap<String, Option<bool>> = BTreeMap::new();
+    let mut transitions: Vec<(String, AutomationNodeConfig)> = Vec::new();
+    let mut node_state_updates: BTreeMap<String, NodeRuntimeState> = BTreeMap::new();
+
+    let devices_to_reconcile = std::collections::BTreeSet::<String>::new();
+    let mut devices_to_reconcile = devices_to_reconcile;
+
+    for node_id in &order {
+        let node = match automation.nodes.iter().find(|n| &n.id == node_id) {
+            Some(n) => n,
+            None => continue,
+        };
+
+        let prev_state = {
+            let automations = state.automations.read().await;
+            automations
+                .get(&automation.id)
+                .and_then(|a| a.status.node_states.get(node_id))
+                .cloned()
+                .unwrap_or_default()
+        };
+
+        let input_values: Vec<Option<bool>> = incoming
+            .get(node_id)
+            .map(|sources| {
+                sources
+                    .iter()
+                    .map(|src| outputs.get(src).copied().unwrap_or(None))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let (new_output, new_state) = evaluate_node(
+            state,
+            &automation.id,
+            node,
+            &input_values,
+            &prev_state,
+            previous_tick_ms,
+            tick_ms,
+        )
+        .await;
+
+        outputs.insert(node_id.clone(), new_output);
+
+        let is_action = matches!(
+            node.config,
+            AutomationNodeConfig::SetDevice { .. }
+                | AutomationNodeConfig::ToggleDevice { .. }
+                | AutomationNodeConfig::FireHook { .. }
+        );
+        let rising = matches!(
+            (prev_state.last_value, new_output),
+            (None, Some(true)) | (Some(false), Some(true))
+        );
+
+        let mut merged = new_state;
+        if rising && is_action {
+            merged.last_fired_at_ms = Some(tick_ms);
+            transitions.push((node_id.clone(), node.config.clone()));
+        }
+        merged.last_value = new_output;
+        node_state_updates.insert(node_id.clone(), merged);
+    }
+
+    // Run side-effecting actions outside the read lock.
+    for (node_id, config) in transitions {
+        match execute_action(state, &automation.id, &node_id, &config).await {
+            Ok(Some(device_name)) => {
+                devices_to_reconcile.insert(device_name);
+            }
+            Ok(None) => {}
+            Err(error) => {
+                node_state_updates
+                    .entry(node_id)
+                    .and_modify(|s| s.last_error = Some(format!("{error}")))
+                    .or_insert_with(|| NodeRuntimeState {
+                        last_error: Some(format!("{error}")),
+                        ..Default::default()
+                    });
+            }
+        }
+    }
+
+    // Persist runtime state updates. Only mark the state as dirty if a
+    // visible field changed (last_value, last_fired_at_ms, last_error), so
+    // the engine doesn't rewrite state.json every second.
+    let mut dirty = false;
+    {
+        let mut automations = state.automations.write().await;
+        if let Some(a) = automations.get_mut(&automation.id) {
+            for (node_id, state_update) in node_state_updates {
+                let prev = a.status.node_states.get(&node_id);
+                let changed = match prev {
+                    Some(p) => {
+                        p.last_value != state_update.last_value
+                            || p.last_fired_at_ms != state_update.last_fired_at_ms
+                            || p.last_error != state_update.last_error
+                    }
+                    None => state_update.last_value.is_some()
+                        || state_update.last_fired_at_ms.is_some()
+                        || state_update.last_error.is_some(),
+                };
+                if changed {
+                    dirty = true;
+                }
+                a.status.node_states.insert(node_id, state_update);
+            }
+            let new_last_fired = a
+                .status
+                .node_states
+                .values()
+                .filter_map(|s| s.last_fired_at_ms)
+                .max();
+            let new_last_error = a
+                .status
+                .node_states
+                .values()
+                .find_map(|s| s.last_error.clone());
+            if a.status.last_fired_at_ms != new_last_fired {
+                dirty = true;
+                a.status.last_fired_at_ms = new_last_fired;
+            }
+            if a.status.last_error != new_last_error {
+                dirty = true;
+                a.status.last_error = new_last_error;
+            }
+        }
+    }
+
+    if dirty {
+        if let Err(error) = save_persisted_state(state).await {
+            warn!(%error, "failed to persist automation engine state");
+        }
+    }
+
+    for device_name in devices_to_reconcile {
+        reconcile_device(state, &device_name, HookSource::Schedule).await;
+    }
+}
+
+fn topo_sort_nodes(nodes: &[AutomationNode], edges: &[AutomationEdge]) -> Option<Vec<String>> {
+    let mut indeg: BTreeMap<String, usize> = BTreeMap::new();
+    let mut adj: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for n in nodes {
+        indeg.entry(n.id.clone()).or_insert(0);
+        adj.entry(n.id.clone()).or_default();
+    }
+    for e in edges {
+        *indeg.entry(e.target_node.clone()).or_insert(0) += 1;
+        adj.entry(e.source_node.clone())
+            .or_default()
+            .push(e.target_node.clone());
+    }
+    let mut queue: std::collections::VecDeque<String> = indeg
+        .iter()
+        .filter(|&(_, d)| *d == 0)
+        .map(|(k, _)| k.clone())
+        .collect();
+    let mut order = Vec::with_capacity(nodes.len());
+    while let Some(id) = queue.pop_front() {
+        order.push(id.clone());
+        if let Some(neighbours) = adj.get(&id) {
+            for next in neighbours {
+                let degree = indeg.get_mut(next).expect("present");
+                *degree = degree.saturating_sub(1);
+                if *degree == 0 {
+                    queue.push_back(next.clone());
+                }
+            }
+        }
+    }
+    if order.len() == nodes.len() {
+        Some(order)
+    } else {
+        None
+    }
+}
+
+async fn evaluate_node(
+    state: &AppState,
+    automation_id: &str,
+    node: &AutomationNode,
+    inputs: &[Option<bool>],
+    prev: &NodeRuntimeState,
+    previous_tick_ms: u128,
+    tick_ms: u128,
+) -> (Option<bool>, NodeRuntimeState) {
+    let mut next = prev.clone();
+    next.last_error = None;
+
+    match &node.config {
+        AutomationNodeConfig::CronTrigger { cron_trigger } => {
+            let parsed = match parse_cron(&cron_trigger.cron) {
+                Ok(p) => p,
+                Err(error) => {
+                    next.last_error = Some(format!("{error}"));
+                    return (Some(false), next);
+                }
+            };
+            let prev_dt = DateTime::<Local>::from(
+                std::time::UNIX_EPOCH
+                    + Duration::from_millis(previous_tick_ms as u64),
+            );
+            let now_dt = DateTime::<Local>::from(
+                std::time::UNIX_EPOCH + Duration::from_millis(tick_ms as u64),
+            );
+            let fired = parsed
+                .after(&prev_dt)
+                .next()
+                .map(|fire_time| fire_time <= now_dt)
+                .unwrap_or(false);
+            (Some(fired), next)
+        }
+        AutomationNodeConfig::IntervalTrigger { interval_trigger } => {
+            let total = interval_trigger
+                .on_seconds
+                .saturating_add(interval_trigger.off_seconds);
+            if total == 0 {
+                next.last_error = Some("interval cycle is zero".to_string());
+                return (Some(false), next);
+            }
+            let starts = interval_trigger.starts_at_ms.unwrap_or(0);
+            let elapsed = tick_ms.saturating_sub(starts) / 1000;
+            let phase_seconds = (elapsed % (total as u128)) as u64;
+            let in_on_window = phase_seconds < interval_trigger.on_seconds;
+            let active = match interval_trigger.start_action {
+                ScheduleAction::On | ScheduleAction::Toggle => in_on_window,
+                ScheduleAction::Off => !in_on_window,
+            };
+            (Some(active), next)
+        }
+        AutomationNodeConfig::DeviceEventTrigger { device_event_trigger } => {
+            // Edge-detect against current device snapshot. We only support
+            // on/off events through snapshot polling; online/offline are
+            // handled via the existing offline tracking flags.
+            let snapshot_state = {
+                let devices = state.devices.read().await;
+                devices.get(&device_event_trigger.device_name).map(|d| {
+                    (
+                        d.snapshot.as_ref().map(|s| s.device_on),
+                        d.offline_announced,
+                        d.consecutive_failures,
+                    )
+                })
+            };
+            let value = match (device_event_trigger.event, snapshot_state) {
+                (HookEvent::On, Some((Some(on), _, _))) => Some(on),
+                (HookEvent::Off, Some((Some(on), _, _))) => Some(!on),
+                (HookEvent::Offline, Some((_, offline_announced, _))) => Some(offline_announced),
+                (HookEvent::Online, Some((_, offline_announced, _))) => Some(!offline_announced),
+                _ => None,
+            };
+            (value, next)
+        }
+        AutomationNodeConfig::HttpProbe { http_probe } => {
+            let interval_ms = (http_probe.poll_seconds as u128) * 1000;
+            let due = match next.last_checked_at_ms {
+                None => true,
+                Some(last) => tick_ms.saturating_sub(last) >= interval_ms,
+            };
+            if !due {
+                return (prev.last_value, next);
+            }
+
+            let probe = ConditionConfig {
+                id: format!("auto/{automation_id}/node/{}", node.id),
+                name: node.id.clone(),
+                device_name: String::new(),
+                url: http_probe.url.clone(),
+                method: http_probe.method.clone(),
+                headers: http_probe.headers.clone(),
+                body: http_probe.body.clone(),
+                status_match: http_probe.status_match.clone(),
+                body_contains: http_probe.body_contains.clone(),
+                poll_seconds: http_probe.poll_seconds,
+                enabled: true,
+                action_on_pass: None,
+                action_on_fail: None,
+                created_at_ms: 0,
+                last_checked_at_ms: None,
+                last_passing: None,
+                last_status_code: None,
+                last_error: None,
+                last_action_at_ms: None,
+                last_action: None,
+                last_action_error: None,
+                min_stable_seconds: http_probe.min_stable_seconds,
+                pending_value: None,
+                pending_since_ms: None,
+            };
+
+            let outcome = probe_condition_once(&state.http_client, &probe).await;
+            next.last_checked_at_ms = Some(tick_ms);
+            if let Some(error) = outcome.error {
+                next.last_error = Some(error);
+            }
+
+            let new_value = outcome.passing;
+            let stable_ms = (http_probe.min_stable_seconds as u128) * 1000;
+
+            let committed = match prev.last_value {
+                Some(prev_val) if prev_val == new_value => {
+                    next.pending_value = None;
+                    next.pending_since_ms = None;
+                    Some(new_value)
+                }
+                _ if stable_ms == 0 => {
+                    next.pending_value = None;
+                    next.pending_since_ms = None;
+                    Some(new_value)
+                }
+                _ => match prev.pending_value {
+                    Some(pending) if pending == new_value => {
+                        let since = prev.pending_since_ms.unwrap_or(tick_ms);
+                        if tick_ms.saturating_sub(since) >= stable_ms {
+                            next.pending_value = None;
+                            next.pending_since_ms = None;
+                            Some(new_value)
+                        } else {
+                            next.pending_value = Some(new_value);
+                            next.pending_since_ms = Some(since);
+                            prev.last_value
+                        }
+                    }
+                    _ => {
+                        next.pending_value = Some(new_value);
+                        next.pending_since_ms = Some(tick_ms);
+                        prev.last_value
+                    }
+                },
+            };
+
+            (committed, next)
+        }
+        AutomationNodeConfig::LogicAnd => {
+            if inputs.is_empty() {
+                return (Some(false), next);
+            }
+            let mut all_true = true;
+            for v in inputs {
+                match v {
+                    Some(true) => continue,
+                    Some(false) => {
+                        all_true = false;
+                        break;
+                    }
+                    None => {
+                        all_true = false;
+                        break;
+                    }
+                }
+            }
+            (Some(all_true), next)
+        }
+        AutomationNodeConfig::LogicOr => {
+            if inputs.is_empty() {
+                return (Some(false), next);
+            }
+            let any_true = inputs.iter().any(|v| matches!(v, Some(true)));
+            (Some(any_true), next)
+        }
+        AutomationNodeConfig::LogicNot => {
+            let v = inputs.first().copied().flatten();
+            (v.map(|b| !b), next)
+        }
+        AutomationNodeConfig::Debounce { debounce } => {
+            let new_value = inputs.first().copied().flatten();
+            let hold_ms = (debounce.hold_seconds as u128) * 1000;
+            match (prev.last_value, new_value) {
+                (a, b) if a == b => {
+                    next.pending_value = None;
+                    next.pending_since_ms = None;
+                    (b, next)
+                }
+                (_, None) => {
+                    next.pending_value = None;
+                    next.pending_since_ms = None;
+                    (None, next)
+                }
+                (_, Some(b)) if hold_ms == 0 => {
+                    next.pending_value = None;
+                    next.pending_since_ms = None;
+                    (Some(b), next)
+                }
+                (_, Some(b)) => match prev.pending_value {
+                    Some(pending) if pending == b => {
+                        let since = prev.pending_since_ms.unwrap_or(tick_ms);
+                        if tick_ms.saturating_sub(since) >= hold_ms {
+                            next.pending_value = None;
+                            next.pending_since_ms = None;
+                            (Some(b), next)
+                        } else {
+                            next.pending_value = Some(b);
+                            next.pending_since_ms = Some(since);
+                            (prev.last_value, next)
+                        }
+                    }
+                    _ => {
+                        next.pending_value = Some(b);
+                        next.pending_since_ms = Some(tick_ms);
+                        (prev.last_value, next)
+                    }
+                },
+            }
+        }
+        AutomationNodeConfig::SetDevice { .. }
+        | AutomationNodeConfig::ToggleDevice { .. }
+        | AutomationNodeConfig::FireHook { .. } => {
+            // Actions just propagate the maximum of their inputs so they
+            // can in turn drive other actions if connected.
+            let active = inputs.iter().any(|v| matches!(v, Some(true)));
+            (Some(active), next)
+        }
+    }
+}
+
+async fn execute_action(
+    state: &AppState,
+    automation_id: &str,
+    node_id: &str,
+    config: &AutomationNodeConfig,
+) -> Result<Option<String>> {
+    match config {
+        AutomationNodeConfig::SetDevice { set_device } => {
+            let target = match set_device.action {
+                ScheduleAction::On => true,
+                ScheduleAction::Off => false,
+                ScheduleAction::Toggle => {
+                    let current = {
+                        let devices = state.devices.read().await;
+                        devices
+                            .get(&set_device.device_name)
+                            .and_then(|d| d.snapshot.as_ref().map(|s| s.device_on))
+                    };
+                    match current {
+                        Some(on) => !on,
+                        None => {
+                            return Err(anyhow!(
+                                "toggle requested but device '{}' has no snapshot",
+                                set_device.device_name
+                            ));
+                        }
+                    }
+                }
+            };
+            info!(
+                automation = %automation_id,
+                node = %node_id,
+                device = %set_device.device_name,
+                target,
+                "automation set_device fired"
+            );
+            set_schedule_intent(state, &set_device.device_name, target).await;
+            Ok(Some(set_device.device_name.clone()))
+        }
+        AutomationNodeConfig::ToggleDevice { toggle_device } => {
+            let current = {
+                let devices = state.devices.read().await;
+                devices
+                    .get(&toggle_device.device_name)
+                    .and_then(|d| d.snapshot.as_ref().map(|s| s.device_on))
+            };
+            let target = match current {
+                Some(on) => !on,
+                None => {
+                    return Err(anyhow!(
+                        "toggle requested but device '{}' has no snapshot",
+                        toggle_device.device_name
+                    ));
+                }
+            };
+            info!(
+                automation = %automation_id,
+                node = %node_id,
+                device = %toggle_device.device_name,
+                target,
+                "automation toggle_device fired"
+            );
+            set_schedule_intent(state, &toggle_device.device_name, target).await;
+            Ok(Some(toggle_device.device_name.clone()))
+        }
+        AutomationNodeConfig::FireHook { fire_hook: fire_hook_cfg } => {
+            let hook = {
+                let hooks = state.hooks.read().await;
+                hooks.get(&fire_hook_cfg.hook_id).cloned()
+            };
+            let Some(hook) = hook else {
+                return Err(anyhow!("unknown hook '{}'", fire_hook_cfg.hook_id));
+            };
+            info!(
+                automation = %automation_id,
+                node = %node_id,
+                hook = %hook.id,
+                "automation fire_hook fired"
+            );
+            let ctx = HookTemplateContext {
+                device: "automation".to_string(),
+                nickname: "Automation".to_string(),
+                model: "automation".to_string(),
+                event: HookEvent::On,
+                source: HookSource::External,
+                previous_on: None,
+                new_on: None,
+                timestamp_ms: now_ms(),
+            };
+            fire_hook(state, hook, ctx).await;
+            Ok(None)
+        }
+        _ => Ok(None),
+    }
+}
+
 async fn run_condition_poller(state: AppState) {
     sleep(Duration::from_secs(2)).await;
     loop {
@@ -2840,10 +3830,15 @@ async fn load_persisted_state(state: &AppState) -> Result<()> {
         Err(error) => return Err(error).context("failed to read persisted state"),
     };
 
-    let persisted: PersistedState =
+    let mut persisted: PersistedState =
         serde_json::from_str(&contents).context("failed to parse persisted state")?;
 
-    if persisted.version != STATE_VERSION {
+    let mut migrated_from: Option<u32> = None;
+    if persisted.version < STATE_VERSION {
+        migrated_from = Some(persisted.version);
+        migrate_to_automations(&mut persisted);
+        persisted.version = STATE_VERSION;
+    } else if persisted.version > STATE_VERSION {
         return Err(anyhow!(
             "unsupported state version {}; expected {}",
             persisted.version,
@@ -2854,6 +3849,7 @@ async fn load_persisted_state(state: &AppState) -> Result<()> {
     let loaded_count = persisted.devices.len();
     let loaded_schedule_count = persisted.schedules.len();
     let loaded_condition_count = persisted.conditions.len();
+    let loaded_automation_count = persisted.automations.len();
     {
         let mut devices = state.devices.write().await;
 
@@ -2890,13 +3886,30 @@ async fn load_persisted_state(state: &AppState) -> Result<()> {
         }
     }
 
+    {
+        let mut automations = state.automations.write().await;
+        for (id, automation) in persisted.automations {
+            automations.insert(id, automation);
+        }
+    }
+
     info!(
         loaded_count,
         loaded_schedule_count,
         loaded_condition_count,
+        loaded_automation_count,
+        migrated_from = ?migrated_from,
         path = %state.state_path.display(),
-        "loaded persisted devices",
+        "loaded persisted state",
     );
+
+    if migrated_from.is_some() {
+        if let Err(error) = save_persisted_state(state).await {
+            warn!(%error, "failed to persist state after automation migration");
+        } else {
+            info!("persisted migrated state at new version {STATE_VERSION}");
+        }
+    }
     Ok(())
 }
 
@@ -2907,6 +3920,7 @@ async fn save_persisted_state(state: &AppState) -> Result<()> {
         let conditions = state.conditions.read().await;
         let intents = state.device_intents.read().await;
         let hooks = state.hooks.read().await;
+        let automations = state.automations.read().await;
 
         PersistedState {
             version: STATE_VERSION,
@@ -2918,10 +3932,250 @@ async fn save_persisted_state(state: &AppState) -> Result<()> {
             conditions: conditions.clone(),
             device_intents: intents.clone(),
             hooks: hooks.clone(),
+            automations: automations.clone(),
         }
     };
 
     write_json_atomically(&state.state_path, &persisted)
+}
+
+/// Convert legacy `ScheduleConfig` and `ConditionConfig` entries into
+/// equivalent `Automation` flowcharts. The original collections are left in
+/// place inside `persisted` so the next save still records them as a backup;
+/// the engine no longer reads them once automations exist.
+fn migrate_to_automations(persisted: &mut PersistedState) {
+    if !persisted.automations.is_empty() {
+        return;
+    }
+
+    let now = now_ms();
+    let mut next_id = 0u64;
+    let mut new_id = || {
+        next_id += 1;
+        format!("mig-{}-{}", now, next_id)
+    };
+
+    // 1) Each ConditionConfig becomes an Automation:
+    //    [HttpProbe] -> [LogicNot?] -> [SetDevice(action_on_pass/fail)]
+    //
+    // We always emit a Set Device action when at least one action is
+    // configured. Pass-action and fail-action are split into two parallel
+    // branches off the probe so both can fire.
+    for (id, cond) in &persisted.conditions {
+        let mut nodes: Vec<AutomationNode> = Vec::new();
+        let mut edges: Vec<AutomationEdge> = Vec::new();
+
+        let probe_id = format!("probe-{id}");
+        nodes.push(AutomationNode {
+            id: probe_id.clone(),
+            x: 80.0,
+            y: 80.0,
+            config: AutomationNodeConfig::HttpProbe {
+                http_probe: HttpProbeCfg {
+                    url: cond.url.clone(),
+                    method: cond.method.clone(),
+                    headers: cond.headers.clone(),
+                    body: cond.body.clone(),
+                    status_match: cond.status_match.clone(),
+                    body_contains: cond.body_contains.clone(),
+                    poll_seconds: cond.poll_seconds,
+                    min_stable_seconds: cond.min_stable_seconds,
+                },
+            },
+        });
+
+        let mut next_y = 80.0_f64;
+        if let Some(pass_action) = cond.action_on_pass {
+            let act_id = format!("act-pass-{id}");
+            nodes.push(AutomationNode {
+                id: act_id.clone(),
+                x: 420.0,
+                y: next_y,
+                config: AutomationNodeConfig::SetDevice {
+                    set_device: SetDeviceCfg {
+                        device_name: cond.device_name.clone(),
+                        action: match pass_action {
+                            ConditionAction::On => ScheduleAction::On,
+                            ConditionAction::Off => ScheduleAction::Off,
+                        },
+                    },
+                },
+            });
+            edges.push(AutomationEdge {
+                id: new_id(),
+                source_node: probe_id.clone(),
+                target_node: act_id,
+            });
+            next_y += 160.0;
+        }
+
+        if let Some(fail_action) = cond.action_on_fail {
+            let not_id = format!("not-fail-{id}");
+            nodes.push(AutomationNode {
+                id: not_id.clone(),
+                x: 250.0,
+                y: next_y,
+                config: AutomationNodeConfig::LogicNot,
+            });
+            edges.push(AutomationEdge {
+                id: new_id(),
+                source_node: probe_id.clone(),
+                target_node: not_id.clone(),
+            });
+            let act_id = format!("act-fail-{id}");
+            nodes.push(AutomationNode {
+                id: act_id.clone(),
+                x: 420.0,
+                y: next_y,
+                config: AutomationNodeConfig::SetDevice {
+                    set_device: SetDeviceCfg {
+                        device_name: cond.device_name.clone(),
+                        action: match fail_action {
+                            ConditionAction::On => ScheduleAction::On,
+                            ConditionAction::Off => ScheduleAction::Off,
+                        },
+                    },
+                },
+            });
+            edges.push(AutomationEdge {
+                id: new_id(),
+                source_node: not_id,
+                target_node: act_id,
+            });
+        }
+
+        let auto_id = format!("auto-cond-{id}");
+        persisted.automations.insert(
+            auto_id.clone(),
+            Automation {
+                id: auto_id,
+                name: if cond.name.is_empty() {
+                    format!("Condition: {}", cond.device_name)
+                } else {
+                    cond.name.clone()
+                },
+                enabled: cond.enabled,
+                nodes,
+                edges,
+                created_at_ms: if cond.created_at_ms == 0 {
+                    now
+                } else {
+                    cond.created_at_ms
+                },
+                status: AutomationStatus::default(),
+            },
+        );
+    }
+
+    // 2) Each ScheduleConfig becomes an Automation:
+    //    [CronTrigger | IntervalTrigger] -> [SetDevice]
+    for (id, sched) in &persisted.schedules {
+        let mut nodes: Vec<AutomationNode> = Vec::new();
+        let mut edges: Vec<AutomationEdge> = Vec::new();
+
+        let trigger_id = format!("trig-{id}");
+        match sched.kind {
+            ScheduleKind::Cron => {
+                let Some(cron) = sched.cron.clone() else {
+                    continue;
+                };
+                nodes.push(AutomationNode {
+                    id: trigger_id.clone(),
+                    x: 80.0,
+                    y: 80.0,
+                    config: AutomationNodeConfig::CronTrigger {
+                        cron_trigger: CronTriggerCfg { cron },
+                    },
+                });
+                let Some(action) = sched.action else {
+                    continue;
+                };
+                let act_id = format!("act-{id}");
+                nodes.push(AutomationNode {
+                    id: act_id.clone(),
+                    x: 380.0,
+                    y: 80.0,
+                    config: AutomationNodeConfig::SetDevice {
+                        set_device: SetDeviceCfg {
+                            device_name: sched.device_name.clone(),
+                            action,
+                        },
+                    },
+                });
+                edges.push(AutomationEdge {
+                    id: new_id(),
+                    source_node: trigger_id,
+                    target_node: act_id,
+                });
+            }
+            ScheduleKind::Interval => {
+                let on_seconds = sched.on_seconds.unwrap_or(0);
+                let off_seconds = sched.off_seconds.unwrap_or(0);
+                let start_action = sched.start_action.unwrap_or(ScheduleAction::On);
+                nodes.push(AutomationNode {
+                    id: trigger_id.clone(),
+                    x: 80.0,
+                    y: 80.0,
+                    config: AutomationNodeConfig::IntervalTrigger {
+                        interval_trigger: IntervalTriggerCfg {
+                            on_seconds,
+                            off_seconds,
+                            start_action,
+                            starts_at_ms: sched.starts_at_ms,
+                        },
+                    },
+                });
+                let act_id = format!("act-{id}");
+                nodes.push(AutomationNode {
+                    id: act_id.clone(),
+                    x: 380.0,
+                    y: 80.0,
+                    config: AutomationNodeConfig::SetDevice {
+                        set_device: SetDeviceCfg {
+                            device_name: sched.device_name.clone(),
+                            // Interval flips state internally; the
+                            // SetDevice action just relays whatever the
+                            // trigger emits.
+                            action: ScheduleAction::Toggle,
+                        },
+                    },
+                });
+                edges.push(AutomationEdge {
+                    id: new_id(),
+                    source_node: trigger_id,
+                    target_node: act_id,
+                });
+            }
+        }
+
+        let auto_id = format!("auto-sched-{id}");
+        persisted.automations.insert(
+            auto_id.clone(),
+            Automation {
+                id: auto_id,
+                name: sched
+                    .label
+                    .clone()
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| format!("Schedule: {}", sched.device_name)),
+                enabled: sched.enabled,
+                nodes,
+                edges,
+                created_at_ms: if sched.created_at_ms == 0 {
+                    now
+                } else {
+                    sched.created_at_ms
+                },
+                status: AutomationStatus::default(),
+            },
+        );
+    }
+
+    // Original schedules/conditions are left in `persisted` as historical
+    // backup but emptied out for the runtime once the automation engine is
+    // the source of truth. Clear them now so they don't double-fire.
+    persisted.schedules.clear();
+    persisted.conditions.clear();
 }
 
 fn managed_device_from_config(name: String, config: DeviceConfig) -> ManagedDevice {
@@ -5722,6 +6976,32 @@ const INDEX_HTML: &str = r##"<!doctype html>
                 justify-content: center;
             }
         }
+
+        .tab-bar {
+            display: flex;
+            gap: 4px;
+            border-bottom: 1px solid var(--border, #30363d);
+            margin: 0 0 16px;
+            padding: 0;
+        }
+        .tab-button {
+            background: transparent;
+            border: none;
+            color: var(--muted, #8b949e);
+            padding: 8px 16px;
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+            border-bottom: 2px solid transparent;
+        }
+        .tab-button[aria-selected="true"] {
+            color: var(--fg, #e6edf3);
+            border-bottom-color: var(--accent, #2f81f7);
+        }
+        .tab-button:hover { color: var(--fg, #e6edf3); }
+        .automations-tab {
+            min-height: 600px;
+        }
     </style>
 </head>
 <body>
@@ -5735,9 +7015,14 @@ const INDEX_HTML: &str = r##"<!doctype html>
             </div>
         </header>
 
+        <nav class="tab-bar" role="tablist" aria-label="Sections">
+            <button class="tab-button" type="button" role="tab" data-tab="devices" aria-selected="true">Devices</button>
+            <button class="tab-button" type="button" role="tab" data-tab="automations" aria-selected="false">Automations</button>
+        </nav>
+
         <p class="notice" id="notice" role="status" hidden></p>
 
-        <section class="cabinet" aria-live="polite">
+        <section class="cabinet" id="tab-devices" aria-live="polite">
             <div class="meter-row" aria-label="Fusebox summary">
                 <div class="meter"><span>Devices</span><strong id="device-count">0</strong></div>
                 <div class="meter"><span>Live load</span><strong id="total-power">0 W</strong></div>
@@ -5779,6 +7064,10 @@ const INDEX_HTML: &str = r##"<!doctype html>
                 <p class="hooks-empty" id="hooks-empty">No hooks yet. Hooks fire an HTTP request when any device transitions on/off/online/offline.</p>
             </section>
             <div class="breaker-grid" id="devices"></div>
+        </section>
+
+        <section class="automations-tab" id="tab-automations" hidden>
+            <div id="automations-root"></div>
         </section>
     </main>
 
@@ -6001,6 +7290,59 @@ const INDEX_HTML: &str = r##"<!doctype html>
 
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.5.1/dist/chart.umd.min.js"></script>
     <script>
+        // Top-level tab switching. The Automations bundle is lazy-loaded the
+        // first time the user opens the Automations tab so the Devices tab
+        // stays cheap to boot.
+        (function initTabs() {
+            const tabs = Array.from(document.querySelectorAll(".tab-button"));
+            const panels = {
+                devices: document.querySelector("#tab-devices"),
+                automations: document.querySelector("#tab-automations"),
+            };
+            let automationsLoaded = false;
+            let automationsLoading = null;
+            const root = document.querySelector("#automations-root");
+
+            async function loadAutomations() {
+                if (automationsLoaded) return;
+                if (automationsLoading) return automationsLoading;
+                automationsLoading = new Promise((resolve, reject) => {
+                    const tag = document.createElement("script");
+                    tag.src = "/assets/automations.js";
+                    tag.async = true;
+                    tag.onload = () => {
+                        if (window.FuseboxAutomations && root) {
+                            window.FuseboxAutomations.mount(root);
+                            automationsLoaded = true;
+                        }
+                        resolve();
+                    };
+                    tag.onerror = () => reject(new Error("failed to load automations bundle"));
+                    document.head.appendChild(tag);
+                });
+                return automationsLoading;
+            }
+
+            function activate(name) {
+                for (const t of tabs) {
+                    t.setAttribute("aria-selected", t.dataset.tab === name ? "true" : "false");
+                }
+                for (const [key, panel] of Object.entries(panels)) {
+                    if (!panel) continue;
+                    panel.hidden = key !== name;
+                }
+                if (name === "automations") {
+                    loadAutomations().catch((err) => {
+                        if (root) root.textContent = "Failed to load Automations: " + err;
+                    });
+                }
+            }
+
+            for (const t of tabs) {
+                t.addEventListener("click", () => activate(t.dataset.tab));
+            }
+        })();
+
         const devicesEl = document.querySelector("#devices");
         const scanButton = document.querySelector("#scan");
         const themeButton = document.querySelector("#theme-toggle");
