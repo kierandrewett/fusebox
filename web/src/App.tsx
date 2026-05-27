@@ -40,7 +40,7 @@ export function App() {
   }, []);
 
   return (
-    <main className="shell">
+    <main className={`shell ${tab === "automations" ? "shell-wide" : ""}`}>
       <header className="header">
         <h1>Fusebox</h1>
         <div className="header-actions">

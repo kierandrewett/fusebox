@@ -125,6 +125,9 @@
             width: min(1200px, calc(100vw - 32px));
             margin: 16px auto 32px;
         }
+        .shell-wide {
+            width: min(1700px, calc(100vw - 32px));
+        }
 
         .header {
             display: flex;
@@ -1511,13 +1514,15 @@
             min-height: 600px;
         }
 
-/* Automations editor — wears the same cabinet skin as the Devices and Hooks tabs */
+/* Automations editor — wears the same cabinet skin as the Devices and
+   Hooks tabs. Sized to dominate the viewport so the canvas feels roomy. */
 .fb-automations {
   position: relative;
   display: grid;
-  grid-template-columns: 260px 1fr;
-  min-height: 640px;
-  padding: 4px;
+  grid-template-columns: 300px 1fr;
+  height: calc(100vh - 200px);
+  min-height: 720px;
+  padding: 6px;
   border: 10px solid var(--cabinet-border);
   border-radius: 18px;
   overflow: hidden;
@@ -1552,6 +1557,7 @@
   border: 1px solid #070604;
   border-radius: 12px;
   overflow-y: auto;
+  overflow-x: hidden;
   background:
     linear-gradient(160deg, rgba(255, 255, 255, 0.06), transparent 32%),
     linear-gradient(var(--breaker-top), var(--bakelite));
