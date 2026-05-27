@@ -10,7 +10,7 @@ export function UsageChart({ history }: { history: UsageHistoryResponse | null }
     if (!ref.current || !history) return;
     const config: ChartConfiguration = {
       type: "line",
-      data: { datasets: [{ label: "Total", data: history.total.map((p) => ({ x: p.timestamp_ms, y: p.value })), borderColor: "#c19b55", backgroundColor: "rgba(193,155,85,0.2)", tension: 0.25 }] },
+      data: { datasets: [{ label: "Total", data: history.totals.map((p) => ({ x: p.timestamp_ms, y: p.value })), borderColor: "#c19b55", backgroundColor: "rgba(193,155,85,0.2)", tension: 0.25 }] },
       options: { responsive: true, parsing: false, scales: { x: { type: "linear" }, y: { beginAtZero: true } } },
     };
     const chart = new Chart(ref.current, config);

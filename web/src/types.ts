@@ -162,4 +162,4 @@ export interface Hook extends HookSummary {
 
 export interface UsageHistoryPoint { timestamp_ms: number; value: number }
 export interface UsageHistorySeries { device_name: string; points: UsageHistoryPoint[] }
-export interface UsageHistoryResponse { series: UsageHistorySeries[]; total: UsageHistoryPoint[]; errors: Array<{ device_name: string; message: string }>; range: string }
+export interface UsageHistoryResponse { series: UsageHistorySeries[]; totals: UsageHistoryPoint[]; errors: Array<{ device_name: string; message: string }>; range: string }
