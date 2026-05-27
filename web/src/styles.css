@@ -1809,100 +1809,123 @@
 }
 
 /* Custom node styling — modeled on .breaker. Compact-by-default,
-   expands inline with the full edit form when you tap the header. */
+   expands inline with the full edit form when you tap the chevron. */
 .fb-node {
-  min-width: 220px;
+  min-width: 240px;
   border: 1px solid #070604;
-  border-radius: 10px;
+  border-radius: 12px;
   background:
-    linear-gradient(160deg, rgba(255, 255, 255, 0.08), transparent 32%),
+    linear-gradient(160deg, rgba(255, 255, 255, 0.07), transparent 28%),
     linear-gradient(var(--breaker-top), var(--bakelite));
   color: var(--text);
   font-family: var(--font-data);
   box-shadow:
     inset 0 0 0 1px rgba(255, 255, 255, 0.05),
-    inset 0 -10px 24px rgba(0, 0, 0, 0.34),
-    0 8px 18px rgba(0, 0, 0, 0.45);
+    inset 0 -14px 32px rgba(0, 0, 0, 0.38),
+    0 12px 24px rgba(0, 0, 0, 0.48);
   user-select: none;
   overflow: hidden;
 }
-.fb-node.compact { min-width: 180px; }
+.fb-node:hover { box-shadow:
+  inset 0 0 0 1px rgba(255, 255, 255, 0.07),
+  inset 0 -14px 32px rgba(0, 0, 0, 0.38),
+  0 14px 28px rgba(0, 0, 0, 0.55); }
+.fb-node.compact { min-width: 240px; }
 .fb-node.compact .fb-node-sockets {
-  padding-top: 4px;
+  padding: 6px 12px 10px;
+  border-top: 1px solid rgba(0, 0, 0, 0.45);
+  background: rgba(0, 0, 0, 0.22);
 }
 .fb-node-trigger { border-top: 3px solid var(--amber); }
 .fb-node-logic   { border-top: 3px solid #a371f7; }
 .fb-node-action  { border-top: 3px solid var(--green); }
 
-/* Header — Automate-style tap-to-expand pill. Title on top, configured value
-   underneath. Whole thing is a button. */
+/* Header — brass label card on top of the breaker body. Drag from anywhere
+   on it; double-click toggles expand. The chevron on the right is a
+   focused expand toggle that won't fire a drag. */
 .fb-node-head {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 12px;
   width: 100%;
-  padding: 8px 10px 8px 12px;
-  border: 0;
+  padding: 10px 8px 10px 12px;
   background: linear-gradient(var(--label-start), var(--label-end));
   color: var(--ink);
-  cursor: pointer;
+  cursor: grab;
   text-align: left;
-  font: inherit;
   box-shadow: inset 0 0 0 1px rgba(66, 43, 20, 0.24);
 }
+.fb-node-head:active { cursor: grabbing; }
 .fb-node.expanded .fb-node-head {
-  border-bottom: 1px solid rgba(0, 0, 0, 0.6);
+  border-bottom: 2px solid rgba(0, 0, 0, 0.55);
 }
-.fb-node-head:hover { filter: brightness(1.04); }
-.fb-node-head:focus-visible { outline: 2px solid rgba(0, 0, 0, 0.4); outline-offset: -3px; }
 
 .fb-node-icon {
-  width: 26px;
-  height: 26px;
+  width: 30px;
+  height: 30px;
   flex: 0 0 auto;
   display: grid;
   place-items: center;
-  border-radius: 6px;
-  background: rgba(0, 0, 0, 0.16);
+  border-radius: 7px;
+  background: rgba(0, 0, 0, 0.18);
   box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.32);
-  font-size: 13px;
+  font-size: 15px;
   color: var(--ink);
 }
-.fb-node-icon-trigger { background: rgba(229, 183, 91, 0.35); }
-.fb-node-icon-logic   { background: rgba(163, 113, 247, 0.35); }
-.fb-node-icon-action  { background: rgba(102, 209, 140, 0.4); }
+.fb-node-icon-trigger { background: rgba(229, 183, 91, 0.42); }
+.fb-node-icon-logic   { background: rgba(163, 113, 247, 0.42); }
+.fb-node-icon-action  { background: rgba(102, 209, 140, 0.5); }
 
 .fb-node-titles {
   flex: 1;
   display: flex;
   flex-direction: column;
-  gap: 1px;
+  gap: 2px;
   min-width: 0;
 }
 .fb-node-title {
-  font-size: 11px;
+  font-size: 10px;
   font-weight: 700;
-  letter-spacing: 0.08em;
+  letter-spacing: 0.12em;
   text-transform: uppercase;
-  color: var(--ink);
+  color: rgba(34, 29, 23, 0.62);
 }
 .fb-node-summary {
-  font-size: 11px;
-  font-family: var(--font-data);
-  color: rgba(34, 29, 23, 0.72);
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: -0.005em;
+  color: var(--ink);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  line-height: 1.15;
 }
 
 .fb-node-chevron {
   flex: 0 0 auto;
-  color: rgba(34, 29, 23, 0.55);
-  font-size: 13px;
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: rgba(34, 29, 23, 0.6);
+  font-size: 14px;
+  cursor: pointer;
+  transition: transform 0.18s ease, background 0.12s ease;
   transform: rotate(-90deg);
-  transition: transform 0.15s ease;
 }
-.fb-node-chevron.open { transform: rotate(0deg); }
+.fb-node-chevron:hover {
+  background: rgba(0, 0, 0, 0.12);
+  color: var(--ink);
+  border-color: rgba(0, 0, 0, 0.3);
+}
+.fb-node-chevron.open {
+  transform: rotate(0deg);
+  background: rgba(0, 0, 0, 0.16);
+  color: var(--ink);
+}
 
 /* Actions row at the bottom of expanded nodes */
 .fb-node-actions {

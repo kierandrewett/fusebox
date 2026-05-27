@@ -83,12 +83,13 @@ export function NodeView({ data, emit }: Props) {
       onPointerDown={swallowOnFormControls}
       onDoubleClick={(e) => e.stopPropagation()}
     >
-      <button
-        type="button"
+      <div
         className="fb-node-head"
-        aria-expanded={expanded}
-        title={expanded ? "Collapse block" : "Expand to edit"}
-        onClick={toggleExpanded}
+        onDoubleClick={(e) => {
+          e.stopPropagation();
+          toggleExpanded();
+        }}
+        title="Drag to move · double-click or use chevron to expand"
       >
         <span className={`fb-node-icon fb-node-icon-${tpl.category}`} aria-hidden="true">
           {iconFor(data.config.kind)}
@@ -97,8 +98,16 @@ export function NodeView({ data, emit }: Props) {
           <span className="fb-node-title">{tpl.label}</span>
           <span className="fb-node-summary">{summary}</span>
         </span>
-        <span className={`fb-node-chevron ${expanded ? "open" : ""}`} aria-hidden="true">▾</span>
-      </button>
+        <button
+          type="button"
+          className={`fb-node-chevron ${expanded ? "open" : ""}`}
+          aria-expanded={expanded}
+          aria-label={expanded ? "Collapse block" : "Expand block"}
+          onClick={toggleExpanded}
+        >
+          ▾
+        </button>
+      </div>
       {expanded ? (
         <>
           <div className="fb-node-body">{renderBody(data.config, update, ctx)}</div>
