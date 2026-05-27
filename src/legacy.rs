@@ -39,15 +39,15 @@ use tracing_subscriber::EnvFilter;
 
 
 
-const STATE_VERSION: u32 = 2;
-const ALL_TIME_USAGE_START_YEAR: i32 = 2020;
-const TAPO_HANDSHAKE_RETRY_ATTEMPTS: usize = 3;
-const TAPO_HANDSHAKE_RETRY_DELAY: Duration = Duration::from_millis(350);
-const SWITCH_SOUND_BYTES: &[u8] = include_bytes!("../assets/348224__tbrook__switch-light-06.wav");
-const APP_BUNDLE_JS: &str = include_str!("../web/dist/app.js");
+pub(crate) const STATE_VERSION: u32 = 2;
+pub(crate) const ALL_TIME_USAGE_START_YEAR: i32 = 2020;
+pub(crate) const TAPO_HANDSHAKE_RETRY_ATTEMPTS: usize = 3;
+pub(crate) const TAPO_HANDSHAKE_RETRY_DELAY: Duration = Duration::from_millis(350);
+pub(crate) const SWITCH_SOUND_BYTES: &[u8] = include_bytes!("../assets/348224__tbrook__switch-light-06.wav");
+pub(crate) const APP_BUNDLE_JS: &str = include_str!("../web/dist/app.js");
 
 #[derive(Debug, Clone)]
-struct AppState {
+pub(crate) struct AppState {
     controller: TapoController,
     credentials: TapoCredentials,
     devices: Arc<RwLock<BTreeMap<String, ManagedDevice>>>,
@@ -68,7 +68,7 @@ struct AppState {
 }
 
 #[derive(Debug, Clone)]
-struct ManagedDevice {
+pub(crate) struct ManagedDevice {
     name: String,
     config: DeviceConfig,
     snapshot: Option<DeviceSnapshot>,
@@ -85,10 +85,10 @@ struct ManagedDevice {
     offline_announced: bool,
 }
 
-const DEVICE_OFFLINE_FAILURE_THRESHOLD: u32 = 3;
+pub(crate) const DEVICE_OFFLINE_FAILURE_THRESHOLD: u32 = 3;
 
 #[derive(Debug, Clone, Serialize)]
-struct DeviceListResponse {
+pub(crate) struct DeviceListResponse {
     devices: Vec<DeviceView>,
     updated_at_ms: u128,
     energy_price_pence_per_kwh: f64,
@@ -96,7 +96,7 @@ struct DeviceListResponse {
 }
 
 #[derive(Debug, Clone, Serialize)]
-struct DeviceView {
+pub(crate) struct DeviceView {
     name: String,
     ip: String,
     configured_model: DeviceModel,
@@ -117,7 +117,7 @@ struct DeviceView {
 }
 
 #[derive(Debug, Clone, Serialize)]
-struct EnergyView {
+pub(crate) struct EnergyView {
     current_power_mw: Option<u64>,
     current_power_w: Option<u64>,
     today_energy_wh: u64,
@@ -129,7 +129,7 @@ struct EnergyView {
 }
 
 #[derive(Debug, Clone, Serialize)]
-struct UsageHistoryResponse {
+pub(crate) struct UsageHistoryResponse {
     series: Vec<UsageHistorySeries>,
     totals: Vec<UsageHistoryPoint>,
     errors: Vec<UsageHistoryError>,
@@ -143,30 +143,30 @@ struct UsageHistoryResponse {
 }
 
 #[derive(Debug, Clone, Serialize)]
-struct UsageHistorySeries {
+pub(crate) struct UsageHistorySeries {
     device_name: String,
     points: Vec<UsageHistoryPoint>,
 }
 
 #[derive(Debug, Clone, Serialize)]
-struct UsageHistoryPoint {
+pub(crate) struct UsageHistoryPoint {
     timestamp_ms: i64,
     value: f64,
 }
 
 #[derive(Debug, Clone, Serialize)]
-struct UsageHistoryError {
+pub(crate) struct UsageHistoryError {
     device_name: String,
     message: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
-struct UsageHistoryQuery {
+pub(crate) struct UsageHistoryQuery {
     range: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy)]
-struct UsageHistoryRange {
+pub(crate) struct UsageHistoryRange {
     key: &'static str,
     label: &'static str,
     interval_label: &'static str,
@@ -176,14 +176,14 @@ struct UsageHistoryRange {
 }
 
 #[derive(Debug, Clone, Copy)]
-enum UsageHistoryStart {
+pub(crate) enum UsageHistoryStart {
     Duration(ChronoDuration),
     YearToDate,
     AllTime,
 }
 
 #[derive(Debug, Clone, Copy)]
-enum UsageHistoryKind {
+pub(crate) enum UsageHistoryKind {
     Power {
         interval: PowerExportInterval,
         range_limit: ChronoDuration,
@@ -193,20 +193,20 @@ enum UsageHistoryKind {
 }
 
 #[derive(Debug, Clone)]
-struct ExportDevice {
+pub(crate) struct ExportDevice {
     name: String,
     config: DeviceConfig,
 }
 
 #[derive(Debug, Clone)]
-struct ExportSpec {
+pub(crate) struct ExportSpec {
     sheet_name: &'static str,
     value_format: &'static str,
     kind: ExportKind,
 }
 
 #[derive(Debug, Clone)]
-enum ExportKind {
+pub(crate) enum ExportKind {
     EnergyHourly {
         start_date: NaiveDate,
         end_date: NaiveDate,
@@ -226,41 +226,41 @@ enum ExportKind {
 }
 
 #[derive(Debug, Clone)]
-struct ExportTable {
+pub(crate) struct ExportTable {
     sheet_name: &'static str,
     value_format: &'static str,
     rows: Vec<ExportRow>,
 }
 
 #[derive(Debug, Clone)]
-struct ExportRow {
+pub(crate) struct ExportRow {
     timestamp: DateTime<Utc>,
     values: BTreeMap<String, f64>,
 }
 
 #[derive(Debug, Clone)]
-struct ExportError {
+pub(crate) struct ExportError {
     sheet_name: &'static str,
     device_name: String,
     message: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
-struct SetPowerRequest {
+pub(crate) struct SetPowerRequest {
     on: bool,
     #[serde(default)]
     duration_seconds: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
-struct ToggleDeviceRequest {
+pub(crate) struct ToggleDeviceRequest {
     #[serde(default)]
     duration_seconds: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
-enum ScheduleAction {
+pub(crate) enum ScheduleAction {
     On,
     Off,
     Toggle,
@@ -268,16 +268,16 @@ enum ScheduleAction {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
-enum ScheduleKind {
+pub(crate) enum ScheduleKind {
     #[default]
     Cron,
     Interval,
 }
 
-const MIN_INTERVAL_CYCLE_SECONDS: u64 = 60;
+pub(crate) const MIN_INTERVAL_CYCLE_SECONDS: u64 = 60;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct ScheduleConfig {
+pub(crate) struct ScheduleConfig {
     id: String,
     device_name: String,
     #[serde(default)]
@@ -308,13 +308,13 @@ struct ScheduleConfig {
     last_error: Option<String>,
 }
 
-fn default_true() -> bool {
+pub(crate) fn default_true() -> bool {
     true
 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
-enum CreateScheduleRequest {
+pub(crate) enum CreateScheduleRequest {
     Cron {
         device_name: String,
         cron: String,
@@ -343,7 +343,7 @@ enum CreateScheduleRequest {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-struct UpdateScheduleRequest {
+pub(crate) struct UpdateScheduleRequest {
     #[serde(default)]
     enabled: Option<bool>,
     #[serde(default)]
@@ -363,7 +363,7 @@ struct UpdateScheduleRequest {
 }
 
 #[derive(Debug, Clone, Serialize)]
-struct ScheduleView {
+pub(crate) struct ScheduleView {
     id: String,
     device_name: String,
     kind: ScheduleKind,
@@ -382,21 +382,21 @@ struct ScheduleView {
     next_fire_at_ms: Option<i64>,
 }
 
-const MIN_CONDITION_POLL_SECONDS: u64 = 5;
-const MAX_CONDITION_POLL_SECONDS: u64 = 3_600;
-const DEFAULT_CONDITION_POLL_SECONDS: u64 = 60;
-const CONDITION_HTTP_TIMEOUT: Duration = Duration::from_secs(10);
-const MAX_CONDITION_BODY_BYTES: usize = 256 * 1024;
+pub(crate) const MIN_CONDITION_POLL_SECONDS: u64 = 5;
+pub(crate) const MAX_CONDITION_POLL_SECONDS: u64 = 3_600;
+pub(crate) const DEFAULT_CONDITION_POLL_SECONDS: u64 = 60;
+pub(crate) const CONDITION_HTTP_TIMEOUT: Duration = Duration::from_secs(10);
+pub(crate) const MAX_CONDITION_BODY_BYTES: usize = 256 * 1024;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
-enum ConditionAction {
+pub(crate) enum ConditionAction {
     On,
     Off,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct ConditionConfig {
+pub(crate) struct ConditionConfig {
     id: String,
     name: String,
     #[serde(default)]
@@ -451,20 +451,20 @@ struct ConditionConfig {
     pending_since_ms: Option<u128>,
 }
 
-fn default_http_method() -> String {
+pub(crate) fn default_http_method() -> String {
     "GET".to_string()
 }
 
-fn default_status_match() -> String {
+pub(crate) fn default_status_match() -> String {
     "200-299".to_string()
 }
 
-fn default_condition_poll_seconds() -> u64 {
+pub(crate) fn default_condition_poll_seconds() -> u64 {
     DEFAULT_CONDITION_POLL_SECONDS
 }
 
 #[derive(Debug, Clone, Deserialize)]
-struct CreateConditionRequest {
+pub(crate) struct CreateConditionRequest {
     name: String,
     device_name: String,
     url: String,
@@ -491,7 +491,7 @@ struct CreateConditionRequest {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-struct UpdateConditionRequest {
+pub(crate) struct UpdateConditionRequest {
     #[serde(default)]
     name: Option<String>,
     #[serde(default)]
@@ -520,7 +520,7 @@ struct UpdateConditionRequest {
     min_stable_seconds: Option<u64>,
 }
 
-fn deserialize_optional_condition_action<'de, D>(
+pub(crate) fn deserialize_optional_condition_action<'de, D>(
     deserializer: D,
 ) -> Result<Option<Option<ConditionAction>>, D::Error>
 where
@@ -530,7 +530,7 @@ where
 }
 
 #[derive(Debug, Clone, Serialize)]
-struct ConditionView {
+pub(crate) struct ConditionView {
     id: String,
     name: String,
     device_name: String,
@@ -558,17 +558,17 @@ struct ConditionView {
 }
 
 #[derive(Debug, Clone, Serialize)]
-struct ConditionListResponse {
+pub(crate) struct ConditionListResponse {
     conditions: Vec<ConditionView>,
 }
 
 #[derive(Debug, Clone, Serialize)]
-struct ScheduleListResponse {
+pub(crate) struct ScheduleListResponse {
     schedules: Vec<ScheduleView>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct PersistedState {
+pub(crate) struct PersistedState {
     version: u32,
     devices: BTreeMap<String, DeviceConfig>,
     #[serde(default)]
@@ -584,7 +584,7 @@ struct PersistedState {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-struct DeviceIntent {
+pub(crate) struct DeviceIntent {
     #[serde(default)]
     schedule_intent: Option<bool>,
     #[serde(default)]
@@ -596,13 +596,13 @@ struct DeviceIntent {
     manual_override_until_ms: Option<u128>,
 }
 
-const DEFAULT_MANUAL_OVERRIDE_SECONDS: u64 = 3600;
-const MIN_MANUAL_OVERRIDE_SECONDS: u64 = 30;
-const MAX_MANUAL_OVERRIDE_SECONDS: u64 = 24 * 3600;
+pub(crate) const DEFAULT_MANUAL_OVERRIDE_SECONDS: u64 = 3600;
+pub(crate) const MIN_MANUAL_OVERRIDE_SECONDS: u64 = 30;
+pub(crate) const MAX_MANUAL_OVERRIDE_SECONDS: u64 = 24 * 3600;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
-enum HookEvent {
+pub(crate) enum HookEvent {
     On,
     Off,
     Online,
@@ -611,7 +611,7 @@ enum HookEvent {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
-enum HookSource {
+pub(crate) enum HookSource {
     Manual,
     Schedule,
     Condition,
@@ -620,7 +620,7 @@ enum HookSource {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct HookConfig {
+pub(crate) struct HookConfig {
     id: String,
     name: String,
     #[serde(default = "default_true")]
@@ -655,7 +655,7 @@ struct HookConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-enum AutomationNodeConfig {
+pub(crate) enum AutomationNodeConfig {
     CronTrigger { cron_trigger: CronTriggerCfg },
     IntervalTrigger { interval_trigger: IntervalTriggerCfg },
     DeviceEventTrigger { device_event_trigger: DeviceEventTriggerCfg },
@@ -670,12 +670,12 @@ enum AutomationNodeConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-struct CronTriggerCfg {
+pub(crate) struct CronTriggerCfg {
     cron: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-struct IntervalTriggerCfg {
+pub(crate) struct IntervalTriggerCfg {
     on_seconds: u64,
     off_seconds: u64,
     start_action: ScheduleAction,
@@ -684,13 +684,13 @@ struct IntervalTriggerCfg {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-struct DeviceEventTriggerCfg {
+pub(crate) struct DeviceEventTriggerCfg {
     device_name: String,
     event: HookEvent,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-struct HttpProbeCfg {
+pub(crate) struct HttpProbeCfg {
     url: String,
     #[serde(default = "default_http_method")]
     method: String,
@@ -709,28 +709,28 @@ struct HttpProbeCfg {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-struct DebounceCfg {
+pub(crate) struct DebounceCfg {
     hold_seconds: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-struct SetDeviceCfg {
+pub(crate) struct SetDeviceCfg {
     device_name: String,
     action: ScheduleAction,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-struct ToggleDeviceCfg {
+pub(crate) struct ToggleDeviceCfg {
     device_name: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-struct FireHookCfg {
+pub(crate) struct FireHookCfg {
     hook_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct AutomationNode {
+pub(crate) struct AutomationNode {
     id: String,
     config: AutomationNodeConfig,
     #[serde(default)]
@@ -740,14 +740,14 @@ struct AutomationNode {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct AutomationEdge {
+pub(crate) struct AutomationEdge {
     id: String,
     source_node: String,
     target_node: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-struct NodeRuntimeState {
+pub(crate) struct NodeRuntimeState {
     #[serde(default)]
     last_value: Option<bool>,
     #[serde(default)]
@@ -765,7 +765,7 @@ struct NodeRuntimeState {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-struct AutomationStatus {
+pub(crate) struct AutomationStatus {
     #[serde(default)]
     last_fired_at_ms: Option<u128>,
     #[serde(default)]
@@ -775,7 +775,7 @@ struct AutomationStatus {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct Automation {
+pub(crate) struct Automation {
     id: String,
     name: String,
     #[serde(default = "default_true")]
@@ -791,7 +791,7 @@ struct Automation {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-struct CreateAutomationRequest {
+pub(crate) struct CreateAutomationRequest {
     name: String,
     #[serde(default = "default_true")]
     enabled: bool,
@@ -802,7 +802,7 @@ struct CreateAutomationRequest {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-struct UpdateAutomationRequest {
+pub(crate) struct UpdateAutomationRequest {
     #[serde(default)]
     name: Option<String>,
     #[serde(default)]
@@ -814,7 +814,7 @@ struct UpdateAutomationRequest {
 }
 
 #[derive(Debug, Clone, Serialize)]
-struct AutomationListResponse {
+pub(crate) struct AutomationListResponse {
     automations: Vec<Automation>,
 }
 
@@ -891,7 +891,7 @@ pub(crate) async fn run() -> Result<()> {
     Ok(())
 }
 
-fn init_logging() {
+pub(crate) fn init_logging() {
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
 
     tracing_subscriber::fmt().with_env_filter(filter).init();
@@ -995,15 +995,15 @@ impl ManagedDevice {
     }
 }
 
-async fn index() -> Html<&'static str> {
+pub(crate) async fn index() -> Html<&'static str> {
     Html(INDEX_HTML)
 }
 
-async fn favicon() -> StatusCode {
+pub(crate) async fn favicon() -> StatusCode {
     StatusCode::NO_CONTENT
 }
 
-async fn switch_sound() -> Response {
+pub(crate) async fn switch_sound() -> Response {
     Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "audio/wav")
@@ -1012,7 +1012,7 @@ async fn switch_sound() -> Response {
         .expect("static switch sound response should be valid")
 }
 
-async fn app_bundle() -> Response {
+pub(crate) async fn app_bundle() -> Response {
     Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "application/javascript; charset=utf-8")
@@ -1021,15 +1021,15 @@ async fn app_bundle() -> Response {
         .expect("static app bundle response should be valid")
 }
 
-async fn health() -> Json<serde_json::Value> {
+pub(crate) async fn health() -> Json<serde_json::Value> {
     Json(serde_json::json!({ "ok": true }))
 }
 
-async fn list_devices(State(state): State<AppState>) -> Json<DeviceListResponse> {
+pub(crate) async fn list_devices(State(state): State<AppState>) -> Json<DeviceListResponse> {
     Json(device_list_response(&state, None).await)
 }
 
-async fn scan_devices(State(state): State<AppState>) -> Json<DeviceListResponse> {
+pub(crate) async fn scan_devices(State(state): State<AppState>) -> Json<DeviceListResponse> {
     let scan_error = match scan_and_refresh(&state).await {
         Ok(()) => None,
         Err(error) => Some(error.to_string()),
@@ -1041,11 +1041,11 @@ async fn scan_devices(State(state): State<AppState>) -> Json<DeviceListResponse>
     Json(response)
 }
 
-async fn devices_websocket(State(state): State<AppState>, websocket: WebSocketUpgrade) -> Response {
+pub(crate) async fn devices_websocket(State(state): State<AppState>, websocket: WebSocketUpgrade) -> Response {
     websocket.on_upgrade(|socket| stream_device_events(socket, state))
 }
 
-async fn stream_device_events(mut socket: WebSocket, state: AppState) {
+pub(crate) async fn stream_device_events(mut socket: WebSocket, state: AppState) {
     let mut receiver = state.device_events.subscribe();
 
     if send_device_event(&mut socket, device_list_response(&state, None).await)
@@ -1078,7 +1078,7 @@ async fn stream_device_events(mut socket: WebSocket, state: AppState) {
     }
 }
 
-async fn send_device_event(socket: &mut WebSocket, response: DeviceListResponse) -> Result<()> {
+pub(crate) async fn send_device_event(socket: &mut WebSocket, response: DeviceListResponse) -> Result<()> {
     let payload = serde_json::to_string(&response).context("failed to serialize device event")?;
     socket
         .send(Message::Text(payload.into()))
@@ -1086,14 +1086,14 @@ async fn send_device_event(socket: &mut WebSocket, response: DeviceListResponse)
         .context("failed to send device event")
 }
 
-async fn energy_history(
+pub(crate) async fn energy_history(
     State(state): State<AppState>,
     Query(query): Query<UsageHistoryQuery>,
 ) -> Json<UsageHistoryResponse> {
     Json(build_usage_history(&state, query.range.as_deref()).await)
 }
 
-async fn export_energy_workbook(State(state): State<AppState>) -> Result<Response, AppError> {
+pub(crate) async fn export_energy_workbook(State(state): State<AppState>) -> Result<Response, AppError> {
     let buffer = build_energy_export_workbook(&state).await?;
 
     Ok((
@@ -1112,7 +1112,7 @@ async fn export_energy_workbook(State(state): State<AppState>) -> Result<Respons
         .into_response())
 }
 
-async fn toggle_device(
+pub(crate) async fn toggle_device(
     State(state): State<AppState>,
     Path(name): Path<String>,
     body: Option<Json<ToggleDeviceRequest>>,
@@ -1141,7 +1141,7 @@ async fn toggle_device(
         .map_err(AppError)
 }
 
-async fn set_device_power(
+pub(crate) async fn set_device_power(
     State(state): State<AppState>,
     Path(name): Path<String>,
     Json(request): Json<SetPowerRequest>,
@@ -1165,7 +1165,7 @@ async fn set_device_power(
         .map_err(AppError)
 }
 
-async fn release_device_override(
+pub(crate) async fn release_device_override(
     State(state): State<AppState>,
     Path(name): Path<String>,
 ) -> Result<Json<DeviceView>, AppError> {
@@ -1188,7 +1188,7 @@ async fn release_device_override(
         .map_err(AppError)
 }
 
-async fn list_schedules(State(state): State<AppState>) -> Json<ScheduleListResponse> {
+pub(crate) async fn list_schedules(State(state): State<AppState>) -> Json<ScheduleListResponse> {
     let schedules = state.schedules.read().await;
     let mut views: Vec<ScheduleView> = schedules.values().map(schedule_view).collect();
     views.sort_by(|a, b| {
@@ -1200,7 +1200,7 @@ async fn list_schedules(State(state): State<AppState>) -> Json<ScheduleListRespo
     Json(ScheduleListResponse { schedules: views })
 }
 
-async fn create_schedule(
+pub(crate) async fn create_schedule(
     State(state): State<AppState>,
     Json(request): Json<CreateScheduleRequest>,
 ) -> Result<(StatusCode, Json<ScheduleView>), AppError> {
@@ -1278,7 +1278,7 @@ async fn create_schedule(
     Ok((StatusCode::CREATED, Json(schedule_view(&schedule))))
 }
 
-async fn ensure_device_exists(state: &AppState, device_name: &str) -> Result<(), AppError> {
+pub(crate) async fn ensure_device_exists(state: &AppState, device_name: &str) -> Result<(), AppError> {
     let devices = state.devices.read().await;
     if !devices.contains_key(device_name) {
         return Err(AppError(anyhow!("unknown device '{}'", device_name)));
@@ -1286,7 +1286,7 @@ async fn ensure_device_exists(state: &AppState, device_name: &str) -> Result<(),
     Ok(())
 }
 
-async fn ensure_conditions_exist(
+pub(crate) async fn ensure_conditions_exist(
     state: &AppState,
     ids: &[String],
 ) -> Result<Vec<String>, AppError> {
@@ -1306,7 +1306,7 @@ async fn ensure_conditions_exist(
     Ok(deduped)
 }
 
-fn validate_interval(on_seconds: u64, off_seconds: u64) -> Result<()> {
+pub(crate) fn validate_interval(on_seconds: u64, off_seconds: u64) -> Result<()> {
     let cycle = on_seconds.saturating_add(off_seconds);
     if cycle < MIN_INTERVAL_CYCLE_SECONDS {
         return Err(anyhow!(
@@ -1319,7 +1319,7 @@ fn validate_interval(on_seconds: u64, off_seconds: u64) -> Result<()> {
     Ok(())
 }
 
-async fn delete_schedule(
+pub(crate) async fn delete_schedule(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, AppError> {
@@ -1336,7 +1336,7 @@ async fn delete_schedule(
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn update_schedule(
+pub(crate) async fn update_schedule(
     State(state): State<AppState>,
     Path(id): Path<String>,
     Json(request): Json<UpdateScheduleRequest>,
@@ -1400,7 +1400,7 @@ async fn update_schedule(
     Ok(Json(schedule_view(&updated)))
 }
 
-fn non_empty_label(label: String) -> Option<String> {
+pub(crate) fn non_empty_label(label: String) -> Option<String> {
     let trimmed = label.trim();
     if trimmed.is_empty() {
         None
@@ -1409,7 +1409,7 @@ fn non_empty_label(label: String) -> Option<String> {
     }
 }
 
-fn normalize_cron(expression: &str) -> Result<String> {
+pub(crate) fn normalize_cron(expression: &str) -> Result<String> {
     let trimmed = expression.trim();
     if trimmed.is_empty() {
         return Err(anyhow!("cron expression is empty"));
@@ -1434,13 +1434,13 @@ fn normalize_cron(expression: &str) -> Result<String> {
     parse_cron(&candidate).map(|_| candidate)
 }
 
-fn parse_cron(expression: &str) -> Result<CronSchedule> {
+pub(crate) fn parse_cron(expression: &str) -> Result<CronSchedule> {
     let translated = translate_cron_to_crate_format(expression);
     CronSchedule::from_str(&translated)
         .map_err(|error| anyhow!("invalid cron expression: {error}"))
 }
 
-fn translate_cron_to_crate_format(expression: &str) -> String {
+pub(crate) fn translate_cron_to_crate_format(expression: &str) -> String {
     let trimmed = expression.trim();
     if trimmed.starts_with('@') {
         return trimmed.to_string();
@@ -1460,7 +1460,7 @@ fn translate_cron_to_crate_format(expression: &str) -> String {
     fields.join(" ")
 }
 
-fn translate_dow_field(field: &str) -> String {
+pub(crate) fn translate_dow_field(field: &str) -> String {
     field
         .split(',')
         .map(translate_dow_part)
@@ -1468,7 +1468,7 @@ fn translate_dow_field(field: &str) -> String {
         .join(",")
 }
 
-fn translate_dow_part(part: &str) -> String {
+pub(crate) fn translate_dow_part(part: &str) -> String {
     let trimmed = part.trim();
     if let Some((head, step)) = trimmed.split_once('/') {
         format!("{}/{}", translate_dow_head(head), step.trim())
@@ -1477,7 +1477,7 @@ fn translate_dow_part(part: &str) -> String {
     }
 }
 
-fn translate_dow_head(value: &str) -> String {
+pub(crate) fn translate_dow_head(value: &str) -> String {
     let trimmed = value.trim();
     if trimmed == "*" || trimmed == "?" {
         return trimmed.to_string();
@@ -1492,7 +1492,7 @@ fn translate_dow_head(value: &str) -> String {
     translate_dow_value(trimmed)
 }
 
-fn translate_dow_value(value: &str) -> String {
+pub(crate) fn translate_dow_value(value: &str) -> String {
     let trimmed = value.trim();
     if let Ok(n) = trimmed.parse::<u32>() {
         return ((n % 7) + 1).to_string();
@@ -1500,14 +1500,14 @@ fn translate_dow_value(value: &str) -> String {
     trimmed.to_string()
 }
 
-static SCHEDULE_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
+pub(crate) static SCHEDULE_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-fn new_schedule_id() -> String {
+pub(crate) fn new_schedule_id() -> String {
     let seq = SCHEDULE_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
     format!("{:x}-{:x}", now_ms(), seq)
 }
 
-fn schedule_view(schedule: &ScheduleConfig) -> ScheduleView {
+pub(crate) fn schedule_view(schedule: &ScheduleConfig) -> ScheduleView {
     let next_fire_at_ms = match schedule.kind {
         ScheduleKind::Cron => schedule
             .cron
@@ -1538,7 +1538,7 @@ fn schedule_view(schedule: &ScheduleConfig) -> ScheduleView {
     }
 }
 
-fn interval_phase_at(schedule: &ScheduleConfig, at_ms: u128) -> Option<ScheduleAction> {
+pub(crate) fn interval_phase_at(schedule: &ScheduleConfig, at_ms: u128) -> Option<ScheduleAction> {
     let on_seconds = schedule.on_seconds?;
     let off_seconds = schedule.off_seconds?;
     let start_action = schedule.start_action?;
@@ -1570,7 +1570,7 @@ fn interval_phase_at(schedule: &ScheduleConfig, at_ms: u128) -> Option<ScheduleA
     }
 }
 
-fn next_interval_fire_ms(schedule: &ScheduleConfig, now: u128) -> Option<u128> {
+pub(crate) fn next_interval_fire_ms(schedule: &ScheduleConfig, now: u128) -> Option<u128> {
     let on_seconds = schedule.on_seconds?;
     let off_seconds = schedule.off_seconds?;
     let start_action = schedule.start_action?;
@@ -1598,14 +1598,14 @@ fn next_interval_fire_ms(schedule: &ScheduleConfig, now: u128) -> Option<u128> {
     Some(now + into_cycle)
 }
 
-async fn list_conditions(State(state): State<AppState>) -> Json<ConditionListResponse> {
+pub(crate) async fn list_conditions(State(state): State<AppState>) -> Json<ConditionListResponse> {
     let conditions = state.conditions.read().await;
     let mut views: Vec<ConditionView> = conditions.values().map(condition_view).collect();
     views.sort_by(|a, b| a.name.cmp(&b.name).then(a.created_at_ms.cmp(&b.created_at_ms)));
     Json(ConditionListResponse { conditions: views })
 }
 
-async fn create_condition(
+pub(crate) async fn create_condition(
     State(state): State<AppState>,
     Json(request): Json<CreateConditionRequest>,
 ) -> Result<(StatusCode, Json<ConditionView>), AppError> {
@@ -1664,7 +1664,7 @@ async fn create_condition(
     Ok((StatusCode::CREATED, Json(view)))
 }
 
-async fn update_condition(
+pub(crate) async fn update_condition(
     State(state): State<AppState>,
     Path(id): Path<String>,
     Json(request): Json<UpdateConditionRequest>,
@@ -1761,7 +1761,7 @@ async fn update_condition(
     Ok(Json(view))
 }
 
-async fn delete_condition(
+pub(crate) async fn delete_condition(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, AppError> {
@@ -1784,7 +1784,7 @@ async fn delete_condition(
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn probe_condition(
+pub(crate) async fn probe_condition(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<ConditionView>, AppError> {
@@ -1804,7 +1804,7 @@ async fn probe_condition(
     ))
 }
 
-fn condition_view(condition: &ConditionConfig) -> ConditionView {
+pub(crate) fn condition_view(condition: &ConditionConfig) -> ConditionView {
     ConditionView {
         id: condition.id.clone(),
         name: condition.name.clone(),
@@ -1833,15 +1833,15 @@ fn condition_view(condition: &ConditionConfig) -> ConditionView {
     }
 }
 
-static CONDITION_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
+pub(crate) static CONDITION_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-fn new_condition_id() -> String {
+pub(crate) fn new_condition_id() -> String {
     let seq = CONDITION_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
     format!("c{:x}-{:x}", now_ms(), seq)
 }
 
 #[derive(Debug, Clone, Deserialize)]
-struct CreateHookRequest {
+pub(crate) struct CreateHookRequest {
     name: String,
     url: String,
     #[serde(default = "default_http_method")]
@@ -1859,7 +1859,7 @@ struct CreateHookRequest {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-struct UpdateHookRequest {
+pub(crate) struct UpdateHookRequest {
     #[serde(default)]
     name: Option<String>,
     #[serde(default)]
@@ -1879,7 +1879,7 @@ struct UpdateHookRequest {
 }
 
 #[derive(Debug, Clone, Serialize)]
-struct HookView {
+pub(crate) struct HookView {
     id: String,
     name: String,
     enabled: bool,
@@ -1897,11 +1897,11 @@ struct HookView {
 }
 
 #[derive(Debug, Clone, Serialize)]
-struct HookListResponse {
+pub(crate) struct HookListResponse {
     hooks: Vec<HookView>,
 }
 
-fn hook_view(hook: &HookConfig) -> HookView {
+pub(crate) fn hook_view(hook: &HookConfig) -> HookView {
     HookView {
         id: hook.id.clone(),
         name: hook.name.clone(),
@@ -1920,21 +1920,21 @@ fn hook_view(hook: &HookConfig) -> HookView {
     }
 }
 
-static HOOK_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
+pub(crate) static HOOK_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-fn new_hook_id() -> String {
+pub(crate) fn new_hook_id() -> String {
     let seq = HOOK_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
     format!("h{:x}-{:x}", now_ms(), seq)
 }
 
-async fn list_hooks(State(state): State<AppState>) -> Json<HookListResponse> {
+pub(crate) async fn list_hooks(State(state): State<AppState>) -> Json<HookListResponse> {
     let hooks = state.hooks.read().await;
     let mut views: Vec<HookView> = hooks.values().map(hook_view).collect();
     views.sort_by(|a, b| a.name.cmp(&b.name).then(a.created_at_ms.cmp(&b.created_at_ms)));
     Json(HookListResponse { hooks: views })
 }
 
-async fn create_hook(
+pub(crate) async fn create_hook(
     State(state): State<AppState>,
     Json(request): Json<CreateHookRequest>,
 ) -> Result<(StatusCode, Json<HookView>), AppError> {
@@ -1979,7 +1979,7 @@ async fn create_hook(
     Ok((StatusCode::CREATED, Json(view)))
 }
 
-async fn update_hook(
+pub(crate) async fn update_hook(
     State(state): State<AppState>,
     Path(id): Path<String>,
     Json(request): Json<UpdateHookRequest>,
@@ -2040,7 +2040,7 @@ async fn update_hook(
     Ok(Json(view))
 }
 
-async fn delete_hook(
+pub(crate) async fn delete_hook(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, AppError> {
@@ -2055,7 +2055,7 @@ async fn delete_hook(
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn test_hook(
+pub(crate) async fn test_hook(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<HookView>, AppError> {
@@ -2091,20 +2091,20 @@ async fn test_hook(
 
 // ---------- Automation HTTP handlers ----------
 
-fn new_automation_id() -> String {
+pub(crate) fn new_automation_id() -> String {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
     format!("auto-{}-{}", now_ms(), n)
 }
 
-async fn list_automations(State(state): State<AppState>) -> Json<AutomationListResponse> {
+pub(crate) async fn list_automations(State(state): State<AppState>) -> Json<AutomationListResponse> {
     let automations = state.automations.read().await;
     let mut list: Vec<Automation> = automations.values().cloned().collect();
     list.sort_by(|a, b| a.created_at_ms.cmp(&b.created_at_ms));
     Json(AutomationListResponse { automations: list })
 }
 
-async fn create_automation(
+pub(crate) async fn create_automation(
     State(state): State<AppState>,
     Json(request): Json<CreateAutomationRequest>,
 ) -> Result<(StatusCode, Json<Automation>), AppError> {
@@ -2134,7 +2134,7 @@ async fn create_automation(
     Ok((StatusCode::CREATED, Json(automation)))
 }
 
-async fn update_automation(
+pub(crate) async fn update_automation(
     State(state): State<AppState>,
     Path(id): Path<String>,
     Json(request): Json<UpdateAutomationRequest>,
@@ -2188,7 +2188,7 @@ async fn update_automation(
     Ok(Json(updated))
 }
 
-async fn delete_automation(
+pub(crate) async fn delete_automation(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, AppError> {
@@ -2205,7 +2205,7 @@ async fn delete_automation(
     Ok(StatusCode::NO_CONTENT)
 }
 
-fn validate_automation_graph(nodes: &[AutomationNode], edges: &[AutomationEdge]) -> Result<()> {
+pub(crate) fn validate_automation_graph(nodes: &[AutomationNode], edges: &[AutomationEdge]) -> Result<()> {
     use std::collections::HashSet;
     let mut ids: HashSet<&str> = HashSet::new();
     for n in nodes {
@@ -2243,7 +2243,7 @@ fn validate_automation_graph(nodes: &[AutomationNode], edges: &[AutomationEdge])
     Ok(())
 }
 
-fn has_cycle_dfs<'a>(
+pub(crate) fn has_cycle_dfs<'a>(
     node: &'a str,
     adj: &BTreeMap<&'a str, Vec<&'a str>>,
     state: &mut BTreeMap<&'a str, u8>,
@@ -2266,7 +2266,7 @@ fn has_cycle_dfs<'a>(
     false
 }
 
-fn validate_node_config(config: &AutomationNodeConfig) -> Result<()> {
+pub(crate) fn validate_node_config(config: &AutomationNodeConfig) -> Result<()> {
     match config {
         AutomationNodeConfig::CronTrigger { cron_trigger } => {
             parse_cron(&cron_trigger.cron)
@@ -2316,13 +2316,13 @@ fn validate_node_config(config: &AutomationNodeConfig) -> Result<()> {
     Ok(())
 }
 
-fn validate_http_method(method: &str) -> Result<()> {
+pub(crate) fn validate_http_method(method: &str) -> Result<()> {
     HttpMethod::from_bytes(method.trim().to_uppercase().as_bytes())
         .map(|_| ())
         .map_err(|error| anyhow!("invalid HTTP method '{method}': {error}"))
 }
 
-fn validate_url(url: &str) -> Result<()> {
+pub(crate) fn validate_url(url: &str) -> Result<()> {
     let trimmed = url.trim();
     if !trimmed.starts_with("http://") && !trimmed.starts_with("https://") {
         return Err(anyhow!("URL must start with http:// or https://"));
@@ -2330,7 +2330,7 @@ fn validate_url(url: &str) -> Result<()> {
     Ok(())
 }
 
-fn clamp_poll_seconds(value: u64) -> Result<u64> {
+pub(crate) fn clamp_poll_seconds(value: u64) -> Result<u64> {
     if !(MIN_CONDITION_POLL_SECONDS..=MAX_CONDITION_POLL_SECONDS).contains(&value) {
         return Err(anyhow!(
             "poll_seconds must be between {MIN_CONDITION_POLL_SECONDS} and {MAX_CONDITION_POLL_SECONDS} (got {value})"
@@ -2339,7 +2339,7 @@ fn clamp_poll_seconds(value: u64) -> Result<u64> {
     Ok(value)
 }
 
-fn parse_status_match(expression: &str) -> Result<Vec<std::ops::RangeInclusive<u16>>> {
+pub(crate) fn parse_status_match(expression: &str) -> Result<Vec<std::ops::RangeInclusive<u16>>> {
     let trimmed = expression.trim();
     if trimmed.is_empty() {
         return Err(anyhow!("status_match cannot be empty"));
@@ -2377,17 +2377,17 @@ fn parse_status_match(expression: &str) -> Result<Vec<std::ops::RangeInclusive<u
     Ok(ranges)
 }
 
-fn status_matches(ranges: &[std::ops::RangeInclusive<u16>], code: u16) -> bool {
+pub(crate) fn status_matches(ranges: &[std::ops::RangeInclusive<u16>], code: u16) -> bool {
     ranges.iter().any(|range| range.contains(&code))
 }
 
-struct ProbeOutcome {
+pub(crate) struct ProbeOutcome {
     passing: bool,
     status_code: Option<u16>,
     error: Option<String>,
 }
 
-async fn probe_condition_once(
+pub(crate) async fn probe_condition_once(
     client: &reqwest::Client,
     condition: &ConditionConfig,
 ) -> ProbeOutcome {
@@ -2466,7 +2466,7 @@ async fn probe_condition_once(
     }
 }
 
-async fn read_response_body(response: reqwest::Response) -> Result<String> {
+pub(crate) async fn read_response_body(response: reqwest::Response) -> Result<String> {
     let bytes = response
         .bytes()
         .await
@@ -2479,7 +2479,7 @@ async fn read_response_body(response: reqwest::Response) -> Result<String> {
     Ok(String::from_utf8_lossy(truncated).into_owned())
 }
 
-fn condition_probe_key(condition: &ConditionConfig) -> String {
+pub(crate) fn condition_probe_key(condition: &ConditionConfig) -> String {
     let headers = condition
         .headers
         .iter()
@@ -2497,7 +2497,7 @@ fn condition_probe_key(condition: &ConditionConfig) -> String {
     )
 }
 
-async fn probe_and_record(state: &AppState, id: &str) {
+pub(crate) async fn probe_and_record(state: &AppState, id: &str) {
     let representative = {
         let conditions = state.conditions.read().await;
         conditions.get(id).cloned()
@@ -2610,7 +2610,7 @@ async fn probe_and_record(state: &AppState, id: &str) {
 
 /// Compute the effective desired power state for a device given its
 /// inputs. None means "no opinion — don't touch the device".
-fn compute_effective(
+pub(crate) fn compute_effective(
     manual_override: Option<bool>,
     schedule_intent: Option<bool>,
     condition_intent: Option<bool>,
@@ -2631,7 +2631,7 @@ fn compute_effective(
 ///   - None if no enabled conditions target the device
 ///   - Some(false) if any enabled condition is failing or has never been probed (fail closed)
 ///   - Some(true) if at least one enabled condition exists and all are passing
-async fn condition_intent_for_device(state: &AppState, device_name: &str) -> Option<bool> {
+pub(crate) async fn condition_intent_for_device(state: &AppState, device_name: &str) -> Option<bool> {
     let conditions = state.conditions.read().await;
     let mut have_any = false;
     let mut all_passing = true;
@@ -2659,7 +2659,7 @@ async fn condition_intent_for_device(state: &AppState, device_name: &str) -> Opt
 
 /// Reconcile a device's actual state with the computed effective state.
 /// Skips if the device doesn't exist or if the effective state is None.
-async fn reconcile_device(state: &AppState, device_name: &str, source: HookSource) {
+pub(crate) async fn reconcile_device(state: &AppState, device_name: &str, source: HookSource) {
     let device_cfg = match get_device_config(state, device_name).await {
         Ok(cfg) => cfg,
         Err(_) => return,
@@ -2767,7 +2767,7 @@ async fn reconcile_device(state: &AppState, device_name: &str, source: HookSourc
     }
 }
 
-async fn set_schedule_intent(state: &AppState, device_name: &str, intent: bool) {
+pub(crate) async fn set_schedule_intent(state: &AppState, device_name: &str, intent: bool) {
     let mut intents = state.device_intents.write().await;
     let entry = intents.entry(device_name.to_string()).or_default();
     entry.schedule_intent = Some(intent);
@@ -2776,7 +2776,7 @@ async fn set_schedule_intent(state: &AppState, device_name: &str, intent: bool) 
     entry.manual_override_until_ms = None;
 }
 
-async fn set_manual_override(
+pub(crate) async fn set_manual_override(
     state: &AppState,
     device_name: &str,
     target: bool,
@@ -2793,7 +2793,7 @@ async fn set_manual_override(
     });
 }
 
-async fn clear_manual_override(state: &AppState, device_name: &str) {
+pub(crate) async fn clear_manual_override(state: &AppState, device_name: &str) {
     let mut intents = state.device_intents.write().await;
     if let Some(entry) = intents.get_mut(device_name) {
         entry.manual_override = None;
@@ -2801,7 +2801,7 @@ async fn clear_manual_override(state: &AppState, device_name: &str) {
     }
 }
 
-async fn run_override_expiry_sweeper(state: AppState) {
+pub(crate) async fn run_override_expiry_sweeper(state: AppState) {
     sleep(Duration::from_secs(2)).await;
     loop {
         let now = now_ms();
@@ -2837,7 +2837,7 @@ async fn run_override_expiry_sweeper(state: AppState) {
 
 // ---------- Automation execution engine ----------
 
-async fn run_automation_engine(state: AppState) {
+pub(crate) async fn run_automation_engine(state: AppState) {
     sleep(Duration::from_secs(2)).await;
     let mut previous_tick_ms = now_ms();
     loop {
@@ -2850,7 +2850,7 @@ async fn run_automation_engine(state: AppState) {
     }
 }
 
-async fn evaluate_all_automations(
+pub(crate) async fn evaluate_all_automations(
     state: &AppState,
     previous_tick_ms: u128,
     tick_ms: u128,
@@ -2867,7 +2867,7 @@ async fn evaluate_all_automations(
     Ok(())
 }
 
-async fn evaluate_one_automation(
+pub(crate) async fn evaluate_one_automation(
     state: &AppState,
     automation: Automation,
     previous_tick_ms: u128,
@@ -3035,7 +3035,7 @@ async fn evaluate_one_automation(
     }
 }
 
-fn topo_sort_nodes(nodes: &[AutomationNode], edges: &[AutomationEdge]) -> Option<Vec<String>> {
+pub(crate) fn topo_sort_nodes(nodes: &[AutomationNode], edges: &[AutomationEdge]) -> Option<Vec<String>> {
     let mut indeg: BTreeMap<String, usize> = BTreeMap::new();
     let mut adj: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for n in nodes {
@@ -3073,7 +3073,7 @@ fn topo_sort_nodes(nodes: &[AutomationNode], edges: &[AutomationEdge]) -> Option
     }
 }
 
-async fn evaluate_node(
+pub(crate) async fn evaluate_node(
     state: &AppState,
     automation_id: &str,
     node: &AutomationNode,
@@ -3311,7 +3311,7 @@ async fn evaluate_node(
     }
 }
 
-async fn execute_action(
+pub(crate) async fn execute_action(
     state: &AppState,
     automation_id: &str,
     node_id: &str,
@@ -3407,7 +3407,7 @@ async fn execute_action(
     }
 }
 
-async fn run_condition_poller(state: AppState) {
+pub(crate) async fn run_condition_poller(state: AppState) {
     sleep(Duration::from_secs(2)).await;
     loop {
         let groups: BTreeMap<String, Vec<(String, u64, Option<u128>)>> = {
@@ -3447,7 +3447,7 @@ async fn run_condition_poller(state: AppState) {
     }
 }
 
-async fn run_scheduler(state: AppState) {
+pub(crate) async fn run_scheduler(state: AppState) {
     let mut previous_tick = Local::now();
 
     loop {
@@ -3465,7 +3465,7 @@ async fn run_scheduler(state: AppState) {
     }
 }
 
-async fn evaluate_schedules(
+pub(crate) async fn evaluate_schedules(
     state: &AppState,
     previous_tick: DateTime<Local>,
     now: DateTime<Local>,
@@ -3530,7 +3530,7 @@ async fn evaluate_schedules(
     }
 }
 
-async fn fire_schedule(state: &AppState, schedule: &ScheduleConfig, action: ScheduleAction) {
+pub(crate) async fn fire_schedule(state: &AppState, schedule: &ScheduleConfig, action: ScheduleAction) {
     info!(
         schedule_id = %schedule.id,
         device = %schedule.device_name,
@@ -3573,7 +3573,7 @@ async fn fire_schedule(state: &AppState, schedule: &ScheduleConfig, action: Sche
     reconcile_device(state, &schedule.device_name, HookSource::Schedule).await;
 }
 
-async fn record_schedule_success(state: &AppState, id: &str) {
+pub(crate) async fn record_schedule_success(state: &AppState, id: &str) {
     let updated = {
         let mut schedules = state.schedules.write().await;
         if let Some(schedule) = schedules.get_mut(id) {
@@ -3592,7 +3592,7 @@ async fn record_schedule_success(state: &AppState, id: &str) {
     }
 }
 
-async fn record_schedule_error(state: &AppState, id: &str, message: String) {
+pub(crate) async fn record_schedule_error(state: &AppState, id: &str, message: String) {
     let updated = {
         let mut schedules = state.schedules.write().await;
         if let Some(schedule) = schedules.get_mut(id) {
@@ -3611,7 +3611,7 @@ async fn record_schedule_error(state: &AppState, id: &str, message: String) {
     }
 }
 
-async fn monitor_devices(state: AppState) {
+pub(crate) async fn monitor_devices(state: AppState) {
     loop {
         sleep(Duration::from_secs(state.refresh_seconds)).await;
 
@@ -3619,7 +3619,7 @@ async fn monitor_devices(state: AppState) {
     }
 }
 
-async fn scan_for_devices(state: AppState) {
+pub(crate) async fn scan_for_devices(state: AppState) {
     loop {
         sleep(Duration::from_secs(state.scan_seconds)).await;
 
@@ -3629,7 +3629,7 @@ async fn scan_for_devices(state: AppState) {
     }
 }
 
-async fn initial_refresh_devices(state: AppState) {
+pub(crate) async fn initial_refresh_devices(state: AppState) {
     refresh_all_devices(&state).await;
 
     if let Err(error) = discover_devices(&state).await {
@@ -3637,13 +3637,13 @@ async fn initial_refresh_devices(state: AppState) {
     }
 }
 
-async fn scan_and_refresh(state: &AppState) -> Result<()> {
+pub(crate) async fn scan_and_refresh(state: &AppState) -> Result<()> {
     discover_devices(state).await?;
     refresh_all_devices(state).await;
     Ok(())
 }
 
-async fn discover_devices(state: &AppState) -> Result<()> {
+pub(crate) async fn discover_devices(state: &AppState) -> Result<()> {
     let (targets, target_source) = if state.discovery_targets.is_empty() {
         let auto_targets = match automatic_discovery_targets() {
             Ok(targets) => targets,
@@ -3715,7 +3715,7 @@ async fn discover_devices(state: &AppState) -> Result<()> {
     Ok(())
 }
 
-async fn load_persisted_state(state: &AppState) -> Result<()> {
+pub(crate) async fn load_persisted_state(state: &AppState) -> Result<()> {
     let contents = match fs::read_to_string(&state.state_path) {
         Ok(contents) => contents,
         Err(error) if error.kind() == ErrorKind::NotFound => {
@@ -3808,7 +3808,7 @@ async fn load_persisted_state(state: &AppState) -> Result<()> {
     Ok(())
 }
 
-async fn save_persisted_state(state: &AppState) -> Result<()> {
+pub(crate) async fn save_persisted_state(state: &AppState) -> Result<()> {
     let persisted = {
         let devices = state.devices.read().await;
         let schedules = state.schedules.read().await;
@@ -3838,7 +3838,7 @@ async fn save_persisted_state(state: &AppState) -> Result<()> {
 /// equivalent `Automation` flowcharts. The original collections are left in
 /// place inside `persisted` so the next save still records them as a backup;
 /// the engine no longer reads them once automations exist.
-fn migrate_to_automations(persisted: &mut PersistedState) {
+pub(crate) fn migrate_to_automations(persisted: &mut PersistedState) {
     if !persisted.automations.is_empty() {
         return;
     }
@@ -4073,7 +4073,7 @@ fn migrate_to_automations(persisted: &mut PersistedState) {
     persisted.conditions.clear();
 }
 
-fn managed_device_from_config(name: String, config: DeviceConfig) -> ManagedDevice {
+pub(crate) fn managed_device_from_config(name: String, config: DeviceConfig) -> ManagedDevice {
     ManagedDevice {
         name,
         config,
@@ -4086,7 +4086,7 @@ fn managed_device_from_config(name: String, config: DeviceConfig) -> ManagedDevi
     }
 }
 
-fn write_json_atomically<T>(path: &FsPath, value: &T) -> Result<()>
+pub(crate) fn write_json_atomically<T>(path: &FsPath, value: &T) -> Result<()>
 where
     T: Serialize,
 {
@@ -4119,7 +4119,7 @@ where
     Ok(())
 }
 
-fn temporary_path_for(path: &FsPath) -> Result<PathBuf> {
+pub(crate) fn temporary_path_for(path: &FsPath) -> Result<PathBuf> {
     let file_name = path
         .file_name()
         .ok_or_else(|| anyhow!("state path must include a file name"))?;
@@ -4129,7 +4129,7 @@ fn temporary_path_for(path: &FsPath) -> Result<PathBuf> {
     Ok(path.with_file_name(temporary_name))
 }
 
-async fn refresh_all_devices(state: &AppState) {
+pub(crate) async fn refresh_all_devices(state: &AppState) {
     let devices = {
         let devices = state.devices.read().await;
         devices
@@ -4143,7 +4143,7 @@ async fn refresh_all_devices(state: &AppState) {
     }
 }
 
-async fn refresh_device(state: &AppState, name: &str, device: DeviceConfig) {
+pub(crate) async fn refresh_device(state: &AppState, name: &str, device: DeviceConfig) {
     let operation_lock = device_operation_lock(state, &device).await;
     let _operation_guard = operation_lock.lock().await;
 
@@ -4155,7 +4155,7 @@ async fn refresh_device(state: &AppState, name: &str, device: DeviceConfig) {
     }
 }
 
-async fn retry_tapo_handshake<T, F, Fut>(mut operation: F) -> Result<T>
+pub(crate) async fn retry_tapo_handshake<T, F, Fut>(mut operation: F) -> Result<T>
 where
     F: FnMut() -> Fut,
     Fut: Future<Output = Result<T>>,
@@ -4181,13 +4181,13 @@ where
     unreachable!("retry loop should return from an attempt")
 }
 
-fn is_tapo_handshake_error(error: &anyhow::Error) -> bool {
+pub(crate) fn is_tapo_handshake_error(error: &anyhow::Error) -> bool {
     error
         .chain()
         .any(|cause| cause.to_string().contains("Handshake2 failed"))
 }
 
-async fn device_operation_lock(state: &AppState, device: &DeviceConfig) -> Arc<Mutex<()>> {
+pub(crate) async fn device_operation_lock(state: &AppState, device: &DeviceConfig) -> Arc<Mutex<()>> {
     if let Some(lock) = state.device_locks.read().await.get(&device.ip).cloned() {
         return lock;
     }
@@ -4199,7 +4199,7 @@ async fn device_operation_lock(state: &AppState, device: &DeviceConfig) -> Arc<M
         .clone()
 }
 
-async fn update_device_snapshot(
+pub(crate) async fn update_device_snapshot(
     state: &AppState,
     name: &str,
     snapshot: DeviceSnapshot,
@@ -4264,7 +4264,7 @@ async fn update_device_snapshot(
     }
 }
 
-async fn update_device_error(state: &AppState, name: &str, error: String) {
+pub(crate) async fn update_device_error(state: &AppState, name: &str, error: String) {
     let (prev_on, prev_failures, was_offline_announced, nickname, model) = {
         let devices = state.devices.read().await;
         let device = devices.get(name);
@@ -4321,7 +4321,7 @@ async fn update_device_error(state: &AppState, name: &str, error: String) {
     }
 }
 
-fn hook_matches(hook: &HookConfig, device: &str, event: HookEvent) -> bool {
+pub(crate) fn hook_matches(hook: &HookConfig, device: &str, event: HookEvent) -> bool {
     if !hook.enabled {
         return false;
     }
@@ -4335,7 +4335,7 @@ fn hook_matches(hook: &HookConfig, device: &str, event: HookEvent) -> bool {
 }
 
 #[derive(Debug, Clone)]
-struct HookTemplateContext {
+pub(crate) struct HookTemplateContext {
     device: String,
     nickname: String,
     model: String,
@@ -4378,7 +4378,7 @@ impl HookTemplateContext {
     }
 }
 
-fn hook_event_str(event: HookEvent) -> &'static str {
+pub(crate) fn hook_event_str(event: HookEvent) -> &'static str {
     match event {
         HookEvent::On => "on",
         HookEvent::Off => "off",
@@ -4387,7 +4387,7 @@ fn hook_event_str(event: HookEvent) -> &'static str {
     }
 }
 
-fn hook_source_str(source: HookSource) -> &'static str {
+pub(crate) fn hook_source_str(source: HookSource) -> &'static str {
     match source {
         HookSource::Manual => "manual",
         HookSource::Schedule => "schedule",
@@ -4397,7 +4397,7 @@ fn hook_source_str(source: HookSource) -> &'static str {
     }
 }
 
-fn optional_bool_str(value: Option<bool>) -> String {
+pub(crate) fn optional_bool_str(value: Option<bool>) -> String {
     match value {
         Some(true) => "true".to_string(),
         Some(false) => "false".to_string(),
@@ -4405,7 +4405,7 @@ fn optional_bool_str(value: Option<bool>) -> String {
     }
 }
 
-fn render_hook_template(input: &str, vars: &[(&str, String)]) -> String {
+pub(crate) fn render_hook_template(input: &str, vars: &[(&str, String)]) -> String {
     let mut out = input.to_string();
     for (key, value) in vars {
         let placeholder = format!("{{{{{key}}}}}");
@@ -4416,7 +4416,7 @@ fn render_hook_template(input: &str, vars: &[(&str, String)]) -> String {
     out
 }
 
-async fn dispatch_hook_events(
+pub(crate) async fn dispatch_hook_events(
     state: &AppState,
     device: &str,
     nickname: &str,
@@ -4466,7 +4466,7 @@ async fn dispatch_hook_events(
     }
 }
 
-async fn fire_hook(state: &AppState, hook: HookConfig, ctx: HookTemplateContext) {
+pub(crate) async fn fire_hook(state: &AppState, hook: HookConfig, ctx: HookTemplateContext) {
     let method = match HttpMethod::from_bytes(hook.method.to_uppercase().as_bytes()) {
         Ok(method) => method,
         Err(error) => {
@@ -4519,7 +4519,7 @@ async fn fire_hook(state: &AppState, hook: HookConfig, ctx: HookTemplateContext)
     }
 }
 
-async fn update_hook_result(
+pub(crate) async fn update_hook_result(
     state: &AppState,
     hook_id: &str,
     event: HookEvent,
@@ -4545,7 +4545,7 @@ async fn update_hook_result(
     }
 }
 
-async fn existing_config(state: &AppState) -> TapoConfig {
+pub(crate) async fn existing_config(state: &AppState) -> TapoConfig {
     let devices = state.devices.read().await;
 
     TapoConfig {
@@ -4557,7 +4557,7 @@ async fn existing_config(state: &AppState) -> TapoConfig {
     }
 }
 
-async fn device_views(state: &AppState) -> Vec<DeviceView> {
+pub(crate) async fn device_views(state: &AppState) -> Vec<DeviceView> {
     let device_names: Vec<String> = {
         let devices = state.devices.read().await;
         devices.keys().cloned().collect()
@@ -4572,7 +4572,7 @@ async fn device_views(state: &AppState) -> Vec<DeviceView> {
     views
 }
 
-async fn device_list_response(state: &AppState, scan_error: Option<String>) -> DeviceListResponse {
+pub(crate) async fn device_list_response(state: &AppState, scan_error: Option<String>) -> DeviceListResponse {
     DeviceListResponse {
         devices: device_views(state).await,
         updated_at_ms: now_ms(),
@@ -4581,16 +4581,16 @@ async fn device_list_response(state: &AppState, scan_error: Option<String>) -> D
     }
 }
 
-async fn publish_device_list(state: &AppState, scan_error: Option<String>) {
+pub(crate) async fn publish_device_list(state: &AppState, scan_error: Option<String>) {
     let response = device_list_response(state, scan_error).await;
     publish_device_list_response(state, response);
 }
 
-fn publish_device_list_response(state: &AppState, response: DeviceListResponse) {
+pub(crate) fn publish_device_list_response(state: &AppState, response: DeviceListResponse) {
     let _ = state.device_events.send(response);
 }
 
-async fn get_device_config(state: &AppState, name: &str) -> Result<DeviceConfig> {
+pub(crate) async fn get_device_config(state: &AppState, name: &str) -> Result<DeviceConfig> {
     let devices = state.devices.read().await;
 
     devices
@@ -4599,7 +4599,7 @@ async fn get_device_config(state: &AppState, name: &str) -> Result<DeviceConfig>
         .ok_or_else(|| anyhow!("device '{name}' was not found"))
 }
 
-async fn get_device_view(state: &AppState, name: &str) -> Result<DeviceView> {
+pub(crate) async fn get_device_view(state: &AppState, name: &str) -> Result<DeviceView> {
     let intent = {
         let intents = state.device_intents.read().await;
         intents.get(name).cloned().unwrap_or_default()
@@ -4613,11 +4613,11 @@ async fn get_device_view(state: &AppState, name: &str) -> Result<DeviceView> {
         .ok_or_else(|| anyhow!("device '{name}' was not found"))
 }
 
-fn estimate_energy_cost_pence(energy_wh: u64, price_pence_per_kwh: f64) -> f64 {
+pub(crate) fn estimate_energy_cost_pence(energy_wh: u64, price_pence_per_kwh: f64) -> f64 {
     energy_wh as f64 / 1000.0 * price_pence_per_kwh
 }
 
-async fn build_energy_export_workbook(state: &AppState) -> Result<Vec<u8>> {
+pub(crate) async fn build_energy_export_workbook(state: &AppState) -> Result<Vec<u8>> {
     let devices = export_devices(state).await;
     let device_names = devices
         .iter()
@@ -4636,7 +4636,7 @@ async fn build_energy_export_workbook(state: &AppState) -> Result<Vec<u8>> {
     write_export_workbook(&device_names, &tables, &errors)
 }
 
-async fn build_usage_history(state: &AppState, range_key: Option<&str>) -> UsageHistoryResponse {
+pub(crate) async fn build_usage_history(state: &AppState, range_key: Option<&str>) -> UsageHistoryResponse {
     let range = usage_history_range(range_key);
     let devices = export_devices(state).await;
     let now = Utc::now();
@@ -4694,7 +4694,7 @@ async fn build_usage_history(state: &AppState, range_key: Option<&str>) -> Usage
     }
 }
 
-async fn read_usage_history_entries(
+pub(crate) async fn read_usage_history_entries(
     state: &AppState,
     device: &DeviceConfig,
     range: &UsageHistoryRange,
@@ -4733,7 +4733,7 @@ async fn read_usage_history_entries(
     }
 }
 
-fn usage_history_start_datetime(start: UsageHistoryStart, now: DateTime<Utc>) -> DateTime<Utc> {
+pub(crate) fn usage_history_start_datetime(start: UsageHistoryStart, now: DateTime<Utc>) -> DateTime<Utc> {
     match start {
         UsageHistoryStart::Duration(duration) => now.checked_sub_signed(duration).unwrap_or(now),
         UsageHistoryStart::YearToDate => date_start_datetime(current_year_start(now.date_naive())),
@@ -4746,15 +4746,15 @@ fn usage_history_start_datetime(start: UsageHistoryStart, now: DateTime<Utc>) ->
     }
 }
 
-fn current_year_start(date: NaiveDate) -> NaiveDate {
+pub(crate) fn current_year_start(date: NaiveDate) -> NaiveDate {
     NaiveDate::from_ymd_opt(date.year(), 1, 1).unwrap_or(date)
 }
 
-fn date_start_datetime(date: NaiveDate) -> DateTime<Utc> {
+pub(crate) fn date_start_datetime(date: NaiveDate) -> DateTime<Utc> {
     DateTime::from_naive_utc_and_offset(date.and_hms_opt(0, 0, 0).unwrap_or_default(), Utc)
 }
 
-fn usage_history_range(range_key: Option<&str>) -> UsageHistoryRange {
+pub(crate) fn usage_history_range(range_key: Option<&str>) -> UsageHistoryRange {
     match range_key {
         Some("5m") => UsageHistoryRange {
             key: "5m",
@@ -4898,7 +4898,7 @@ fn usage_history_range(range_key: Option<&str>) -> UsageHistoryRange {
     }
 }
 
-async fn export_devices(state: &AppState) -> Vec<ExportDevice> {
+pub(crate) async fn export_devices(state: &AppState) -> Vec<ExportDevice> {
     let devices = state.devices.read().await;
 
     devices
@@ -4911,7 +4911,7 @@ async fn export_devices(state: &AppState) -> Vec<ExportDevice> {
         .collect()
 }
 
-fn export_specs(now: DateTime<Utc>) -> Result<Vec<ExportSpec>> {
+pub(crate) fn export_specs(now: DateTime<Utc>) -> Result<Vec<ExportSpec>> {
     let today = now.date_naive();
     let week_start = today
         .checked_sub_days(Days::new(6))
@@ -4966,7 +4966,7 @@ fn export_specs(now: DateTime<Utc>) -> Result<Vec<ExportSpec>> {
     ])
 }
 
-fn current_quarter_start(date: NaiveDate) -> Result<NaiveDate> {
+pub(crate) fn current_quarter_start(date: NaiveDate) -> Result<NaiveDate> {
     let month = match date.month() {
         1..=3 => 1,
         4..=6 => 4,
@@ -4979,7 +4979,7 @@ fn current_quarter_start(date: NaiveDate) -> Result<NaiveDate> {
         .ok_or_else(|| anyhow!("failed to calculate current quarter start date"))
 }
 
-fn split_datetime_ranges(
+pub(crate) fn split_datetime_ranges(
     start: DateTime<Utc>,
     end: DateTime<Utc>,
     max_duration: ChronoDuration,
@@ -4999,7 +4999,7 @@ fn split_datetime_ranges(
     ranges
 }
 
-async fn collect_export_table(
+pub(crate) async fn collect_export_table(
     state: &AppState,
     devices: &[ExportDevice],
     spec: &ExportSpec,
@@ -5042,7 +5042,7 @@ async fn collect_export_table(
     )
 }
 
-async fn read_export_entries(
+pub(crate) async fn read_export_entries(
     state: &AppState,
     device: &DeviceConfig,
     spec: &ExportSpec,
@@ -5092,12 +5092,12 @@ async fn read_export_entries(
 }
 
 #[derive(Debug, Clone, Copy)]
-enum PowerExportInterval {
+pub(crate) enum PowerExportInterval {
     Every5Minutes,
     Hourly,
 }
 
-async fn read_energy_entries(
+pub(crate) async fn read_energy_entries(
     state: &AppState,
     device: &DeviceConfig,
     interval: EnergyDataInterval,
@@ -5135,7 +5135,7 @@ async fn read_energy_entries(
         .collect())
 }
 
-async fn read_power_entries(
+pub(crate) async fn read_power_entries(
     state: &AppState,
     device: &DeviceConfig,
     ranges: &[(DateTime<Utc>, DateTime<Utc>)],
@@ -5191,12 +5191,12 @@ async fn read_power_entries(
     Ok(entries)
 }
 
-fn historical_client(state: &AppState) -> ApiClient {
+pub(crate) fn historical_client(state: &AppState) -> ApiClient {
     ApiClient::new(&state.credentials.username, &state.credentials.password)
         .with_timeout(Duration::from_secs(30))
 }
 
-fn write_export_workbook(
+pub(crate) fn write_export_workbook(
     device_names: &[String],
     tables: &[ExportTable],
     errors: &[ExportError],
@@ -5216,7 +5216,7 @@ fn write_export_workbook(
         .context("failed to build energy export workbook")
 }
 
-fn write_export_table(
+pub(crate) fn write_export_table(
     workbook: &mut Workbook,
     device_names: &[String],
     table: &ExportTable,
@@ -5267,7 +5267,7 @@ fn write_export_table(
     Ok(())
 }
 
-fn write_export_errors(workbook: &mut Workbook, errors: &[ExportError]) -> Result<()> {
+pub(crate) fn write_export_errors(workbook: &mut Workbook, errors: &[ExportError]) -> Result<()> {
     let header_format = Format::new()
         .set_bold()
         .set_border(FormatBorder::Thin)
@@ -5291,7 +5291,7 @@ fn write_export_errors(workbook: &mut Workbook, errors: &[ExportError]) -> Resul
     Ok(())
 }
 
-const INDEX_HTML: &str = r##"<!doctype html>
+pub(crate) const INDEX_HTML: &str = r##"<!doctype html>
 <html lang="en">
 <head>
     <meta charset="utf-8">
