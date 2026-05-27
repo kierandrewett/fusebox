@@ -110,3 +110,56 @@ export interface HookSummary {
   id: string;
   name: string;
 }
+
+
+export interface EnergyView {
+  current_power_mw?: number | null;
+  current_power_w?: number | null;
+  today_energy_wh: number;
+  month_energy_wh: number;
+  today_cost_pence: number;
+  month_cost_pence: number;
+  today_runtime_minutes: number;
+  month_runtime_minutes: number;
+}
+
+export interface Device extends DeviceSummary {
+  configured_model: string;
+  device_type: string;
+  device_on?: boolean | null;
+  on_time_seconds?: number | null;
+  energy?: EnergyView | null;
+  last_error?: string | null;
+  discovered_at_ms: number;
+  updated_at_ms?: number | null;
+  manual_override?: boolean | null;
+  manual_override_until_ms?: number | null;
+  schedule_intent?: boolean | null;
+  condition_intent?: boolean | null;
+  effective_intent?: boolean | null;
+}
+
+export interface DeviceListResponse {
+  devices: Device[];
+  updated_at_ms: number;
+  energy_price_pence_per_kwh: number;
+  scan_error?: string | null;
+}
+
+export interface Hook extends HookSummary {
+  url: string;
+  method: string;
+  headers: Record<string, string>;
+  body?: string | null;
+  enabled: boolean;
+  events: string[];
+  device_names: string[];
+  created_at_ms: number;
+  last_fired_at_ms?: number | null;
+  last_status_code?: number | null;
+  last_error?: string | null;
+}
+
+export interface UsageHistoryPoint { timestamp_ms: number; value: number }
+export interface UsageHistorySeries { device_name: string; points: UsageHistoryPoint[] }
+export interface UsageHistoryResponse { series: UsageHistorySeries[]; total: UsageHistoryPoint[]; errors: Array<{ device_name: string; message: string }>; range: string }

@@ -3,35 +3,38 @@ import { App } from "./App";
 import styleSheet from "./styles.css?inline";
 
 let stylesInjected = false;
+let root: Root | null = null;
+
 function injectStyles() {
   if (stylesInjected) return;
   stylesInjected = true;
   const tag = document.createElement("style");
-  tag.dataset.fusebox = "automations";
+  tag.dataset.fusebox = "app";
   tag.textContent = styleSheet;
   document.head.appendChild(tag);
 }
 
+export function mount(container: HTMLElement) {
+  injectStyles();
+  container.innerHTML = "";
+  root = createRoot(container);
+  root.render(<App />);
+  return () => unmount();
+}
+
+export function unmount() {
+  root?.unmount();
+  root = null;
+}
+
 declare global {
   interface Window {
-    FuseboxAutomations?: {
-      mount: (container: HTMLElement) => () => void;
-    };
+    Fusebox?: { mount: typeof mount; unmount: typeof unmount };
   }
 }
 
-const api = {
-  mount(container: HTMLElement) {
-    injectStyles();
-    container.innerHTML = "";
-    const root: Root = createRoot(container);
-    root.render(<App />);
-    return () => root.unmount();
-  },
-};
-
 if (typeof window !== "undefined") {
-  window.FuseboxAutomations = api;
+  window.Fusebox = { mount, unmount };
+  const container = document.getElementById("app-root");
+  if (container) mount(container);
 }
-
-export default api;
