@@ -43,9 +43,7 @@ use tracing_subscriber::EnvFilter;
 pub(crate) const ALL_TIME_USAGE_START_YEAR: i32 = 2020;
 pub(crate) const TAPO_HANDSHAKE_RETRY_ATTEMPTS: usize = 3;
 pub(crate) const TAPO_HANDSHAKE_RETRY_DELAY: Duration = Duration::from_millis(350);
-pub(crate) const SWITCH_SOUND_BYTES: &[u8] =
-    include_bytes!("../assets/348224__tbrook__switch-light-06.wav");
-pub(crate) const APP_BUNDLE_JS: &str = include_str!("../web/dist/app.js");
+// Static web assets and the index handler moved to crate::web.
 
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct UsageHistoryResponse {
@@ -724,11 +722,11 @@ pub(crate) async fn run() -> Result<()> {
     tokio::spawn(run_override_expiry_sweeper(state.clone()));
 
     let app = Router::new()
-        .route("/", get(index))
-        .route("/favicon.ico", get(favicon))
-        .route("/assets/switch.wav", get(switch_sound))
-        .route("/assets/app.js", get(app_bundle))
-        .route("/health", get(health))
+        .route("/", get(crate::web::index))
+        .route("/favicon.ico", get(crate::web::favicon))
+        .route("/assets/switch.wav", get(crate::web::switch_sound))
+        .route("/assets/app.js", get(crate::web::app_bundle))
+        .route("/health", get(crate::web::health))
         .route("/api/devices", get(list_devices))
         .route("/api/energy/history.json", get(energy_history))
         .route("/api/energy/export.xlsx", get(export_energy_workbook))
@@ -781,39 +779,6 @@ pub(crate) fn init_logging() {
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
 
     tracing_subscriber::fmt().with_env_filter(filter).init();
-}
-
-pub(crate) async fn index() -> Html<&'static str> {
-    Html(INDEX_HTML)
-}
-
-pub(crate) async fn favicon() -> StatusCode {
-    StatusCode::NO_CONTENT
-}
-
-pub(crate) async fn switch_sound() -> Response {
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "audio/wav")
-        .header(header::CACHE_CONTROL, "public, max-age=31536000, immutable")
-        .body(Body::from(SWITCH_SOUND_BYTES))
-        .expect("static switch sound response should be valid")
-}
-
-pub(crate) async fn app_bundle() -> Response {
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(
-            header::CONTENT_TYPE,
-            "application/javascript; charset=utf-8",
-        )
-        .header(header::CACHE_CONTROL, "no-cache")
-        .body(Body::from(APP_BUNDLE_JS))
-        .expect("static app bundle response should be valid")
-}
-
-pub(crate) async fn health() -> Json<serde_json::Value> {
-    Json(serde_json::json!({ "ok": true }))
 }
 
 pub(crate) async fn list_devices(State(state): State<AppState>) -> Json<DeviceListResponse> {
@@ -4745,32 +4710,6 @@ pub(crate) fn write_export_errors(workbook: &mut Workbook, errors: &[ExportError
 
     Ok(())
 }
-
-pub(crate) const INDEX_HTML: &str = r##"<!doctype html>
-<html lang="en">
-<head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width,initial-scale=1">
-    <meta name="theme-color" content="#201d19" id="theme-color">
-    <title>Fusebox</title>
-    <script>
-        (() => {
-            try {
-                const storedTheme = localStorage.getItem("fusebox-theme");
-                const systemTheme = window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "classic";
-                document.documentElement.dataset.theme = storedTheme ?? systemTheme;
-            } catch (_error) {
-                document.documentElement.dataset.theme = "classic";
-            }
-        })();
-    </script>
-</head>
-<body>
-    <div id="app-root"></div>
-    <script src="/assets/app.js" type="module"></script>
-</body>
-</html>
-"##;
 
 #[cfg(test)]
 mod tests {
