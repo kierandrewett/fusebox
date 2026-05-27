@@ -56,15 +56,19 @@ export function AutomationsTab() {
     createEditor(container, {
       devices: () => devicesRef.current,
       hooks: () => hooksRef.current,
-    }).then((created) => {
-      if (cancelled) {
-        created.destroy();
-        return;
-      }
-      api = created;
-      editorApiRef.current = created;
-      created.onChange(() => setDirty(true));
-    });
+    })
+      .then((created) => {
+        if (cancelled) {
+          created.destroy();
+          return;
+        }
+        api = created;
+        editorApiRef.current = created;
+        created.onChange(() => setDirty(true));
+      })
+      .catch((err) => {
+        setError(`editor failed: ${err}`);
+      });
 
     return () => {
       cancelled = true;
@@ -150,17 +154,32 @@ export function AutomationsTab() {
 
   const handleAddNode = async (config: NodeConfig) => {
     const api = editorApiRef.current;
-    if (!api) return;
-    const x = 200 + Math.random() * 80;
-    const y = 80 + Math.random() * 60;
-    await api.addNodeAt(config, x, y);
-    setDirty(true);
+    if (!api) {
+      setError("editor not ready");
+      return;
+    }
+    // Stagger so successive nodes don't stack: columns by category, rows by count.
+    const existing = api.editor.getNodes().length;
+    const category = config.kind.startsWith("cron")
+      || config.kind.endsWith("_trigger")
+      || config.kind === "http_probe"
+      ? 0
+      : config.kind.startsWith("logic_") || config.kind === "debounce"
+        ? 1
+        : 2;
+    const x = 60 + category * 280;
+    const y = 60 + (existing % 4) * 160;
+    try {
+      await api.addNodeAt(config, x, y);
+      setDirty(true);
+    } catch (err) {
+      setError(`add node failed: ${err}`);
+    }
   };
-
-  if (loading) return <div className="fb-loading">Loading automations…</div>;
 
   return (
     <div className="fb-automations">
+      {loading ? <div className="fb-loading">Loading automations…</div> : null}
       <aside className="fb-sidebar">
         <div className="fb-sidebar-section">
           <header className="fb-sidebar-header">

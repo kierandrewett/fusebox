@@ -144,6 +144,9 @@ export async function createEditor(
       await area.translate(node.id, { x, y });
       const logicalId = crypto.randomUUID();
       idMap.set(logicalId, node.id);
+      // Keep the view centred on whatever's currently on the canvas so
+      // newly added nodes don't end up offscreen.
+      await AreaExtensions.zoomAt(area, editor.getNodes());
       notify();
       return logicalId;
     },
