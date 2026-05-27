@@ -10,8 +10,22 @@ import { NodeView } from "./NodeView";
 
 const signalSocket = new ClassicPreset.Socket("signal");
 
+const NODE_WIDTHS: Partial<Record<NodeConfig["kind"], number>> = {
+  cron_trigger: 280,
+  interval_trigger: 280,
+  device_event_trigger: 260,
+  http_probe: 300,
+  logic_and: 200,
+  logic_or: 200,
+  logic_not: 200,
+  debounce: 240,
+  set_device: 260,
+  toggle_device: 240,
+  fire_hook: 260,
+};
+
 export class FlowNode extends ClassicPreset.Node {
-  width = 240;
+  width: number;
   height = 120;
   config: NodeConfig;
   onChange?: () => void;
@@ -19,6 +33,7 @@ export class FlowNode extends ClassicPreset.Node {
   constructor(config: NodeConfig) {
     super(templateFor(config.kind).label);
     this.config = config;
+    this.width = NODE_WIDTHS[config.kind] ?? 240;
     const tpl = templateFor(config.kind);
     if (tpl.hasInput) {
       this.addInput("in", new ClassicPreset.Input(signalSocket, "in", true));
