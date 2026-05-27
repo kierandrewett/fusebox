@@ -17,3 +17,12 @@ pub(crate) fn now_ms() -> u128 {
         .unwrap_or_default()
         .as_millis()
 }
+
+pub(crate) fn non_empty_label(label: String) -> Option<String> {
+    let trimmed = label.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
