@@ -37,13 +37,24 @@ export function NodeView({ data, emit }: Props) {
     force((n) => n + 1);
   };
 
+  // Stop pointerdown from bubbling to Rete's drag handler ONLY when it
+  // originates inside a form control. Without this, clicks on inputs/selects
+  // start a node-drag instead of focusing the field. Letting the event bubble
+  // for clicks on node chrome keeps node dragging working.
+  const swallowOnFormControls = (event: React.PointerEvent) => {
+    const target = event.target as HTMLElement;
+    if (target.closest("input, select, textarea, button")) {
+      event.stopPropagation();
+    }
+  };
+
   return (
     <div
       ref={containerRef}
       className={`fb-node fb-node-${tpl.category} fb-node-${data.config.kind}`}
       style={{ width: data.width }}
       data-context-menu="ignore"
-      onPointerDown={(e) => e.stopPropagation()}
+      onPointerDown={swallowOnFormControls}
       onDoubleClick={(e) => e.stopPropagation()}
     >
       <div className="fb-node-head">
