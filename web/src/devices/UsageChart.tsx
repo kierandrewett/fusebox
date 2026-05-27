@@ -93,8 +93,32 @@ export function UsageChart({ history, range, onRangeChange }: Props) {
           },
         },
         plugins: {
-          legend: { labels: { color: "rgba(229,216,182,0.7)" } },
-          tooltip: { mode: "index", intersect: false },
+          legend: {
+            labels: {
+              color: "rgba(229,216,182,0.7)",
+              usePointStyle: true,
+              pointStyle: "line",
+              boxWidth: 22,
+              boxHeight: 2,
+            },
+          },
+          tooltip: {
+            mode: "index",
+            intersect: false,
+            callbacks: {
+              title: (items) => {
+                const ms = items[0]?.parsed?.x;
+                if (typeof ms !== "number") return "";
+                return formatTooltipTime(ms);
+              },
+              label: (item) => {
+                const series = item.dataset.label ?? "";
+                const value = item.parsed.y;
+                if (typeof value !== "number") return series;
+                return `${series}: ${formatValue(value)} ${unit}`;
+              },
+            },
+          },
         },
       },
     };
@@ -144,4 +168,22 @@ function formatTick(ms: number): string {
     return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
   }
   return d.toLocaleDateString([], { day: "2-digit", month: "short" });
+}
+
+function formatTooltipTime(ms: number): string {
+  const d = new Date(ms);
+  return d.toLocaleString([], {
+    weekday: "short",
+    day: "2-digit",
+    month: "short",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+function formatValue(value: number): string {
+  if (Math.abs(value) >= 1000) return value.toFixed(0);
+  if (Math.abs(value) >= 100) return value.toFixed(0);
+  if (Math.abs(value) >= 10) return value.toFixed(1);
+  return value.toFixed(2);
 }
