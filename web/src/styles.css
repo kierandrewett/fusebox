@@ -1768,5 +1768,13 @@
 .fb-sockets-out { justify-self: end; }
 .fb-socket { display: flex; align-items: center; gap: 4px; }
 
-
-.panel{display:grid;gap:1rem}.panel-header,.topbar,.topbar-actions,.tabs,.device-card header,.device-card footer,.hook-card footer,.modal footer{display:flex;gap:1rem;align-items:center;justify-content:space-between}.device-grid,.hook-list{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:1rem}.device-card,.hook-card,.chart-card,.modal{background:var(--panel,rgba(0,0,0,.25));border:1px solid var(--line,rgba(255,255,255,.14));border-radius:18px;padding:1rem}.status-pill{padding:.25rem .5rem;border-radius:999px;background:var(--brass);color:var(--ink)}.error{color:#ffb4a8}.muted{opacity:.72}.modal-backdrop{position:fixed;inset:0;background:rgba(0,0,0,.55);display:grid;place-items:center;z-index:20}.modal{width:min(480px,calc(100vw - 2rem));display:grid;gap:1rem}.modal label{display:grid;gap:.35rem}.modal input{padding:.65rem;border-radius:10px;border:1px solid var(--line,rgba(255,255,255,.16));background:rgba(0,0,0,.2);color:inherit}.meters{display:flex;flex-wrap:wrap;gap:.5rem}.meters span{padding:.4rem .55rem;border-radius:10px;background:rgba(0,0,0,.18)}
+/* React app helpers — minimal additions on top of the cabinet styles above */
+.error { color: #ffb4a8; margin: 0.5rem 0; }
+.muted { opacity: 0.72; }
+.tab-bar { padding: 0; margin-bottom: 12px; }
+.modal-backdrop { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.55); display: grid; place-items: center; z-index: 20; }
+.modal { width: min(480px, calc(100vw - 2rem)); display: grid; gap: 1rem; background: var(--cabinet, rgba(0,0,0,0.4)); border: 1px solid var(--cabinet-border, rgba(0,0,0,0.5)); border-radius: 12px; padding: 1.5rem; }
+.modal label { display: grid; gap: 0.35rem; font-size: 13px; color: var(--secondary-text, var(--text)); }
+.modal input, .modal select, .modal textarea { padding: 0.55rem; border-radius: 8px; border: 1px solid rgba(255, 255, 255, 0.16); background: rgba(0, 0, 0, 0.25); color: inherit; font: inherit; }
+.modal-footer { display: flex; gap: 0.5rem; justify-content: flex-end; }
+.modal h3 { margin: 0; }

@@ -152,10 +152,11 @@ export interface Hook extends HookSummary {
   headers: Record<string, string>;
   body?: string | null;
   enabled: boolean;
-  events: string[];
-  device_names: string[];
+  event_filter: string[];
+  device_filter: string[];
   created_at_ms: number;
   last_fired_at_ms?: number | null;
+  last_event?: string | null;
   last_status_code?: number | null;
   last_error?: string | null;
 }
