@@ -1808,7 +1808,8 @@
   z-index: 5;
 }
 
-/* Custom node styling — modeled on .breaker */
+/* Custom node styling — modeled on .breaker. Compact-by-default,
+   expands inline with the full edit form when you tap the header. */
 .fb-node {
   min-width: 220px;
   border: 1px solid #070604;
@@ -1823,45 +1824,109 @@
     inset 0 -10px 24px rgba(0, 0, 0, 0.34),
     0 8px 18px rgba(0, 0, 0, 0.45);
   user-select: none;
+  overflow: hidden;
+}
+.fb-node.compact { min-width: 180px; }
+.fb-node.compact .fb-node-sockets {
+  padding-top: 4px;
 }
 .fb-node-trigger { border-top: 3px solid var(--amber); }
 .fb-node-logic   { border-top: 3px solid #a371f7; }
 .fb-node-action  { border-top: 3px solid var(--green); }
 
+/* Header — Automate-style tap-to-expand pill. Title on top, configured value
+   underneath. Whole thing is a button. */
 .fb-node-head {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  padding: 6px 8px 6px 12px;
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
-  color: var(--ink);
+  gap: 10px;
+  width: 100%;
+  padding: 8px 10px 8px 12px;
+  border: 0;
   background: linear-gradient(var(--label-start), var(--label-end));
+  color: var(--ink);
+  cursor: pointer;
+  text-align: left;
+  font: inherit;
   box-shadow: inset 0 0 0 1px rgba(66, 43, 20, 0.24);
+}
+.fb-node.expanded .fb-node-head {
   border-bottom: 1px solid rgba(0, 0, 0, 0.6);
 }
-.fb-node-title { flex: 1; }
-.fb-node-delete {
-  width: 22px;
-  height: 22px;
+.fb-node-head:hover { filter: brightness(1.04); }
+.fb-node-head:focus-visible { outline: 2px solid rgba(0, 0, 0, 0.4); outline-offset: -3px; }
+
+.fb-node-icon {
+  width: 26px;
+  height: 26px;
   flex: 0 0 auto;
-  padding: 0;
-  border: 1px solid transparent;
-  border-radius: 5px;
+  display: grid;
+  place-items: center;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.16);
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.32);
+  font-size: 13px;
+  color: var(--ink);
+}
+.fb-node-icon-trigger { background: rgba(229, 183, 91, 0.35); }
+.fb-node-icon-logic   { background: rgba(163, 113, 247, 0.35); }
+.fb-node-icon-action  { background: rgba(102, 209, 140, 0.4); }
+
+.fb-node-titles {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+.fb-node-title {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink);
+}
+.fb-node-summary {
+  font-size: 11px;
+  font-family: var(--font-data);
+  color: rgba(34, 29, 23, 0.72);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fb-node-chevron {
+  flex: 0 0 auto;
+  color: rgba(34, 29, 23, 0.55);
+  font-size: 13px;
+  transform: rotate(-90deg);
+  transition: transform 0.15s ease;
+}
+.fb-node-chevron.open { transform: rotate(0deg); }
+
+/* Actions row at the bottom of expanded nodes */
+.fb-node-actions {
+  display: flex;
+  justify-content: flex-end;
+  padding: 4px 10px 8px;
+  border-top: 1px dashed rgba(255, 255, 255, 0.06);
+}
+.fb-node-delete {
   background: transparent;
-  color: rgba(0, 0, 0, 0.45);
+  border: 1px solid rgba(222, 94, 75, 0.4);
+  border-radius: 6px;
+  color: var(--red);
   font: inherit;
-  font-size: 16px;
-  line-height: 1;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  padding: 3px 9px;
   cursor: pointer;
 }
 .fb-node-delete:hover {
-  background: rgba(0, 0, 0, 0.18);
-  border-color: rgba(0, 0, 0, 0.4);
-  color: var(--red);
+  background: rgba(222, 94, 75, 0.15);
+  border-color: rgba(222, 94, 75, 0.7);
 }
 .fb-node-body {
   padding: 10px 12px;

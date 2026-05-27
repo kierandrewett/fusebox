@@ -28,11 +28,13 @@ export class FlowNode extends ClassicPreset.Node {
   width: number;
   height = 120;
   config: NodeConfig;
+  expanded: boolean;
   onChange?: () => void;
 
-  constructor(config: NodeConfig) {
+  constructor(config: NodeConfig, expanded = false) {
     super(templateFor(config.kind).label);
     this.config = config;
+    this.expanded = expanded;
     this.width = NODE_WIDTHS[config.kind] ?? 240;
     const tpl = templateFor(config.kind);
     if (tpl.hasInput) {
@@ -155,7 +157,9 @@ export async function createEditor(
       await AreaExtensions.zoomAt(area, editor.getNodes());
     },
     async addNodeAt(config, x, y) {
-      const node = new FlowNode(config);
+      // Freshly-added nodes open expanded so the user can configure
+      // them immediately. Loaded nodes start collapsed (see load()).
+      const node = new FlowNode(config, true);
       await editor.addNode(node as unknown as ClassicPreset.Node);
       await area.translate(node.id, { x, y });
       const logicalId = crypto.randomUUID();

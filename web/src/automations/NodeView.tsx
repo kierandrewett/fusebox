@@ -43,6 +43,22 @@ export function NodeView({ data, emit }: Props) {
     force((n) => n + 1);
   };
 
+  const findEditor = () => {
+    let el: HTMLElement | null = containerRef.current;
+    while (el) {
+      const editor = (el as any).__fuseboxEditor;
+      if (editor) return editor as { removeNode: (id: string) => Promise<void> };
+      el = el.parentElement;
+    }
+    return null;
+  };
+
+  const toggleExpanded = () => {
+    data.expanded = !data.expanded;
+    data.onChange?.();
+    force((n) => n + 1);
+  };
+
   // Stop pointerdown from bubbling to Rete's drag handler ONLY when it
   // originates inside an interactive control. Without this, clicks on
   // inputs/selects/<summary> elements start a node-drag instead of doing
@@ -55,39 +71,49 @@ export function NodeView({ data, emit }: Props) {
     }
   };
 
+  const summary = summarizeNode(data.config, ctx);
+  const expanded = data.expanded;
+
   return (
     <div
       ref={containerRef}
-      className={`fb-node fb-node-${tpl.category} fb-node-${data.config.kind}`}
+      className={`fb-node fb-node-${tpl.category} fb-node-${data.config.kind} ${expanded ? "expanded" : "compact"}`}
       style={{ width: data.width }}
       data-context-menu="ignore"
       onPointerDown={swallowOnFormControls}
       onDoubleClick={(e) => e.stopPropagation()}
     >
-      <div className="fb-node-head">
-        <span className="fb-node-title">{tpl.label}</span>
-        <button
-          type="button"
-          className="fb-node-delete"
-          title="Delete this block"
-          aria-label="Delete block"
-          onClick={() => {
-            const container = containerRef.current as HTMLElement | null;
-            let el: HTMLElement | null = container;
-            while (el) {
-              const editor = (el as any).__fuseboxEditor;
-              if (editor && typeof editor.removeNode === "function") {
-                void editor.removeNode(data.id);
-                return;
-              }
-              el = el.parentElement;
-            }
-          }}
-        >
-          ×
-        </button>
-      </div>
-      <div className="fb-node-body">{renderBody(data.config, update, ctx)}</div>
+      <button
+        type="button"
+        className="fb-node-head"
+        aria-expanded={expanded}
+        title={expanded ? "Collapse block" : "Expand to edit"}
+        onClick={toggleExpanded}
+      >
+        <span className={`fb-node-icon fb-node-icon-${tpl.category}`} aria-hidden="true">
+          {iconFor(data.config.kind)}
+        </span>
+        <span className="fb-node-titles">
+          <span className="fb-node-title">{tpl.label}</span>
+          <span className="fb-node-summary">{summary}</span>
+        </span>
+        <span className={`fb-node-chevron ${expanded ? "open" : ""}`} aria-hidden="true">▾</span>
+      </button>
+      {expanded ? (
+        <>
+          <div className="fb-node-body">{renderBody(data.config, update, ctx)}</div>
+          <div className="fb-node-actions">
+            <button
+              type="button"
+              className="fb-node-delete"
+              title="Delete this block"
+              onClick={() => void findEditor()?.removeNode(data.id)}
+            >
+              Delete
+            </button>
+          </div>
+        </>
+      ) : null}
       <div className="fb-node-sockets">
         <div className="fb-sockets-in">
           {inputs.map(([key, input]) =>
@@ -126,6 +152,143 @@ export function NodeView({ data, emit }: Props) {
       </div>
     </div>
   );
+}
+
+// ---------- Compact summary for collapsed blocks (Automate-style) ----------
+
+function summarizeNode(config: NodeConfig, ctx: EditorCtx): string {
+  switch (config.kind) {
+    case "cron_trigger": {
+      const simple = parseSimpleCronSummary(config.cron_trigger.cron);
+      return simple ?? config.cron_trigger.cron;
+    }
+    case "interval_trigger": {
+      const { on_seconds, off_seconds, start_action } = config.interval_trigger;
+      const start = start_action === "off" ? "off" : "on";
+      return `${humanDuration(on_seconds)} ${start} / ${humanDuration(off_seconds)}`;
+    }
+    case "device_event_trigger": {
+      const dev = config.device_event_trigger.device_name;
+      const evt = config.device_event_trigger.event;
+      return dev ? `${deviceLabel(dev, ctx)} → ${evt}` : "Pick a device…";
+    }
+    case "http_probe": {
+      const url = config.http_probe.url;
+      if (!url) return "Pick a URL…";
+      const short = url.length > 40 ? url.slice(0, 38) + "…" : url;
+      return `${config.http_probe.method} ${short}`;
+    }
+    case "logic_and":
+      return "All inputs true";
+    case "logic_or":
+      return "Any input true";
+    case "logic_not":
+      return "Invert input";
+    case "debounce":
+      return `Hold ${humanDuration(config.debounce.hold_seconds)}`;
+    case "set_device": {
+      const dev = config.set_device.device_name;
+      const verb =
+        config.set_device.action === "on"
+          ? "Turn on"
+          : config.set_device.action === "off"
+            ? "Turn off"
+            : "Toggle";
+      return dev ? `${deviceLabel(dev, ctx)} · ${verb}` : "Pick a device…";
+    }
+    case "toggle_device": {
+      const dev = config.toggle_device.device_name;
+      return dev ? `${deviceLabel(dev, ctx)} · Toggle` : "Pick a device…";
+    }
+    case "fire_hook": {
+      const hookId = config.fire_hook.hook_id;
+      if (!hookId) return "Pick a hook…";
+      const hook = ctx.hooks().find((h) => h.id === hookId);
+      return hook ? hook.name : "Unknown hook";
+    }
+  }
+}
+
+function parseSimpleCronSummary(cron: string): string | null {
+  const fields = cron.trim().split(/\s+/);
+  if (fields.length !== 5) return null;
+  const [min, hour, dom, month, dow] = fields;
+  if (dom !== "*" || month !== "*") return null;
+  const m = Number(min);
+  const h = Number(hour);
+  if (!Number.isInteger(m) || m < 0 || m > 59) return null;
+  if (!Number.isInteger(h) || h < 0 || h > 23) return null;
+  const time = `${h.toString().padStart(2, "0")}:${m.toString().padStart(2, "0")}`;
+  const days = describeDow(dow);
+  return days === "" ? `Daily ${time}` : `${days} ${time}`;
+}
+
+function describeDow(dow: string): string {
+  if (dow === "*") return "";
+  // Try common patterns
+  if (dow === "1-5") return "Weekdays";
+  if (dow === "0,6" || dow === "6,0") return "Weekends";
+  if (dow === "0") return "Sunday";
+  if (dow === "1") return "Monday";
+  const NAMES = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+  const set = new Set<number>();
+  for (const part of dow.split(",")) {
+    if (/^\d$/.test(part)) {
+      set.add(Number(part));
+    } else if (/^\d-\d$/.test(part)) {
+      const [a, b] = part.split("-").map(Number);
+      for (let i = Math.min(a, b); i <= Math.max(a, b); i++) set.add(i);
+    } else {
+      return dow; // Give up, show raw
+    }
+  }
+  if (set.size === 7) return "";
+  return [...set].sort().map((d) => NAMES[d]).join("·");
+}
+
+function humanDuration(seconds: number): string {
+  if (seconds <= 0) return "0s";
+  if (seconds % 3600 === 0) {
+    const h = seconds / 3600;
+    return `${h}h`;
+  }
+  if (seconds % 60 === 0) {
+    const m = seconds / 60;
+    return `${m}m`;
+  }
+  return `${seconds}s`;
+}
+
+function deviceLabel(name: string, ctx: EditorCtx): string {
+  const d = ctx.devices().find((x) => x.name === name);
+  return d?.nickname || name;
+}
+
+function iconFor(kind: NodeConfig["kind"]): string {
+  switch (kind) {
+    case "cron_trigger":
+      return "⏰";
+    case "interval_trigger":
+      return "↻";
+    case "device_event_trigger":
+      return "⚡";
+    case "http_probe":
+      return "🌐";
+    case "logic_and":
+      return "∧";
+    case "logic_or":
+      return "∨";
+    case "logic_not":
+      return "¬";
+    case "debounce":
+      return "⏳";
+    case "set_device":
+      return "▶";
+    case "toggle_device":
+      return "⇄";
+    case "fire_hook":
+      return "🔔";
+  }
 }
 
 function renderBody(config: NodeConfig, update: (c: NodeConfig) => void, ctx: EditorCtx) {
