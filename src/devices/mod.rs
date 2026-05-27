@@ -2,9 +2,7 @@ pub(crate) mod reconcile;
 
 pub(crate) use reconcile::*;
 
-use std::collections::BTreeMap;
 use std::future::Future;
-use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -12,9 +10,7 @@ use anyhow::{Context, Result, anyhow};
 use axum::Json;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, State};
-use axum::http::StatusCode;
 use axum::response::Response;
-use tapo::ApiClient;
 use tapoctl::{
     Config as TapoConfig, DeviceConfig, DeviceSnapshot, automatic_discovery_targets,
     discovery_add_candidates, discovery_scan_targets_with_auto,
@@ -29,7 +25,7 @@ use crate::conditions::condition_intent_for_device;
 use crate::hooks::{HookEvent, HookSource, dispatch_hook_events};
 use crate::state::{
     AppState, DEFAULT_MANUAL_OVERRIDE_SECONDS, DEVICE_OFFLINE_FAILURE_THRESHOLD, DeviceListResponse,
-    DeviceView, ManagedDevice, managed_device_from_config, save_persisted_state,
+    DeviceView, managed_device_from_config, save_persisted_state,
 };
 use crate::time::now_ms;
 
@@ -116,7 +112,6 @@ pub(crate) async fn send_device_event(
         .context("failed to send device event")
 }
 
-pub(crate) use crate::energy::{energy_history, export_energy_workbook};
 
 pub(crate) async fn toggle_device(
     State(state): State<AppState>,

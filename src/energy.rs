@@ -1,19 +1,16 @@
 use std::collections::BTreeMap;
-use std::str::FromStr;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
 use axum::Json;
-use axum::body::Body;
 use axum::extract::{Query, State};
-use axum::http::{StatusCode, header};
+use axum::http::header;
 use axum::response::{IntoResponse, Response};
 use chrono::{DateTime, Datelike, Days, Duration as ChronoDuration, NaiveDate, Utc};
 use rust_xlsxwriter::{Format, FormatAlign, FormatBorder, Workbook};
 use serde::{Deserialize, Serialize};
 use tapo::{ApiClient, requests::EnergyDataInterval, requests::PowerDataInterval};
 use tapoctl::{DeviceConfig, DeviceModel};
-use tracing::warn;
 
 use crate::api_error::AppError;
 use crate::devices::device_operation_lock;

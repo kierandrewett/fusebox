@@ -14,7 +14,6 @@ use std::io::ErrorKind;
 use std::net::IpAddr;
 use std::path::{Path as FsPath, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};

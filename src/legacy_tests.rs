@@ -5,17 +5,13 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::net::IpAddr;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use anyhow::anyhow;
-use chrono::{DateTime, Duration as ChronoDuration, Local, NaiveDate, TimeZone};
-use serde_json::json;
+use chrono::{DateTime, Duration as ChronoDuration, NaiveDate};
 use tapoctl::{DeviceConfig, DeviceModel, DeviceSnapshot};
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::Mutex;
 
-use crate::api_error::AppError;
-use crate::automations::types::*;
 use crate::conditions::*;
 use crate::devices::*;
 use crate::energy::*;
@@ -23,7 +19,7 @@ use crate::hooks::*;
 use crate::schedules::*;
 use crate::settings::{DEFAULT_ENERGY_PRICE_PENCE_PER_KWH, Settings, optional_u64_env, parse_string_list};
 use crate::state::*;
-use crate::time::{deserialize_optional_label, non_empty_label, now_ms};
+use crate::time::now_ms;
 
 #[test]
 fn parses_default_settings_without_optional_values() {

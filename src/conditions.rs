@@ -9,7 +9,7 @@ use axum::http::StatusCode;
 use reqwest::Method as HttpMethod;
 use serde::{Deserialize, Serialize};
 use tokio::time::sleep;
-use tracing::{info, warn};
+use tracing::warn;
 
 use crate::api_error::AppError;
 use crate::hooks::HookSource;
