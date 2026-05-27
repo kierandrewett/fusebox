@@ -49,49 +49,49 @@ pub(crate) const APP_BUNDLE_JS: &str = include_str!("../web/dist/app.js");
 
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct UsageHistoryResponse {
-    series: Vec<UsageHistorySeries>,
-    totals: Vec<UsageHistoryPoint>,
-    errors: Vec<UsageHistoryError>,
-    updated_at_ms: u128,
-    range: &'static str,
-    range_label: &'static str,
-    interval: &'static str,
-    start_date: String,
-    end_date: String,
-    unit: &'static str,
+    pub(crate) series: Vec<UsageHistorySeries>,
+    pub(crate) totals: Vec<UsageHistoryPoint>,
+    pub(crate) errors: Vec<UsageHistoryError>,
+    pub(crate) updated_at_ms: u128,
+    pub(crate) range: &'static str,
+    pub(crate) range_label: &'static str,
+    pub(crate) interval: &'static str,
+    pub(crate) start_date: String,
+    pub(crate) end_date: String,
+    pub(crate) unit: &'static str,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct UsageHistorySeries {
-    device_name: String,
-    points: Vec<UsageHistoryPoint>,
+    pub(crate) device_name: String,
+    pub(crate) points: Vec<UsageHistoryPoint>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct UsageHistoryPoint {
-    timestamp_ms: i64,
-    value: f64,
+    pub(crate) timestamp_ms: i64,
+    pub(crate) value: f64,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct UsageHistoryError {
-    device_name: String,
-    message: String,
+    pub(crate) device_name: String,
+    pub(crate) message: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct UsageHistoryQuery {
-    range: Option<String>,
+    pub(crate) range: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct UsageHistoryRange {
-    key: &'static str,
-    label: &'static str,
-    interval_label: &'static str,
-    unit: &'static str,
-    start: UsageHistoryStart,
-    kind: UsageHistoryKind,
+    pub(crate) key: &'static str,
+    pub(crate) label: &'static str,
+    pub(crate) interval_label: &'static str,
+    pub(crate) unit: &'static str,
+    pub(crate) start: UsageHistoryStart,
+    pub(crate) kind: UsageHistoryKind,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -113,15 +113,15 @@ pub(crate) enum UsageHistoryKind {
 
 #[derive(Debug, Clone)]
 pub(crate) struct ExportDevice {
-    name: String,
-    config: DeviceConfig,
+    pub(crate) name: String,
+    pub(crate) config: DeviceConfig,
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct ExportSpec {
-    sheet_name: &'static str,
-    value_format: &'static str,
-    kind: ExportKind,
+    pub(crate) sheet_name: &'static str,
+    pub(crate) value_format: &'static str,
+    pub(crate) kind: ExportKind,
 }
 
 #[derive(Debug, Clone)]
@@ -146,69 +146,69 @@ pub(crate) enum ExportKind {
 
 #[derive(Debug, Clone)]
 pub(crate) struct ExportTable {
-    sheet_name: &'static str,
-    value_format: &'static str,
-    rows: Vec<ExportRow>,
+    pub(crate) sheet_name: &'static str,
+    pub(crate) value_format: &'static str,
+    pub(crate) rows: Vec<ExportRow>,
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct ExportRow {
-    timestamp: DateTime<Utc>,
-    values: BTreeMap<String, f64>,
+    pub(crate) timestamp: DateTime<Utc>,
+    pub(crate) values: BTreeMap<String, f64>,
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct ExportError {
-    sheet_name: &'static str,
-    device_name: String,
-    message: String,
+    pub(crate) sheet_name: &'static str,
+    pub(crate) device_name: String,
+    pub(crate) message: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct SetPowerRequest {
-    on: bool,
+    pub(crate) on: bool,
     #[serde(default)]
-    duration_seconds: Option<u64>,
+    pub(crate) duration_seconds: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
 pub(crate) struct ToggleDeviceRequest {
     #[serde(default)]
-    duration_seconds: Option<u64>,
+    pub(crate) duration_seconds: Option<u64>,
 }
 
 pub(crate) const MIN_INTERVAL_CYCLE_SECONDS: u64 = 60;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct ScheduleConfig {
-    id: String,
-    device_name: String,
+    pub(crate) id: String,
+    pub(crate) device_name: String,
     #[serde(default)]
-    kind: ScheduleKind,
+    pub(crate) kind: ScheduleKind,
     #[serde(default)]
-    cron: Option<String>,
+    pub(crate) cron: Option<String>,
     #[serde(default)]
-    action: Option<ScheduleAction>,
+    pub(crate) action: Option<ScheduleAction>,
     #[serde(default)]
-    on_seconds: Option<u64>,
+    pub(crate) on_seconds: Option<u64>,
     #[serde(default)]
-    off_seconds: Option<u64>,
+    pub(crate) off_seconds: Option<u64>,
     #[serde(default)]
-    start_action: Option<ScheduleAction>,
+    pub(crate) start_action: Option<ScheduleAction>,
     #[serde(default)]
-    starts_at_ms: Option<u128>,
+    pub(crate) starts_at_ms: Option<u128>,
     #[serde(default = "default_true")]
-    enabled: bool,
+    pub(crate) enabled: bool,
     #[serde(default)]
-    label: Option<String>,
+    pub(crate) label: Option<String>,
     #[serde(default)]
-    condition_ids: Vec<String>,
+    pub(crate) condition_ids: Vec<String>,
     #[serde(default)]
-    created_at_ms: u128,
+    pub(crate) created_at_ms: u128,
     #[serde(default)]
-    last_fired_at_ms: Option<u128>,
+    pub(crate) last_fired_at_ms: Option<u128>,
     #[serde(default)]
-    last_error: Option<String>,
+    pub(crate) last_error: Option<String>,
 }
 
 pub(crate) fn default_true() -> bool {
@@ -248,41 +248,41 @@ pub(crate) enum CreateScheduleRequest {
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct UpdateScheduleRequest {
     #[serde(default)]
-    enabled: Option<bool>,
+    pub(crate) enabled: Option<bool>,
     #[serde(default)]
-    cron: Option<String>,
+    pub(crate) cron: Option<String>,
     #[serde(default)]
-    action: Option<ScheduleAction>,
+    pub(crate) action: Option<ScheduleAction>,
     #[serde(default)]
-    on_seconds: Option<u64>,
+    pub(crate) on_seconds: Option<u64>,
     #[serde(default)]
-    off_seconds: Option<u64>,
+    pub(crate) off_seconds: Option<u64>,
     #[serde(default)]
-    start_action: Option<ScheduleAction>,
+    pub(crate) start_action: Option<ScheduleAction>,
     #[serde(default, deserialize_with = "deserialize_optional_label")]
-    label: Option<Option<String>>,
+    pub(crate) label: Option<Option<String>>,
     #[serde(default)]
-    condition_ids: Option<Vec<String>>,
+    pub(crate) condition_ids: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct ScheduleView {
-    id: String,
-    device_name: String,
-    kind: ScheduleKind,
-    cron: Option<String>,
-    action: Option<ScheduleAction>,
-    on_seconds: Option<u64>,
-    off_seconds: Option<u64>,
-    start_action: Option<ScheduleAction>,
-    starts_at_ms: Option<u128>,
-    enabled: bool,
-    label: Option<String>,
-    condition_ids: Vec<String>,
-    created_at_ms: u128,
-    last_fired_at_ms: Option<u128>,
-    last_error: Option<String>,
-    next_fire_at_ms: Option<i64>,
+    pub(crate) id: String,
+    pub(crate) device_name: String,
+    pub(crate) kind: ScheduleKind,
+    pub(crate) cron: Option<String>,
+    pub(crate) action: Option<ScheduleAction>,
+    pub(crate) on_seconds: Option<u64>,
+    pub(crate) off_seconds: Option<u64>,
+    pub(crate) start_action: Option<ScheduleAction>,
+    pub(crate) starts_at_ms: Option<u128>,
+    pub(crate) enabled: bool,
+    pub(crate) label: Option<String>,
+    pub(crate) condition_ids: Vec<String>,
+    pub(crate) created_at_ms: u128,
+    pub(crate) last_fired_at_ms: Option<u128>,
+    pub(crate) last_error: Option<String>,
+    pub(crate) next_fire_at_ms: Option<i64>,
 }
 
 pub(crate) const MIN_CONDITION_POLL_SECONDS: u64 = 5;
@@ -300,58 +300,58 @@ pub(crate) enum ConditionAction {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct ConditionConfig {
-    id: String,
-    name: String,
+    pub(crate) id: String,
+    pub(crate) name: String,
     #[serde(default)]
-    device_name: String,
-    url: String,
+    pub(crate) device_name: String,
+    pub(crate) url: String,
     #[serde(default = "default_http_method")]
-    method: String,
+    pub(crate) method: String,
     #[serde(default)]
-    headers: BTreeMap<String, String>,
+    pub(crate) headers: BTreeMap<String, String>,
     #[serde(default)]
-    body: Option<String>,
+    pub(crate) body: Option<String>,
     #[serde(default = "default_status_match")]
-    status_match: String,
+    pub(crate) status_match: String,
     #[serde(default)]
-    body_contains: Option<String>,
+    pub(crate) body_contains: Option<String>,
     #[serde(default = "default_condition_poll_seconds")]
-    poll_seconds: u64,
+    pub(crate) poll_seconds: u64,
     #[serde(default = "default_true")]
-    enabled: bool,
+    pub(crate) enabled: bool,
     #[serde(default)]
-    action_on_pass: Option<ConditionAction>,
+    pub(crate) action_on_pass: Option<ConditionAction>,
     #[serde(default)]
-    action_on_fail: Option<ConditionAction>,
+    pub(crate) action_on_fail: Option<ConditionAction>,
     #[serde(default)]
-    created_at_ms: u128,
+    pub(crate) created_at_ms: u128,
     #[serde(default)]
-    last_checked_at_ms: Option<u128>,
+    pub(crate) last_checked_at_ms: Option<u128>,
     #[serde(default)]
-    last_passing: Option<bool>,
+    pub(crate) last_passing: Option<bool>,
     #[serde(default)]
-    last_status_code: Option<u16>,
+    pub(crate) last_status_code: Option<u16>,
     #[serde(default)]
-    last_error: Option<String>,
+    pub(crate) last_error: Option<String>,
     #[serde(default)]
-    last_action_at_ms: Option<u128>,
+    pub(crate) last_action_at_ms: Option<u128>,
     #[serde(default)]
-    last_action: Option<ConditionAction>,
+    pub(crate) last_action: Option<ConditionAction>,
     #[serde(default)]
-    last_action_error: Option<String>,
+    pub(crate) last_action_error: Option<String>,
     /// New probe results must remain stable for this many seconds before
     /// they update `last_passing`. 0 (default for back-compat) means
     /// react to every change immediately. Prevents flaky probes from
     /// causing rapid device toggling.
     #[serde(default)]
-    min_stable_seconds: u64,
+    pub(crate) min_stable_seconds: u64,
     /// The most recent probe value that differs from `last_passing` and
     /// is waiting to be promoted. None when the latest probe matched.
     #[serde(default)]
-    pending_value: Option<bool>,
+    pub(crate) pending_value: Option<bool>,
     /// When `pending_value` was first observed.
     #[serde(default)]
-    pending_since_ms: Option<u128>,
+    pub(crate) pending_since_ms: Option<u128>,
 }
 
 pub(crate) fn default_http_method() -> String {
@@ -368,59 +368,59 @@ pub(crate) fn default_condition_poll_seconds() -> u64 {
 
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct CreateConditionRequest {
-    name: String,
-    device_name: String,
-    url: String,
+    pub(crate) name: String,
+    pub(crate) device_name: String,
+    pub(crate) url: String,
     #[serde(default = "default_http_method")]
-    method: String,
+    pub(crate) method: String,
     #[serde(default)]
-    headers: BTreeMap<String, String>,
+    pub(crate) headers: BTreeMap<String, String>,
     #[serde(default)]
-    body: Option<String>,
+    pub(crate) body: Option<String>,
     #[serde(default = "default_status_match")]
-    status_match: String,
+    pub(crate) status_match: String,
     #[serde(default)]
-    body_contains: Option<String>,
+    pub(crate) body_contains: Option<String>,
     #[serde(default = "default_condition_poll_seconds")]
-    poll_seconds: u64,
+    pub(crate) poll_seconds: u64,
     #[serde(default = "default_true")]
-    enabled: bool,
+    pub(crate) enabled: bool,
     #[serde(default)]
-    action_on_pass: Option<ConditionAction>,
+    pub(crate) action_on_pass: Option<ConditionAction>,
     #[serde(default)]
-    action_on_fail: Option<ConditionAction>,
+    pub(crate) action_on_fail: Option<ConditionAction>,
     #[serde(default)]
-    min_stable_seconds: u64,
+    pub(crate) min_stable_seconds: u64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct UpdateConditionRequest {
     #[serde(default)]
-    name: Option<String>,
+    pub(crate) name: Option<String>,
     #[serde(default)]
-    device_name: Option<String>,
+    pub(crate) device_name: Option<String>,
     #[serde(default)]
-    url: Option<String>,
+    pub(crate) url: Option<String>,
     #[serde(default)]
-    method: Option<String>,
+    pub(crate) method: Option<String>,
     #[serde(default)]
-    headers: Option<BTreeMap<String, String>>,
+    pub(crate) headers: Option<BTreeMap<String, String>>,
     #[serde(default, deserialize_with = "deserialize_optional_label")]
-    body: Option<Option<String>>,
+    pub(crate) body: Option<Option<String>>,
     #[serde(default)]
-    status_match: Option<String>,
+    pub(crate) status_match: Option<String>,
     #[serde(default, deserialize_with = "deserialize_optional_label")]
-    body_contains: Option<Option<String>>,
+    pub(crate) body_contains: Option<Option<String>>,
     #[serde(default)]
-    poll_seconds: Option<u64>,
+    pub(crate) poll_seconds: Option<u64>,
     #[serde(default)]
-    enabled: Option<bool>,
+    pub(crate) enabled: Option<bool>,
     #[serde(default, deserialize_with = "deserialize_optional_condition_action")]
-    action_on_pass: Option<Option<ConditionAction>>,
+    pub(crate) action_on_pass: Option<Option<ConditionAction>>,
     #[serde(default, deserialize_with = "deserialize_optional_condition_action")]
-    action_on_fail: Option<Option<ConditionAction>>,
+    pub(crate) action_on_fail: Option<Option<ConditionAction>>,
     #[serde(default)]
-    min_stable_seconds: Option<u64>,
+    pub(crate) min_stable_seconds: Option<u64>,
 }
 
 pub(crate) fn deserialize_optional_condition_action<'de, D>(
@@ -434,40 +434,40 @@ where
 
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct ConditionView {
-    id: String,
-    name: String,
-    device_name: String,
-    url: String,
-    method: String,
-    headers: BTreeMap<String, String>,
-    body: Option<String>,
-    status_match: String,
-    body_contains: Option<String>,
-    poll_seconds: u64,
-    enabled: bool,
-    action_on_pass: Option<ConditionAction>,
-    action_on_fail: Option<ConditionAction>,
-    created_at_ms: u128,
-    last_checked_at_ms: Option<u128>,
-    last_passing: Option<bool>,
-    last_status_code: Option<u16>,
-    last_error: Option<String>,
-    last_action_at_ms: Option<u128>,
-    last_action: Option<ConditionAction>,
-    last_action_error: Option<String>,
-    min_stable_seconds: u64,
-    pending_value: Option<bool>,
-    pending_since_ms: Option<u128>,
+    pub(crate) id: String,
+    pub(crate) name: String,
+    pub(crate) device_name: String,
+    pub(crate) url: String,
+    pub(crate) method: String,
+    pub(crate) headers: BTreeMap<String, String>,
+    pub(crate) body: Option<String>,
+    pub(crate) status_match: String,
+    pub(crate) body_contains: Option<String>,
+    pub(crate) poll_seconds: u64,
+    pub(crate) enabled: bool,
+    pub(crate) action_on_pass: Option<ConditionAction>,
+    pub(crate) action_on_fail: Option<ConditionAction>,
+    pub(crate) created_at_ms: u128,
+    pub(crate) last_checked_at_ms: Option<u128>,
+    pub(crate) last_passing: Option<bool>,
+    pub(crate) last_status_code: Option<u16>,
+    pub(crate) last_error: Option<String>,
+    pub(crate) last_action_at_ms: Option<u128>,
+    pub(crate) last_action: Option<ConditionAction>,
+    pub(crate) last_action_error: Option<String>,
+    pub(crate) min_stable_seconds: u64,
+    pub(crate) pending_value: Option<bool>,
+    pub(crate) pending_since_ms: Option<u128>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct ConditionListResponse {
-    conditions: Vec<ConditionView>,
+    pub(crate) conditions: Vec<ConditionView>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct ScheduleListResponse {
-    schedules: Vec<ScheduleView>,
+    pub(crate) schedules: Vec<ScheduleView>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -491,34 +491,34 @@ pub(crate) enum HookSource {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct HookConfig {
-    id: String,
-    name: String,
+    pub(crate) id: String,
+    pub(crate) name: String,
     #[serde(default = "default_true")]
-    enabled: bool,
-    url: String,
+    pub(crate) enabled: bool,
+    pub(crate) url: String,
     #[serde(default = "default_http_method")]
-    method: String,
+    pub(crate) method: String,
     #[serde(default)]
-    headers: BTreeMap<String, String>,
+    pub(crate) headers: BTreeMap<String, String>,
     /// Optional body. If absent, a default JSON payload is sent.
     #[serde(default)]
-    body: Option<String>,
+    pub(crate) body: Option<String>,
     /// Empty = matches every device.
     #[serde(default)]
-    device_filter: Vec<String>,
+    pub(crate) device_filter: Vec<String>,
     /// Empty = matches every event.
     #[serde(default)]
-    event_filter: Vec<HookEvent>,
+    pub(crate) event_filter: Vec<HookEvent>,
     #[serde(default)]
-    created_at_ms: u128,
+    pub(crate) created_at_ms: u128,
     #[serde(default)]
-    last_fired_at_ms: Option<u128>,
+    pub(crate) last_fired_at_ms: Option<u128>,
     #[serde(default)]
-    last_event: Option<HookEvent>,
+    pub(crate) last_event: Option<HookEvent>,
     #[serde(default)]
-    last_status_code: Option<u16>,
+    pub(crate) last_status_code: Option<u16>,
     #[serde(default)]
-    last_error: Option<String>,
+    pub(crate) last_error: Option<String>,
 }
 
 // ---------- Automations (flowchart) ----------
@@ -557,151 +557,151 @@ pub(crate) enum AutomationNodeConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct CronTriggerCfg {
-    cron: String,
+    pub(crate) cron: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct IntervalTriggerCfg {
-    on_seconds: u64,
-    off_seconds: u64,
-    start_action: ScheduleAction,
+    pub(crate) on_seconds: u64,
+    pub(crate) off_seconds: u64,
+    pub(crate) start_action: ScheduleAction,
     #[serde(default)]
-    starts_at_ms: Option<u128>,
+    pub(crate) starts_at_ms: Option<u128>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct DeviceEventTriggerCfg {
-    device_name: String,
-    event: HookEvent,
+    pub(crate) device_name: String,
+    pub(crate) event: HookEvent,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct HttpProbeCfg {
-    url: String,
+    pub(crate) url: String,
     #[serde(default = "default_http_method")]
-    method: String,
+    pub(crate) method: String,
     #[serde(default)]
-    headers: BTreeMap<String, String>,
+    pub(crate) headers: BTreeMap<String, String>,
     #[serde(default)]
-    body: Option<String>,
+    pub(crate) body: Option<String>,
     #[serde(default = "default_status_match")]
-    status_match: String,
+    pub(crate) status_match: String,
     #[serde(default)]
-    body_contains: Option<String>,
+    pub(crate) body_contains: Option<String>,
     #[serde(default = "default_condition_poll_seconds")]
-    poll_seconds: u64,
+    pub(crate) poll_seconds: u64,
     #[serde(default)]
-    min_stable_seconds: u64,
+    pub(crate) min_stable_seconds: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct DebounceCfg {
-    hold_seconds: u64,
+    pub(crate) hold_seconds: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct SetDeviceCfg {
-    device_name: String,
-    action: ScheduleAction,
+    pub(crate) device_name: String,
+    pub(crate) action: ScheduleAction,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct ToggleDeviceCfg {
-    device_name: String,
+    pub(crate) device_name: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct FireHookCfg {
-    hook_id: String,
+    pub(crate) hook_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct AutomationNode {
-    id: String,
-    config: AutomationNodeConfig,
+    pub(crate) id: String,
+    pub(crate) config: AutomationNodeConfig,
     #[serde(default)]
-    x: f64,
+    pub(crate) x: f64,
     #[serde(default)]
-    y: f64,
+    pub(crate) y: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct AutomationEdge {
-    id: String,
-    source_node: String,
-    target_node: String,
+    pub(crate) id: String,
+    pub(crate) source_node: String,
+    pub(crate) target_node: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub(crate) struct NodeRuntimeState {
     #[serde(default)]
-    last_value: Option<bool>,
+    pub(crate) last_value: Option<bool>,
     #[serde(default)]
-    last_fired_at_ms: Option<u128>,
+    pub(crate) last_fired_at_ms: Option<u128>,
     #[serde(default)]
-    last_error: Option<String>,
+    pub(crate) last_error: Option<String>,
     // Internal state for cron/interval/probe/debounce — not exposed in the
     // public view JSON. Reset on server restart.
     #[serde(skip)]
-    last_checked_at_ms: Option<u128>,
+    pub(crate) last_checked_at_ms: Option<u128>,
     #[serde(skip)]
-    pending_value: Option<bool>,
+    pub(crate) pending_value: Option<bool>,
     #[serde(skip)]
-    pending_since_ms: Option<u128>,
+    pub(crate) pending_since_ms: Option<u128>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub(crate) struct AutomationStatus {
     #[serde(default)]
-    last_fired_at_ms: Option<u128>,
+    pub(crate) last_fired_at_ms: Option<u128>,
     #[serde(default)]
-    last_error: Option<String>,
+    pub(crate) last_error: Option<String>,
     #[serde(default)]
-    node_states: BTreeMap<String, NodeRuntimeState>,
+    pub(crate) node_states: BTreeMap<String, NodeRuntimeState>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct Automation {
-    id: String,
-    name: String,
+    pub(crate) id: String,
+    pub(crate) name: String,
     #[serde(default = "default_true")]
-    enabled: bool,
+    pub(crate) enabled: bool,
     #[serde(default)]
-    nodes: Vec<AutomationNode>,
+    pub(crate) nodes: Vec<AutomationNode>,
     #[serde(default)]
-    edges: Vec<AutomationEdge>,
+    pub(crate) edges: Vec<AutomationEdge>,
     #[serde(default)]
-    created_at_ms: u128,
+    pub(crate) created_at_ms: u128,
     #[serde(default)]
-    status: AutomationStatus,
+    pub(crate) status: AutomationStatus,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct CreateAutomationRequest {
-    name: String,
+    pub(crate) name: String,
     #[serde(default = "default_true")]
-    enabled: bool,
+    pub(crate) enabled: bool,
     #[serde(default)]
-    nodes: Vec<AutomationNode>,
+    pub(crate) nodes: Vec<AutomationNode>,
     #[serde(default)]
-    edges: Vec<AutomationEdge>,
+    pub(crate) edges: Vec<AutomationEdge>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct UpdateAutomationRequest {
     #[serde(default)]
-    name: Option<String>,
+    pub(crate) name: Option<String>,
     #[serde(default)]
-    enabled: Option<bool>,
+    pub(crate) enabled: Option<bool>,
     #[serde(default)]
-    nodes: Option<Vec<AutomationNode>>,
+    pub(crate) nodes: Option<Vec<AutomationNode>>,
     #[serde(default)]
-    edges: Option<Vec<AutomationEdge>>,
+    pub(crate) edges: Option<Vec<AutomationEdge>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct AutomationListResponse {
-    automations: Vec<Automation>,
+    pub(crate) automations: Vec<Automation>,
 }
 
 pub(crate) async fn run() -> Result<()> {
@@ -1646,63 +1646,63 @@ pub(crate) fn new_condition_id() -> String {
 
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct CreateHookRequest {
-    name: String,
-    url: String,
+    pub(crate) name: String,
+    pub(crate) url: String,
     #[serde(default = "default_http_method")]
-    method: String,
+    pub(crate) method: String,
     #[serde(default)]
-    headers: BTreeMap<String, String>,
+    pub(crate) headers: BTreeMap<String, String>,
     #[serde(default)]
-    body: Option<String>,
+    pub(crate) body: Option<String>,
     #[serde(default)]
-    device_filter: Vec<String>,
+    pub(crate) device_filter: Vec<String>,
     #[serde(default)]
-    event_filter: Vec<HookEvent>,
+    pub(crate) event_filter: Vec<HookEvent>,
     #[serde(default = "default_true")]
-    enabled: bool,
+    pub(crate) enabled: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct UpdateHookRequest {
     #[serde(default)]
-    name: Option<String>,
+    pub(crate) name: Option<String>,
     #[serde(default)]
-    url: Option<String>,
+    pub(crate) url: Option<String>,
     #[serde(default)]
-    method: Option<String>,
+    pub(crate) method: Option<String>,
     #[serde(default)]
-    headers: Option<BTreeMap<String, String>>,
+    pub(crate) headers: Option<BTreeMap<String, String>>,
     #[serde(default, deserialize_with = "deserialize_optional_label")]
-    body: Option<Option<String>>,
+    pub(crate) body: Option<Option<String>>,
     #[serde(default)]
-    device_filter: Option<Vec<String>>,
+    pub(crate) device_filter: Option<Vec<String>>,
     #[serde(default)]
-    event_filter: Option<Vec<HookEvent>>,
+    pub(crate) event_filter: Option<Vec<HookEvent>>,
     #[serde(default)]
-    enabled: Option<bool>,
+    pub(crate) enabled: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct HookView {
-    id: String,
-    name: String,
-    enabled: bool,
-    url: String,
-    method: String,
-    headers: BTreeMap<String, String>,
-    body: Option<String>,
-    device_filter: Vec<String>,
-    event_filter: Vec<HookEvent>,
-    created_at_ms: u128,
-    last_fired_at_ms: Option<u128>,
-    last_event: Option<HookEvent>,
-    last_status_code: Option<u16>,
-    last_error: Option<String>,
+    pub(crate) id: String,
+    pub(crate) name: String,
+    pub(crate) enabled: bool,
+    pub(crate) url: String,
+    pub(crate) method: String,
+    pub(crate) headers: BTreeMap<String, String>,
+    pub(crate) body: Option<String>,
+    pub(crate) device_filter: Vec<String>,
+    pub(crate) event_filter: Vec<HookEvent>,
+    pub(crate) created_at_ms: u128,
+    pub(crate) last_fired_at_ms: Option<u128>,
+    pub(crate) last_event: Option<HookEvent>,
+    pub(crate) last_status_code: Option<u16>,
+    pub(crate) last_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct HookListResponse {
-    hooks: Vec<HookView>,
+    pub(crate) hooks: Vec<HookView>,
 }
 
 pub(crate) fn hook_view(hook: &HookConfig) -> HookView {
@@ -2200,9 +2200,9 @@ pub(crate) fn status_matches(ranges: &[std::ops::RangeInclusive<u16>], code: u16
 }
 
 pub(crate) struct ProbeOutcome {
-    passing: bool,
-    status_code: Option<u16>,
-    error: Option<String>,
+    pub(crate) passing: bool,
+    pub(crate) status_code: Option<u16>,
+    pub(crate) error: Option<String>,
 }
 
 pub(crate) async fn probe_condition_once(
@@ -3782,14 +3782,14 @@ pub(crate) fn hook_matches(hook: &HookConfig, device: &str, event: HookEvent) ->
 
 #[derive(Debug, Clone)]
 pub(crate) struct HookTemplateContext {
-    device: String,
-    nickname: String,
-    model: String,
-    event: HookEvent,
-    source: HookSource,
-    previous_on: Option<bool>,
-    new_on: Option<bool>,
-    timestamp_ms: u128,
+    pub(crate) device: String,
+    pub(crate) nickname: String,
+    pub(crate) model: String,
+    pub(crate) event: HookEvent,
+    pub(crate) source: HookSource,
+    pub(crate) previous_on: Option<bool>,
+    pub(crate) new_on: Option<bool>,
+    pub(crate) timestamp_ms: u128,
 }
 
 impl HookTemplateContext {

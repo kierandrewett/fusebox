@@ -1,6 +1,6 @@
 use crate::legacy::{
     Automation, CONDITION_HTTP_TIMEOUT, ConditionConfig, HookConfig, ScheduleConfig,
-    compute_effective, estimate_energy_cost_pence, migrate_to_automations,
+    compute_effective, estimate_energy_cost_pence,
 };
 use crate::migration::migrate_to_automations;
 use crate::settings::Settings;
