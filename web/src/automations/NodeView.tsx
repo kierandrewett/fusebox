@@ -44,12 +44,13 @@ export function NodeView({ data, emit }: Props) {
   };
 
   // Stop pointerdown from bubbling to Rete's drag handler ONLY when it
-  // originates inside a form control. Without this, clicks on inputs/selects
-  // start a node-drag instead of focusing the field. Letting the event bubble
-  // for clicks on node chrome keeps node dragging working.
+  // originates inside an interactive control. Without this, clicks on
+  // inputs/selects/<summary> elements start a node-drag instead of doing
+  // the thing they should do. Letting the event bubble for clicks on plain
+  // node chrome keeps node dragging working.
   const swallowOnFormControls = (event: React.PointerEvent) => {
     const target = event.target as HTMLElement;
-    if (target.closest("input, select, textarea, button")) {
+    if (target.closest("input, select, textarea, button, summary, [role=button]")) {
       event.stopPropagation();
     }
   };
@@ -515,10 +516,13 @@ function HttpProbeBody({
             <option>PUT</option>
           </select>
         </Field>
-        <Field label="Poll every">
-          <SecondsInput
-            value={config.poll_seconds}
-            onChange={(v) => onChange({ ...config, poll_seconds: v })}
+        <Field label="Status match">
+          <input
+            type="text"
+            value={config.status_match}
+            onChange={(e) => onChange({ ...config, status_match: e.target.value })}
+            placeholder="200-299"
+            spellCheck={false}
           />
         </Field>
       </div>
@@ -528,15 +532,6 @@ function HttpProbeBody({
           value={config.url}
           onChange={(e) => onChange({ ...config, url: e.target.value })}
           placeholder="https://example.com/status"
-          spellCheck={false}
-        />
-      </Field>
-      <Field label="Status match">
-        <input
-          type="text"
-          value={config.status_match}
-          onChange={(e) => onChange({ ...config, status_match: e.target.value })}
-          placeholder="200-299"
           spellCheck={false}
         />
       </Field>
@@ -571,16 +566,6 @@ function HttpProbeBody({
             spellCheck={false}
           />
         </Field>
-        <Field label="Stable for">
-          <SecondsInput
-            value={config.min_stable_seconds}
-            onChange={(v) => onChange({ ...config, min_stable_seconds: v })}
-          />
-        </Field>
-        <p className="fb-node-hint">
-          The probe re-runs at the poll interval. "Stable for" debounces flapping — a flipped result
-          must persist that long before downstream nodes see it.
-        </p>
       </details>
     </>
   );

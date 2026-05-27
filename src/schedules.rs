@@ -372,7 +372,18 @@ pub(crate) fn normalize_cron(expression: &str) -> Result<String> {
 }
 
 pub(crate) fn parse_cron(expression: &str) -> Result<CronSchedule> {
-    let translated = translate_cron_to_crate_format(expression);
+    // The `cron` crate wants 6 or 7 fields (seconds first). Accept the
+    // standard 5-field form too by prepending a "0" seconds field, so that
+    // both legacy schedule data and freshly-typed expressions parse.
+    let trimmed = expression.trim();
+    let normalized: String = if trimmed.starts_with('@') {
+        trimmed.to_string()
+    } else if trimmed.split_whitespace().count() == 5 {
+        format!("0 {trimmed}")
+    } else {
+        trimmed.to_string()
+    };
+    let translated = translate_cron_to_crate_format(&normalized);
     CronSchedule::from_str(&translated).map_err(|error| anyhow!("invalid cron expression: {error}"))
 }
 

@@ -23,6 +23,7 @@ export function AutomationsTab() {
 
   const editorContainerRef = useRef<HTMLDivElement | null>(null);
   const editorApiRef = useRef<CreateEditorResult | null>(null);
+  const [editorReady, setEditorReady] = useState(false);
 
   const devicesRef = useRef<DeviceSummary[]>([]);
   const hooksRef = useRef<HookSummary[]>([]);
@@ -65,6 +66,7 @@ export function AutomationsTab() {
         api = created;
         editorApiRef.current = created;
         created.onChange(() => setDirty(true));
+        setEditorReady(true);
       })
       .catch((err) => {
         setError(`editor failed: ${err}`);
@@ -74,6 +76,7 @@ export function AutomationsTab() {
       cancelled = true;
       api?.destroy();
       editorApiRef.current = null;
+      setEditorReady(false);
     };
   }, []);
 
@@ -84,12 +87,15 @@ export function AutomationsTab() {
   );
   useEffect(() => {
     const api = editorApiRef.current;
-    if (!api || !selected) return;
+    if (!api || !editorReady) return;
     (async () => {
-      await api.load(selected.nodes, selected.edges);
+      // load([], []) clears the canvas; passing the new selection swaps it
+      // in. Either way, the canvas always reflects the current selection
+      // (including "nothing selected" after a delete).
+      await api.load(selected?.nodes ?? [], selected?.edges ?? []);
       setDirty(false);
     })();
-  }, [selected?.id]);
+  }, [selected?.id, editorReady]);
 
   const handleAdd = async () => {
     setError(null);

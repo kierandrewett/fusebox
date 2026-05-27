@@ -508,6 +508,9 @@ pub(crate) async fn execute_action(
 ) -> Result<Option<String>> {
     match config {
         AutomationNodeConfig::SetDevice { set_device } => {
+            if set_device.device_name.is_empty() {
+                return Ok(None);
+            }
             let target = match set_device.action {
                 ScheduleAction::On => true,
                 ScheduleAction::Off => false,
@@ -540,6 +543,9 @@ pub(crate) async fn execute_action(
             Ok(Some(set_device.device_name.clone()))
         }
         AutomationNodeConfig::ToggleDevice { toggle_device } => {
+            if toggle_device.device_name.is_empty() {
+                return Ok(None);
+            }
             let current = {
                 let devices = state.devices.read().await;
                 devices
@@ -568,6 +574,9 @@ pub(crate) async fn execute_action(
         AutomationNodeConfig::FireHook {
             fire_hook: fire_hook_cfg,
         } => {
+            if fire_hook_cfg.hook_id.is_empty() {
+                return Ok(None);
+            }
             let hook = {
                 let hooks = state.hooks.read().await;
                 hooks.get(&fire_hook_cfg.hook_id).cloned()

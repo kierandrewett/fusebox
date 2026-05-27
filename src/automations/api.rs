@@ -201,6 +201,10 @@ pub(crate) fn has_cycle_dfs<'a>(
 }
 
 pub(crate) fn validate_node_config(config: &AutomationNodeConfig) -> Result<()> {
+    // Validation is for "obviously wrong" shapes only — invalid cron syntax,
+    // a zero-length interval cycle, an unparseable URL. Empty pickers
+    // (device_name, hook_id) are allowed so users can draft a node now and
+    // wire it up later; the engine simply skips actions with missing targets.
     match config {
         AutomationNodeConfig::CronTrigger { cron_trigger } => {
             parse_cron(&cron_trigger.cron)
@@ -217,32 +221,20 @@ pub(crate) fn validate_node_config(config: &AutomationNodeConfig) -> Result<()> 
             }
         }
         AutomationNodeConfig::HttpProbe { http_probe } => {
-            validate_url(&http_probe.url)?;
+            // Only validate URL if one has been provided. Empty URL = node
+            // is still being configured; it just won't fire.
+            if !http_probe.url.is_empty() {
+                validate_url(&http_probe.url)?;
+            }
             validate_http_method(&http_probe.method)?;
             parse_status_match(&http_probe.status_match)?;
             clamp_poll_seconds(http_probe.poll_seconds)?;
         }
-        AutomationNodeConfig::DeviceEventTrigger {
-            device_event_trigger,
-        } => {
-            if device_event_trigger.device_name.is_empty() {
-                return Err(anyhow!("device event trigger requires a device_name"));
-            }
-        }
-        AutomationNodeConfig::SetDevice { set_device } => {
-            if set_device.device_name.is_empty() {
-                return Err(anyhow!("set_device requires a device_name"));
-            }
-        }
-        AutomationNodeConfig::ToggleDevice { toggle_device } => {
-            if toggle_device.device_name.is_empty() {
-                return Err(anyhow!("toggle_device requires a device_name"));
-            }
-        }
-        AutomationNodeConfig::FireHook { fire_hook } => {
-            if fire_hook.hook_id.is_empty() {
-                return Err(anyhow!("fire_hook requires a hook_id"));
-            }
+        AutomationNodeConfig::DeviceEventTrigger { .. }
+        | AutomationNodeConfig::SetDevice { .. }
+        | AutomationNodeConfig::ToggleDevice { .. }
+        | AutomationNodeConfig::FireHook { .. } => {
+            // Picker may be empty while the user is still wiring things up.
         }
         AutomationNodeConfig::LogicAnd
         | AutomationNodeConfig::LogicOr
