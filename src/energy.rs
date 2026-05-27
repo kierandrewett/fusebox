@@ -16,7 +16,7 @@ use tapoctl::{DeviceConfig, DeviceModel};
 use tracing::warn;
 
 use crate::api_error::AppError;
-use crate::legacy::device_operation_lock;
+use crate::devices::device_operation_lock;
 use crate::state::AppState;
 use crate::time::now_ms;
 

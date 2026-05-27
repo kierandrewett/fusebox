@@ -13,7 +13,8 @@ use tracing::{info, warn};
 
 use crate::api_error::AppError;
 use crate::hooks::HookSource;
-use crate::legacy::{ensure_device_exists, reconcile_device};
+use crate::devices::reconcile_device;
+use crate::schedules::ensure_device_exists;
 use crate::schedules::default_true;
 use crate::state::{AppState, save_persisted_state};
 use crate::time::{deserialize_optional_label, non_empty_label, now_ms};

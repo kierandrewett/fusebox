@@ -14,7 +14,7 @@ use tracing::{info, warn};
 
 use crate::api_error::AppError;
 use crate::hooks::HookSource;
-use crate::legacy::{reconcile_device, set_schedule_intent};
+use crate::devices::reconcile::{reconcile_device, set_schedule_intent};
 use crate::state::{AppState, ScheduleAction, ScheduleKind, save_persisted_state};
 use crate::time::{deserialize_optional_label, non_empty_label, now_ms};
 

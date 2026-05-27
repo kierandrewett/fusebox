@@ -10,7 +10,9 @@ use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
 use crate::api_error::AppError;
-use crate::legacy::{default_http_method, default_true, non_empty_label, validate_http_method, validate_url};
+use crate::conditions::{default_http_method, validate_http_method, validate_url};
+use crate::schedules::default_true;
+use crate::time::non_empty_label;
 use crate::state::{AppState, save_persisted_state};
 use crate::time::{deserialize_optional_label, now_ms};
 

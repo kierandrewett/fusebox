@@ -1,7 +1,9 @@
-use crate::legacy::{
-    Automation, CONDITION_HTTP_TIMEOUT, ConditionConfig, HookConfig, ScheduleConfig,
-    compute_effective, estimate_energy_cost_pence,
-};
+use crate::automations::types::Automation;
+use crate::conditions::{CONDITION_HTTP_TIMEOUT, ConditionConfig};
+use crate::devices::reconcile::compute_effective;
+use crate::energy::estimate_energy_cost_pence;
+use crate::hooks::HookConfig;
+use crate::schedules::ScheduleConfig;
 use crate::migration::migrate_to_automations;
 use crate::settings::Settings;
 use crate::time::now_ms;

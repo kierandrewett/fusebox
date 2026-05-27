@@ -1,7 +1,8 @@
-use crate::legacy::{
+use crate::automations::types::{
     Automation, AutomationEdge, AutomationNode, AutomationNodeConfig, AutomationStatus,
-    ConditionAction, CronTriggerCfg, HttpProbeCfg, IntervalTriggerCfg, SetDeviceCfg,
+    CronTriggerCfg, HttpProbeCfg, IntervalTriggerCfg, SetDeviceCfg,
 };
+use crate::conditions::ConditionAction;
 use crate::state::{PersistedState, ScheduleAction, ScheduleKind};
 use crate::time::now_ms;
 

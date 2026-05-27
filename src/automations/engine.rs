@@ -11,7 +11,7 @@ use crate::automations::types::{
 };
 use crate::conditions::{ConditionConfig, probe_condition_once};
 use crate::hooks::{HookEvent, HookSource, HookTemplateContext, fire_hook};
-use crate::legacy::{reconcile_device, set_schedule_intent};
+use crate::devices::reconcile::{reconcile_device, set_schedule_intent};
 use crate::schedules::parse_cron;
 use crate::state::{AppState, ScheduleAction, save_persisted_state};
 use crate::time::now_ms;
