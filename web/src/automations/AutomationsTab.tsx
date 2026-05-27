@@ -30,6 +30,15 @@ export function AutomationsTab() {
   devicesRef.current = devices;
   hooksRef.current = hooks;
 
+  // NodeViews live in their own React roots (Rete renders each node with a
+  // standalone createRoot), so updates to devices/hooks state up here don't
+  // automatically re-render the inline pickers inside each block. Maintain
+  // a Set of node-view listeners and call them whenever the data changes.
+  const ctxListenersRef = useRef(new Set<() => void>());
+  useEffect(() => {
+    for (const cb of ctxListenersRef.current) cb();
+  }, [devices, hooks]);
+
   // Initial load
   useEffect(() => {
     (async () => {
@@ -57,6 +66,10 @@ export function AutomationsTab() {
     createEditor(container, {
       devices: () => devicesRef.current,
       hooks: () => hooksRef.current,
+      subscribeContext: (cb) => {
+        ctxListenersRef.current.add(cb);
+        return () => ctxListenersRef.current.delete(cb);
+      },
     })
       .then((created) => {
         if (cancelled) {

@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Presets } from "rete-react-plugin";
 import type { FlowNode } from "./createEditor";
 import type {
@@ -19,6 +19,7 @@ interface Props {
 interface EditorCtx {
   devices: () => { name: string; nickname: string }[];
   hooks: () => { id: string; name: string }[];
+  subscribeContext?: (cb: () => void) => () => void;
 }
 
 export function NodeView({ data, emit }: Props) {
@@ -36,6 +37,28 @@ export function NodeView({ data, emit }: Props) {
     }
     return { devices: () => [], hooks: () => [] };
   })();
+
+  // Each NodeView lives in its own React root (Rete renders nodes via a
+  // standalone createRoot), so state updates in the parent AutomationsTab
+  // don't propagate. Subscribe to the context's change notifier so the
+  // device/hook dropdowns repopulate the moment data arrives.
+  //
+  // Also force-rerender once on mount: containerRef.current is null during
+  // the first render (refs only bind after commit), so the DOM walk above
+  // returns the default empty context. We need a second pass so the
+  // dropdowns can find the real ctx via the now-bound ref.
+  useEffect(() => {
+    force((n) => n + 1);
+    let el: HTMLElement | null = containerRef.current;
+    while (el) {
+      const found = (el as any).__fuseboxCtx as EditorCtx | undefined;
+      if (found?.subscribeContext) {
+        return found.subscribeContext(() => force((n) => n + 1));
+      }
+      el = el.parentElement;
+    }
+    return undefined;
+  }, []);
 
   const update = (next: NodeConfig) => {
     data.config = next;

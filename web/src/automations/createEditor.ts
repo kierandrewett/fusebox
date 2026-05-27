@@ -61,9 +61,16 @@ export interface CreateEditorResult {
   onChange: (cb: () => void) => () => void;
 }
 
+export interface EditorContext {
+  devices: () => { name: string; nickname: string }[];
+  hooks: () => { id: string; name: string }[];
+  /** Subscribe to changes in devices/hooks. Returns an unsubscribe. */
+  subscribeContext: (cb: () => void) => () => void;
+}
+
 export async function createEditor(
   container: HTMLElement,
-  ctx: { devices: () => { name: string; nickname: string }[]; hooks: () => { id: string; name: string }[] },
+  ctx: EditorContext,
 ): Promise<CreateEditorResult> {
   const editor = new NodeEditor<Schemes>();
   const area = new AreaPlugin<Schemes, AreaExtra>(container);
