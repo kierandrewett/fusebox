@@ -39,7 +39,7 @@ mod settings;
 mod time;
 
 use api_error::AppError;
-use settings::{DEFAULT_ENERGY_PRICE_PENCE_PER_KWH, Settings, optional_u64_env, parse_string_list};
+use settings::Settings;
 use time::{deserialize_optional_label, now_ms};
 
 const STATE_VERSION: u32 = 2;
@@ -9012,6 +9012,9 @@ const INDEX_HTML: &str = r##"<!doctype html>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::settings::{
+        DEFAULT_ENERGY_PRICE_PENCE_PER_KWH, optional_u64_env, parse_string_list,
+    };
 
     #[test]
     fn parses_default_settings_without_optional_values() {
