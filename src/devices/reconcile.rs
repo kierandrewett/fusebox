@@ -5,7 +5,7 @@ use tracing::{info, warn};
 
 use crate::conditions::condition_intent_for_device;
 use crate::hooks::{HookEvent, HookSource, dispatch_hook_events};
-use crate::legacy::{
+use super::{
     device_operation_lock, get_device_config, publish_device_list, retry_tapo_handshake,
     update_device_snapshot,
 };
