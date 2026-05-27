@@ -1,1 +1,253 @@
-// Extracted module placeholder. Behaviour currently lives in legacy during the incremental split.
+use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use anyhow::{Context, Result, anyhow};
+use axum::Json;
+use axum::extract::{Path, State};
+use axum::http::StatusCode;
+use tracing::warn;
+
+use crate::api_error::AppError;
+use crate::automations::types::{
+    Automation, AutomationEdge, AutomationListResponse, AutomationNode, AutomationNodeConfig,
+    AutomationStatus, CreateAutomationRequest, UpdateAutomationRequest,
+};
+use crate::conditions::{clamp_poll_seconds, parse_status_match, validate_http_method, validate_url};
+use crate::schedules::{MIN_INTERVAL_CYCLE_SECONDS, parse_cron};
+use crate::state::{AppState, save_persisted_state};
+use crate::time::now_ms;
+
+pub(crate) fn new_automation_id() -> String {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("auto-{}-{}", now_ms(), n)
+}
+
+pub(crate) async fn list_automations(
+    State(state): State<AppState>,
+) -> Json<AutomationListResponse> {
+    let automations = state.automations.read().await;
+    let mut list: Vec<Automation> = automations.values().cloned().collect();
+    list.sort_by(|a, b| a.created_at_ms.cmp(&b.created_at_ms));
+    Json(AutomationListResponse { automations: list })
+}
+
+pub(crate) async fn create_automation(
+    State(state): State<AppState>,
+    Json(request): Json<CreateAutomationRequest>,
+) -> Result<(StatusCode, Json<Automation>), AppError> {
+    let name = request.name.trim();
+    if name.is_empty() {
+        return Err(AppError(anyhow!("name cannot be empty")));
+    }
+    validate_automation_graph(&request.nodes, &request.edges)?;
+
+    let id = new_automation_id();
+    let automation = Automation {
+        id: id.clone(),
+        name: name.to_string(),
+        enabled: request.enabled,
+        nodes: request.nodes,
+        edges: request.edges,
+        created_at_ms: now_ms(),
+        status: AutomationStatus::default(),
+    };
+    {
+        let mut automations = state.automations.write().await;
+        automations.insert(id, automation.clone());
+    }
+    if let Err(error) = save_persisted_state(&state).await {
+        warn!(%error, "failed to persist newly created automation");
+    }
+    Ok((StatusCode::CREATED, Json(automation)))
+}
+
+pub(crate) async fn update_automation(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(request): Json<UpdateAutomationRequest>,
+) -> Result<Json<Automation>, AppError> {
+    if let (Some(nodes), Some(edges)) = (request.nodes.as_ref(), request.edges.as_ref()) {
+        validate_automation_graph(nodes, edges)?;
+    } else if let Some(nodes) = request.nodes.as_ref() {
+        // Validate against current edges
+        let existing = state.automations.read().await;
+        let cur = existing
+            .get(&id)
+            .ok_or_else(|| AppError(anyhow!("unknown automation '{}'", id)))?;
+        validate_automation_graph(nodes, &cur.edges)?;
+    } else if let Some(edges) = request.edges.as_ref() {
+        let existing = state.automations.read().await;
+        let cur = existing
+            .get(&id)
+            .ok_or_else(|| AppError(anyhow!("unknown automation '{}'", id)))?;
+        validate_automation_graph(&cur.nodes, edges)?;
+    }
+
+    let updated = {
+        let mut automations = state.automations.write().await;
+        let automation = automations
+            .get_mut(&id)
+            .ok_or_else(|| AppError(anyhow!("unknown automation '{}'", id)))?;
+        if let Some(name) = request.name {
+            let trimmed = name.trim();
+            if trimmed.is_empty() {
+                return Err(AppError(anyhow!("name cannot be empty")));
+            }
+            automation.name = trimmed.to_string();
+        }
+        if let Some(enabled) = request.enabled {
+            automation.enabled = enabled;
+        }
+        if let Some(nodes) = request.nodes {
+            automation.nodes = nodes;
+            // Editing the graph clears stale per-node runtime state.
+            automation.status.node_states.clear();
+            automation.status.last_error = None;
+        }
+        if let Some(edges) = request.edges {
+            automation.edges = edges;
+        }
+        automation.clone()
+    };
+    if let Err(error) = save_persisted_state(&state).await {
+        warn!(%error, "failed to persist automation update");
+    }
+    Ok(Json(updated))
+}
+
+pub(crate) async fn delete_automation(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, AppError> {
+    let removed = {
+        let mut automations = state.automations.write().await;
+        automations.remove(&id).is_some()
+    };
+    if !removed {
+        return Err(AppError(anyhow!("unknown automation '{}'", id)));
+    }
+    if let Err(error) = save_persisted_state(&state).await {
+        warn!(%error, "failed to persist automation deletion");
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+pub(crate) fn validate_automation_graph(
+    nodes: &[AutomationNode],
+    edges: &[AutomationEdge],
+) -> Result<()> {
+    use std::collections::HashSet;
+    let mut ids: HashSet<&str> = HashSet::new();
+    for n in nodes {
+        if !ids.insert(n.id.as_str()) {
+            return Err(anyhow!("duplicate node id '{}'", n.id));
+        }
+        validate_node_config(&n.config)?;
+    }
+    for e in edges {
+        if !ids.contains(e.source_node.as_str()) {
+            return Err(anyhow!("edge source '{}' not found", e.source_node));
+        }
+        if !ids.contains(e.target_node.as_str()) {
+            return Err(anyhow!("edge target '{}' not found", e.target_node));
+        }
+        if e.source_node == e.target_node {
+            return Err(anyhow!(
+                "self-edge on node '{}' is not allowed",
+                e.source_node
+            ));
+        }
+    }
+    // Cycle detection (DFS): trigger -> action graphs must be acyclic.
+    let mut adj: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    for e in edges {
+        adj.entry(e.source_node.as_str())
+            .or_default()
+            .push(e.target_node.as_str());
+    }
+    let mut state_map: BTreeMap<&str, u8> = BTreeMap::new();
+    for n in nodes {
+        if !state_map.contains_key(n.id.as_str()) {
+            if has_cycle_dfs(n.id.as_str(), &adj, &mut state_map) {
+                return Err(anyhow!("automation graph contains a cycle"));
+            }
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn has_cycle_dfs<'a>(
+    node: &'a str,
+    adj: &BTreeMap<&'a str, Vec<&'a str>>,
+    state: &mut BTreeMap<&'a str, u8>,
+) -> bool {
+    state.insert(node, 1);
+    if let Some(neighbours) = adj.get(node) {
+        for next in neighbours {
+            match state.get(next) {
+                Some(1) => return true,
+                Some(2) => continue,
+                _ => {
+                    if has_cycle_dfs(next, adj, state) {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    state.insert(node, 2);
+    false
+}
+
+pub(crate) fn validate_node_config(config: &AutomationNodeConfig) -> Result<()> {
+    match config {
+        AutomationNodeConfig::CronTrigger { cron_trigger } => {
+            parse_cron(&cron_trigger.cron)
+                .with_context(|| format!("invalid cron '{}'", cron_trigger.cron))?;
+        }
+        AutomationNodeConfig::IntervalTrigger { interval_trigger } => {
+            let total = interval_trigger
+                .on_seconds
+                .saturating_add(interval_trigger.off_seconds);
+            if total < MIN_INTERVAL_CYCLE_SECONDS {
+                return Err(anyhow!(
+                    "interval cycle (on+off) must be at least {MIN_INTERVAL_CYCLE_SECONDS}s"
+                ));
+            }
+        }
+        AutomationNodeConfig::HttpProbe { http_probe } => {
+            validate_url(&http_probe.url)?;
+            validate_http_method(&http_probe.method)?;
+            parse_status_match(&http_probe.status_match)?;
+            clamp_poll_seconds(http_probe.poll_seconds)?;
+        }
+        AutomationNodeConfig::DeviceEventTrigger {
+            device_event_trigger,
+        } => {
+            if device_event_trigger.device_name.is_empty() {
+                return Err(anyhow!("device event trigger requires a device_name"));
+            }
+        }
+        AutomationNodeConfig::SetDevice { set_device } => {
+            if set_device.device_name.is_empty() {
+                return Err(anyhow!("set_device requires a device_name"));
+            }
+        }
+        AutomationNodeConfig::ToggleDevice { toggle_device } => {
+            if toggle_device.device_name.is_empty() {
+                return Err(anyhow!("toggle_device requires a device_name"));
+            }
+        }
+        AutomationNodeConfig::FireHook { fire_hook } => {
+            if fire_hook.hook_id.is_empty() {
+                return Err(anyhow!("fire_hook requires a hook_id"));
+            }
+        }
+        AutomationNodeConfig::LogicAnd
+        | AutomationNodeConfig::LogicOr
+        | AutomationNodeConfig::LogicNot
+        | AutomationNodeConfig::Debounce { .. } => {}
+    }
+    Ok(())
+}
