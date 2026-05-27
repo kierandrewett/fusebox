@@ -66,6 +66,26 @@ export function NodeView({ data, emit }: Props) {
     >
       <div className="fb-node-head">
         <span className="fb-node-title">{tpl.label}</span>
+        <button
+          type="button"
+          className="fb-node-delete"
+          title="Delete this block"
+          aria-label="Delete block"
+          onClick={() => {
+            const container = containerRef.current as HTMLElement | null;
+            let el: HTMLElement | null = container;
+            while (el) {
+              const editor = (el as any).__fuseboxEditor;
+              if (editor && typeof editor.removeNode === "function") {
+                void editor.removeNode(data.id);
+                return;
+              }
+              el = el.parentElement;
+            }
+          }}
+        >
+          ×
+        </button>
       </div>
       <div className="fb-node-body">{renderBody(data.config, update, ctx)}</div>
       <div className="fb-node-sockets">

@@ -55,6 +55,7 @@ export interface CreateEditorResult {
   serialize: () => { nodes: AutomationNode[]; edges: AutomationEdge[] };
   load: (nodes: AutomationNode[], edges: AutomationEdge[]) => Promise<void>;
   addNodeAt: (config: NodeConfig, x: number, y: number) => Promise<string>;
+  removeNode: (nodeId: string) => Promise<void>;
   onChange: (cb: () => void) => () => void;
 }
 
@@ -164,6 +165,20 @@ export async function createEditor(
       await AreaExtensions.zoomAt(area, editor.getNodes());
       notify();
       return logicalId;
+    },
+    async removeNode(nodeId) {
+      // Remove any connections touching this node first; Rete throws if
+      // you try to remove a node that still has edges.
+      const connections = editor.getConnections().filter(
+        (c) => c.source === nodeId || c.target === nodeId,
+      );
+      for (const c of connections) await editor.removeConnection(c.id);
+      await editor.removeNode(nodeId);
+      // Drop the id mapping so serialize() doesn't keep a stale entry.
+      for (const [logical, rete] of idMap.entries()) {
+        if (rete === nodeId) idMap.delete(logical);
+      }
+      notify();
     },
     onChange(cb) {
       listeners.add(cb);

@@ -1511,24 +1511,25 @@
             min-height: 600px;
         }
 
-/* Automations editor — Fusebox cabinet aesthetic */
+/* Automations editor — wears the same cabinet skin as the Devices and Hooks tabs */
 .fb-automations {
   position: relative;
   display: grid;
   grid-template-columns: 260px 1fr;
   min-height: 640px;
-  border: 1px solid #070604;
-  border-radius: 14px;
+  padding: 4px;
+  border: 10px solid var(--cabinet-border);
+  border-radius: 18px;
   overflow: hidden;
   background:
-    linear-gradient(160deg, rgba(255, 255, 255, 0.06), transparent 32%),
-    linear-gradient(var(--breaker-top), var(--bakelite));
+    linear-gradient(90deg, var(--cabinet-highlight), transparent 16%, var(--cabinet-shadow) 72%),
+    repeating-linear-gradient(90deg, var(--cabinet-stripe-a) 0 18px, var(--cabinet-stripe-b) 18px 36px);
   color: var(--text);
   font-family: var(--font-data);
   box-shadow:
-    inset 0 0 0 1px rgba(255, 255, 255, 0.05),
-    inset 0 -18px 38px rgba(0, 0, 0, 0.34),
-    0 8px 18px rgba(0, 0, 0, 0.32);
+    inset 0 0 0 2px rgba(255, 255, 255, 0.08),
+    inset 0 0 48px rgba(0, 0, 0, 0.48),
+    0 30px 70px rgba(0, 0, 0, 0.48);
 }
 
 /* Brass dots in two corners, matching the .cabinet decoration */
@@ -1536,21 +1537,28 @@
 .fb-automations::after {
   content: "";
   position: absolute;
-  width: 14px;
-  height: 14px;
+  width: 18px;
+  height: 18px;
   border-radius: 50%;
   background: radial-gradient(circle at 35% 35%, #f0d38a, #6b4d27 68%);
   box-shadow: 0 0 0 2px rgba(0, 0, 0, 0.35);
   pointer-events: none;
 }
-.fb-automations::before { top: 12px; right: 14px; }
-.fb-automations::after  { bottom: 12px; left: 14px; }
+.fb-automations::before { top: 14px; right: 16px; z-index: 2; }
+.fb-automations::after  { bottom: 14px; left: 16px; z-index: 2; }
 
 .fb-sidebar {
-  border-right: 1px solid rgba(0, 0, 0, 0.6);
+  position: relative;
+  border: 1px solid #070604;
+  border-radius: 12px;
   overflow-y: auto;
-  background: rgba(0, 0, 0, 0.18);
-  padding: 4px;
+  background:
+    linear-gradient(160deg, rgba(255, 255, 255, 0.06), transparent 32%),
+    linear-gradient(var(--breaker-top), var(--bakelite));
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.05),
+    inset 0 -10px 24px rgba(0, 0, 0, 0.34),
+    0 4px 12px rgba(0, 0, 0, 0.32);
 }
 
 .fb-sidebar-section {
@@ -1709,6 +1717,17 @@
   flex-direction: column;
   min-width: 0;
   position: relative;
+  margin-left: 4px;
+  border: 1px solid #070604;
+  border-radius: 12px;
+  overflow: hidden;
+  background:
+    linear-gradient(160deg, rgba(255, 255, 255, 0.06), transparent 32%),
+    linear-gradient(var(--breaker-top), var(--bakelite));
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.05),
+    inset 0 -10px 24px rgba(0, 0, 0, 0.34),
+    0 4px 12px rgba(0, 0, 0, 0.32);
 }
 .fb-canvas-toolbar {
   display: flex;
@@ -1810,7 +1829,11 @@
 .fb-node-action  { border-top: 3px solid var(--green); }
 
 .fb-node-head {
-  padding: 8px 12px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 8px 6px 12px;
   font-size: 11px;
   font-weight: 700;
   letter-spacing: 0.1em;
@@ -1819,6 +1842,26 @@
   background: linear-gradient(var(--label-start), var(--label-end));
   box-shadow: inset 0 0 0 1px rgba(66, 43, 20, 0.24);
   border-bottom: 1px solid rgba(0, 0, 0, 0.6);
+}
+.fb-node-title { flex: 1; }
+.fb-node-delete {
+  width: 22px;
+  height: 22px;
+  flex: 0 0 auto;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  background: transparent;
+  color: rgba(0, 0, 0, 0.45);
+  font: inherit;
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+}
+.fb-node-delete:hover {
+  background: rgba(0, 0, 0, 0.18);
+  border-color: rgba(0, 0, 0, 0.4);
+  color: var(--red);
 }
 .fb-node-body {
   padding: 10px 12px;
