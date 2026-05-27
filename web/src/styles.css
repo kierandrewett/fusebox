@@ -1815,8 +1815,11 @@
 }
 
 /* Custom node styling — modeled on .breaker. Compact-by-default,
-   expands inline with the full edit form when you tap the chevron. */
+   expands inline with the full edit form when you tap the chevron.
+   Sockets ("pins") sit on top and bottom of the card so you can chain
+   blocks together vertically like Automate. */
 .fb-node {
+  position: relative;
   min-width: 240px;
   border: 1px solid #070604;
   border-radius: 12px;
@@ -1830,18 +1833,85 @@
     inset 0 -14px 32px rgba(0, 0, 0, 0.38),
     0 12px 24px rgba(0, 0, 0, 0.48);
   user-select: none;
-  overflow: hidden;
+  /* Vertical padding leaves room for the IN/OK pin chips that overlap
+     the top and bottom edges. */
+  margin: 14px 0;
 }
 .fb-node:hover { box-shadow:
   inset 0 0 0 1px rgba(255, 255, 255, 0.07),
   inset 0 -14px 32px rgba(0, 0, 0, 0.38),
   0 14px 28px rgba(0, 0, 0, 0.55); }
 .fb-node.compact { min-width: 240px; }
-.fb-node.compact .fb-node-sockets {
-  padding: 6px 12px 10px;
-  border-top: 1px solid rgba(0, 0, 0, 0.45);
-  background: rgba(0, 0, 0, 0.22);
+
+/* IN / OK pin chips clinging to the top and bottom edges of the card */
+.fb-node-pins {
+  position: absolute;
+  left: 0;
+  right: 0;
+  display: flex;
+  justify-content: center;
+  gap: 12px;
+  pointer-events: none;
+  z-index: 2;
 }
+.fb-node-pins-in  { top: -14px; }
+.fb-node-pins-out { bottom: -14px; }
+
+.fb-pin {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  pointer-events: auto;
+  height: 26px;
+  padding: 0 8px;
+  border-radius: 13px;
+  border: 1px solid rgba(0, 0, 0, 0.6);
+  background: linear-gradient(#3a89e2, #1d6abf);
+  color: white;
+  font-family: var(--font-ui);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.35),
+    0 2px 4px rgba(0, 0, 0, 0.4);
+}
+.fb-pin-out-trigger { background: linear-gradient(#3a89e2, #1d6abf); }
+.fb-pin-out-logic   { background: linear-gradient(#b486f9, #8a5dd8); }
+.fb-pin-out-action  { background: linear-gradient(#7adb9d, #3fb46a); }
+
+/* The Rete socket payload renders a small handle inside the pin. We make
+   the wrapper span cover the entire chip and hide the inner dot, so the
+   user can grab the chip anywhere to start a connection. */
+.fb-pin .input-socket,
+.fb-pin .output-socket {
+  position: absolute;
+  inset: 0;
+  display: block;
+  cursor: crosshair;
+}
+.fb-pin .input-socket > span,
+.fb-pin .output-socket > span {
+  position: absolute;
+  inset: 0;
+  display: block;
+}
+.fb-pin .input-socket > span > div,
+.fb-pin .output-socket > span > div {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  background: transparent;
+  border: 0;
+  margin: 0;
+}
+.fb-pin .input-socket > span > div > div,
+.fb-pin .output-socket > span > div > div {
+  opacity: 0;
+}
+.fb-pin-label { position: relative; z-index: 1; pointer-events: none; }
 .fb-node-trigger { border-top: 3px solid var(--amber); }
 .fb-node-logic   { border-top: 3px solid #a371f7; }
 .fb-node-action  { border-top: 3px solid var(--green); }

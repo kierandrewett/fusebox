@@ -83,6 +83,25 @@ export function NodeView({ data, emit }: Props) {
       onPointerDown={swallowOnFormControls}
       onDoubleClick={(e) => e.stopPropagation()}
     >
+      {/* IN socket: blue chip clinging to the top of the card (Automate style) */}
+      <div className="fb-node-pins fb-node-pins-in">
+        {inputs.map(([key, input]) =>
+          input ? (
+            <div key={key} className="fb-pin fb-pin-in">
+              <RefSocket
+                name="input-socket"
+                emit={emit}
+                side="input"
+                socketKey={key}
+                nodeId={data.id}
+                payload={input.socket}
+              />
+              <span className="fb-pin-label">IN</span>
+            </div>
+          ) : null,
+        )}
+      </div>
+
       <div
         className="fb-node-head"
         onDoubleClick={(e) => {
@@ -123,41 +142,24 @@ export function NodeView({ data, emit }: Props) {
           </div>
         </>
       ) : null}
-      <div className="fb-node-sockets">
-        <div className="fb-sockets-in">
-          {inputs.map(([key, input]) =>
-            input ? (
-              <div key={key} className="fb-socket fb-socket-in">
-                <RefSocket
-                  name="input-socket"
-                  emit={emit}
-                  side="input"
-                  socketKey={key}
-                  nodeId={data.id}
-                  payload={input.socket}
-                />
-                <span className="fb-socket-label">{input.label}</span>
-              </div>
-            ) : null,
-          )}
-        </div>
-        <div className="fb-sockets-out">
-          {outputs.map(([key, output]) =>
-            output ? (
-              <div key={key} className="fb-socket fb-socket-out">
-                <span className="fb-socket-label">{output.label}</span>
-                <RefSocket
-                  name="output-socket"
-                  emit={emit}
-                  side="output"
-                  socketKey={key}
-                  nodeId={data.id}
-                  payload={output.socket}
-                />
-              </div>
-            ) : null,
-          )}
-        </div>
+
+      {/* OK socket: bottom-of-card chip, color-coded by category */}
+      <div className="fb-node-pins fb-node-pins-out">
+        {outputs.map(([key, output]) =>
+          output ? (
+            <div key={key} className={`fb-pin fb-pin-out fb-pin-out-${tpl.category}`}>
+              <span className="fb-pin-label">OK</span>
+              <RefSocket
+                name="output-socket"
+                emit={emit}
+                side="output"
+                socketKey={key}
+                nodeId={data.id}
+                payload={output.socket}
+              />
+            </div>
+          ) : null,
+        )}
       </div>
     </div>
   );
