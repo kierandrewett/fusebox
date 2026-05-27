@@ -66,7 +66,8 @@ pub(crate) async fn evaluate_one_automation(
         }
     };
 
-    let mut incoming: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    // incoming: target_id → list of (source_id, source_socket)
+    let mut incoming: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
     for n in &automation.nodes {
         incoming.entry(n.id.clone()).or_default();
     }
@@ -74,7 +75,7 @@ pub(crate) async fn evaluate_one_automation(
         incoming
             .entry(e.target_node.clone())
             .or_default()
-            .push(e.source_node.clone());
+            .push((e.source_node.clone(), e.source_socket.clone()));
     }
 
     let mut outputs: BTreeMap<String, Option<bool>> = BTreeMap::new();
@@ -99,12 +100,18 @@ pub(crate) async fn evaluate_one_automation(
                 .unwrap_or_default()
         };
 
+        // Pull each upstream node's value and, if the edge came from a
+        // "no" socket (the IfCondition branch), invert it so downstream
+        // sees a rising edge when the condition routed to "no".
         let input_values: Vec<Option<bool>> = incoming
             .get(node_id)
             .map(|sources| {
                 sources
                     .iter()
-                    .map(|src| outputs.get(src).copied().unwrap_or(None))
+                    .map(|(src, socket)| {
+                        let value = outputs.get(src).copied().unwrap_or(None);
+                        if socket == "no" { value.map(|v| !v) } else { value }
+                    })
                     .collect()
             })
             .unwrap_or_default();
@@ -417,6 +424,82 @@ pub(crate) async fn evaluate_node(
             };
 
             (committed, next)
+        }
+        AutomationNodeConfig::HttpRequest { http_request } => {
+            // Action variant: only fire a request on the rising edge of an
+            // input pulse. The last_value is whether the response matched.
+            let rising = matches!(
+                (prev.last_value, inputs.iter().any(|v| matches!(v, Some(true)))),
+                (None, true) | (Some(false), true)
+            );
+            if !rising {
+                // Hold the previous value so downstream branches keep seeing
+                // the last result until the next pulse re-evaluates.
+                return (prev.last_value, next);
+            }
+            if http_request.url.is_empty() {
+                next.last_error = Some("URL not configured".to_string());
+                return (Some(false), next);
+            }
+
+            let probe = ConditionConfig {
+                id: format!("auto/{automation_id}/node/{}", node.id),
+                name: node.id.clone(),
+                device_name: String::new(),
+                url: http_request.url.clone(),
+                method: http_request.method.clone(),
+                headers: http_request.headers.clone(),
+                body: http_request.body.clone(),
+                status_match: http_request.status_match.clone(),
+                body_contains: http_request.body_contains.clone(),
+                poll_seconds: 60,
+                enabled: true,
+                action_on_pass: None,
+                action_on_fail: None,
+                created_at_ms: 0,
+                last_checked_at_ms: None,
+                last_passing: None,
+                last_status_code: None,
+                last_error: None,
+                last_action_at_ms: None,
+                last_action: None,
+                last_action_error: None,
+                min_stable_seconds: 0,
+                pending_value: None,
+                pending_since_ms: None,
+            };
+            let outcome = probe_condition_once(&state.http_client, &probe).await;
+            next.last_checked_at_ms = Some(tick_ms);
+            if let Some(error) = outcome.error {
+                next.last_error = Some(error);
+            }
+            (Some(outcome.passing), next)
+        }
+        AutomationNodeConfig::IfCondition { if_condition } => {
+            // Only re-evaluate on the rising edge of an input pulse. The
+            // routing value (true/false) holds afterwards so that
+            // downstream pulses to either branch keep their last route.
+            let rising = matches!(
+                (prev.last_value, inputs.iter().any(|v| matches!(v, Some(true)))),
+                (None, true) | (Some(false), true)
+            );
+            if !rising {
+                return (prev.last_value, next);
+            }
+            if if_condition.target_node.is_empty() {
+                return (Some(false), next);
+            }
+            // Look up the target's most recent value: first the current
+            // tick's outputs (if it was evaluated earlier in topo order),
+            // then fall back to its persisted last_value from a prior tick.
+            let target_value: Option<bool> = {
+                let automations = state.automations.read().await;
+                automations
+                    .get(automation_id)
+                    .and_then(|a| a.status.node_states.get(&if_condition.target_node))
+                    .and_then(|s| s.last_value)
+            };
+            (target_value.or(Some(false)), next)
         }
         AutomationNodeConfig::LogicAnd => {
             if inputs.is_empty() {

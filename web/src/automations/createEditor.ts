@@ -15,6 +15,8 @@ const NODE_WIDTHS: Partial<Record<NodeConfig["kind"], number>> = {
   interval_trigger: 280,
   device_event_trigger: 260,
   http_probe: 300,
+  http_request: 300,
+  if_condition: 280,
   logic_and: 200,
   logic_or: 200,
   logic_not: 200,
@@ -40,8 +42,8 @@ export class FlowNode extends ClassicPreset.Node {
     if (tpl.hasInput) {
       this.addInput("in", new ClassicPreset.Input(signalSocket, "in", true));
     }
-    if (tpl.hasOutput) {
-      this.addOutput("out", new ClassicPreset.Output(signalSocket, "out"));
+    for (const out of tpl.outputs) {
+      this.addOutput(out.key, new ClassicPreset.Output(signalSocket, out.label));
     }
   }
 }
@@ -58,12 +60,16 @@ export interface CreateEditorResult {
   load: (nodes: AutomationNode[], edges: AutomationEdge[]) => Promise<void>;
   addNodeAt: (config: NodeConfig, x: number, y: number) => Promise<string>;
   removeNode: (nodeId: string) => Promise<void>;
+  /** Snapshot of currently-loaded nodes for picker dropdowns (IF block). */
+  listNodes: () => { id: string; kind: NodeConfig["kind"]; label: string }[];
   onChange: (cb: () => void) => () => void;
 }
 
 export interface EditorContext {
   devices: () => { name: string; nickname: string }[];
   hooks: () => { id: string; name: string }[];
+  /** Snapshot of the editor's currently-loaded nodes; powers the IF picker. */
+  listNodes?: () => { id: string; kind: string; label: string }[];
   /** Subscribe to changes in devices/hooks. Returns an unsubscribe. */
   subscribeContext: (cb: () => void) => () => void;
 }
@@ -134,10 +140,12 @@ export async function createEditor(
         const flow = n as unknown as FlowNode;
         nodes.push({ id: logicalId, config: flow.config, x: pos.x, y: pos.y });
       }
-      const edges: AutomationEdge[] = editor.getConnections().map((c) => ({
+      const edges: AutomationEdge[] = editor.getConnections().map((c: any) => ({
         id: c.id,
         source_node: reverseLookup(idMap, c.source) ?? c.source,
         target_node: reverseLookup(idMap, c.target) ?? c.target,
+        source_socket: c.sourceOutput ?? "out",
+        target_socket: c.targetInput ?? "in",
       }));
       return { nodes, edges };
     },
@@ -157,8 +165,10 @@ export async function createEditor(
         const source = editor.getNode(sourceId);
         const target = editor.getNode(targetId);
         if (!source || !target) continue;
+        const sourceSocket = e.source_socket ?? "out";
+        const targetSocket = e.target_socket ?? "in";
         await editor.addConnection(
-          new ClassicPreset.Connection(source, "out", target, "in") as FlowConnection,
+          new ClassicPreset.Connection(source, sourceSocket, target, targetSocket) as FlowConnection,
         );
       }
       await AreaExtensions.zoomAt(area, editor.getNodes());
@@ -176,6 +186,15 @@ export async function createEditor(
       await AreaExtensions.zoomAt(area, editor.getNodes());
       notify();
       return logicalId;
+    },
+    listNodes() {
+      const result: { id: string; kind: NodeConfig["kind"]; label: string }[] = [];
+      for (const n of editor.getNodes()) {
+        const logical = reverseLookup(idMap, n.id) ?? n.id;
+        const flow = n as unknown as FlowNode;
+        result.push({ id: logical, kind: flow.config.kind, label: flow.label });
+      }
+      return result;
     },
     async removeNode(nodeId) {
       // Remove any connections touching this node first; Rete throws if

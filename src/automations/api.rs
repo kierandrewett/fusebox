@@ -221,8 +221,6 @@ pub(crate) fn validate_node_config(config: &AutomationNodeConfig) -> Result<()> 
             }
         }
         AutomationNodeConfig::HttpProbe { http_probe } => {
-            // Only validate URL if one has been provided. Empty URL = node
-            // is still being configured; it just won't fire.
             if !http_probe.url.is_empty() {
                 validate_url(&http_probe.url)?;
             }
@@ -230,10 +228,18 @@ pub(crate) fn validate_node_config(config: &AutomationNodeConfig) -> Result<()> 
             parse_status_match(&http_probe.status_match)?;
             clamp_poll_seconds(http_probe.poll_seconds)?;
         }
+        AutomationNodeConfig::HttpRequest { http_request } => {
+            if !http_request.url.is_empty() {
+                validate_url(&http_request.url)?;
+            }
+            validate_http_method(&http_request.method)?;
+            parse_status_match(&http_request.status_match)?;
+        }
         AutomationNodeConfig::DeviceEventTrigger { .. }
         | AutomationNodeConfig::SetDevice { .. }
         | AutomationNodeConfig::ToggleDevice { .. }
-        | AutomationNodeConfig::FireHook { .. } => {
+        | AutomationNodeConfig::FireHook { .. }
+        | AutomationNodeConfig::IfCondition { .. } => {
             // Picker may be empty while the user is still wiring things up.
         }
         AutomationNodeConfig::LogicAnd

@@ -3,6 +3,8 @@ export type NodeKind =
   | "interval_trigger"
   | "device_event_trigger"
   | "http_probe"
+  | "http_request"
+  | "if_condition"
   | "logic_and"
   | "logic_or"
   | "logic_not"
@@ -37,6 +39,19 @@ export interface HttpProbeConfig {
   poll_seconds: number;
   min_stable_seconds: number;
 }
+
+export interface HttpRequestConfig {
+  url: string;
+  method: string;
+  headers: Record<string, string>;
+  body?: string | null;
+  status_match: string;
+  body_contains?: string | null;
+}
+
+export interface IfConditionConfig {
+  target_node: string;
+}
 export interface DebounceConfig {
   hold_seconds: number;
 }
@@ -56,6 +71,8 @@ export type NodeConfig =
   | { kind: "interval_trigger"; interval_trigger: IntervalTriggerConfig }
   | { kind: "device_event_trigger"; device_event_trigger: DeviceEventTriggerConfig }
   | { kind: "http_probe"; http_probe: HttpProbeConfig }
+  | { kind: "http_request"; http_request: HttpRequestConfig }
+  | { kind: "if_condition"; if_condition: IfConditionConfig }
   | { kind: "logic_and" }
   | { kind: "logic_or" }
   | { kind: "logic_not" }
@@ -75,6 +92,8 @@ export interface AutomationEdge {
   id: string;
   source_node: string;
   target_node: string;
+  source_socket?: string;
+  target_socket?: string;
 }
 
 export interface AutomationStatus {

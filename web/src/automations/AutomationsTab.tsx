@@ -66,6 +66,7 @@ export function AutomationsTab() {
     createEditor(container, {
       devices: () => devicesRef.current,
       hooks: () => hooksRef.current,
+      listNodes: () => editorApiRef.current?.listNodes() ?? [],
       subscribeContext: (cb) => {
         ctxListenersRef.current.add(cb);
         return () => ctxListenersRef.current.delete(cb);
@@ -78,7 +79,12 @@ export function AutomationsTab() {
         }
         api = created;
         editorApiRef.current = created;
-        created.onChange(() => setDirty(true));
+        created.onChange(() => {
+          setDirty(true);
+          // Nodes added/removed → IF picker in any visible block needs to
+          // refresh its dropdown.
+          for (const cb of ctxListenersRef.current) cb();
+        });
         setEditorReady(true);
       })
       .catch((err) => {

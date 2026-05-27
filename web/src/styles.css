@@ -1880,6 +1880,8 @@
 .fb-pin-out-trigger { background: linear-gradient(#3a89e2, #1d6abf); }
 .fb-pin-out-logic   { background: linear-gradient(#b486f9, #8a5dd8); }
 .fb-pin-out-action  { background: linear-gradient(#7adb9d, #3fb46a); }
+.fb-pin-out-yes     { background: linear-gradient(#7adb9d, #3fb46a); }
+.fb-pin-out-no      { background: linear-gradient(#f08877, #c44e3b); }
 
 /* The Rete socket payload renders a small handle inside the pin. We make
    the wrapper span cover the entire chip and hide the inner dot, so the

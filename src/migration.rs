@@ -72,6 +72,8 @@ pub(crate) fn migrate_to_automations(persisted: &mut PersistedState) {
                 id: new_id(),
                 source_node: probe_id.clone(),
                 target_node: act_id,
+                source_socket: "out".to_string(),
+                target_socket: "in".to_string(),
             });
             next_y += 160.0;
         }
@@ -88,6 +90,8 @@ pub(crate) fn migrate_to_automations(persisted: &mut PersistedState) {
                 id: new_id(),
                 source_node: probe_id.clone(),
                 target_node: not_id.clone(),
+                source_socket: "out".to_string(),
+                target_socket: "in".to_string(),
             });
             let act_id = format!("act-fail-{id}");
             nodes.push(AutomationNode {
@@ -108,6 +112,8 @@ pub(crate) fn migrate_to_automations(persisted: &mut PersistedState) {
                 id: new_id(),
                 source_node: not_id,
                 target_node: act_id,
+                source_socket: "out".to_string(),
+                target_socket: "in".to_string(),
             });
         }
 
@@ -173,7 +179,9 @@ pub(crate) fn migrate_to_automations(persisted: &mut PersistedState) {
                     id: new_id(),
                     source_node: trigger_id,
                     target_node: act_id,
-                });
+                source_socket: "out".to_string(),
+                target_socket: "in".to_string(),
+            });
             }
             ScheduleKind::Interval => {
                 let on_seconds = sched.on_seconds.unwrap_or(0);
@@ -211,7 +219,9 @@ pub(crate) fn migrate_to_automations(persisted: &mut PersistedState) {
                     id: new_id(),
                     source_node: trigger_id,
                     target_node: act_id,
-                });
+                source_socket: "out".to_string(),
+                target_socket: "in".to_string(),
+            });
             }
         }
 

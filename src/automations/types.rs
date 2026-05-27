@@ -19,12 +19,26 @@ pub(crate) enum AutomationNodeConfig {
     DeviceEventTrigger {
         device_event_trigger: DeviceEventTriggerCfg,
     },
+    /// Legacy: polled HTTP probe. Kept so existing automations still
+    /// deserialise; freshly-built graphs use `HttpRequest` instead.
     HttpProbe {
         http_probe: HttpProbeCfg,
+    },
+    /// Action node: runs a single HTTP request on each input pulse and
+    /// records `last_value = matched`. Use Interval/Cron upstream to
+    /// schedule it.
+    HttpRequest {
+        http_request: HttpRequestCfg,
     },
     LogicAnd,
     LogicOr,
     LogicNot,
+    /// Branches based on a target node's last recorded value. Has two
+    /// outputs: `yes` fires when the referenced node's last value was
+    /// `true`, `no` when it was `false` (or has never produced a value).
+    IfCondition {
+        if_condition: IfConditionCfg,
+    },
     Debounce {
         debounce: DebounceCfg,
     },
@@ -78,6 +92,31 @@ pub(crate) struct HttpProbeCfg {
     pub(crate) min_stable_seconds: u64,
 }
 
+/// On-demand HTTP request used as an action. Same matching rules as the
+/// legacy HttpProbe but no internal polling — runs once per input pulse.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct HttpRequestCfg {
+    pub(crate) url: String,
+    #[serde(default = "default_http_method")]
+    pub(crate) method: String,
+    #[serde(default)]
+    pub(crate) headers: BTreeMap<String, String>,
+    #[serde(default)]
+    pub(crate) body: Option<String>,
+    #[serde(default = "default_status_match")]
+    pub(crate) status_match: String,
+    #[serde(default)]
+    pub(crate) body_contains: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct IfConditionCfg {
+    /// Logical node id whose `last_value` we inspect when an input pulse
+    /// arrives. Empty string = always routes to `no` (unconfigured).
+    #[serde(default)]
+    pub(crate) target_node: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct DebounceCfg {
     pub(crate) hold_seconds: u64,
@@ -114,6 +153,17 @@ pub(crate) struct AutomationEdge {
     pub(crate) id: String,
     pub(crate) source_node: String,
     pub(crate) target_node: String,
+    #[serde(default = "default_socket_out")]
+    pub(crate) source_socket: String,
+    #[serde(default = "default_socket_in")]
+    pub(crate) target_socket: String,
+}
+
+fn default_socket_out() -> String {
+    "out".to_string()
+}
+fn default_socket_in() -> String {
+    "in".to_string()
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

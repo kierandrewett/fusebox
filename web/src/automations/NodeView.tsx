@@ -19,6 +19,7 @@ interface Props {
 interface EditorCtx {
   devices: () => { name: string; nickname: string }[];
   hooks: () => { id: string; name: string }[];
+  listNodes?: () => { id: string; kind: string; label: string }[];
   subscribeContext?: (cb: () => void) => () => void;
 }
 
@@ -166,12 +167,20 @@ export function NodeView({ data, emit }: Props) {
         </>
       ) : null}
 
-      {/* OK socket: bottom-of-card chip, color-coded by category */}
+      {/* Output socket(s): bottom-of-card chip(s). Single OK pin for most
+          nodes; If block exposes labelled yes/no branches. */}
       <div className="fb-node-pins fb-node-pins-out">
-        {outputs.map(([key, output]) =>
-          output ? (
-            <div key={key} className={`fb-pin fb-pin-out fb-pin-out-${tpl.category}`}>
-              <span className="fb-pin-label">OK</span>
+        {outputs.map(([key, output]) => {
+          if (!output) return null;
+          const spec = tpl.outputs.find((o) => o.key === key);
+          const variant = spec?.variant ?? "default";
+          const label = spec?.label ?? "OK";
+          return (
+            <div
+              key={key}
+              className={`fb-pin fb-pin-out fb-pin-out-${variant === "default" ? tpl.category : variant}`}
+            >
+              <span className="fb-pin-label">{label}</span>
               <RefSocket
                 name="output-socket"
                 emit={emit}
@@ -181,8 +190,8 @@ export function NodeView({ data, emit }: Props) {
                 payload={output.socket}
               />
             </div>
-          ) : null,
-        )}
+          );
+        })}
       </div>
     </div>
   );
@@ -211,6 +220,18 @@ function summarizeNode(config: NodeConfig, ctx: EditorCtx): string {
       if (!url) return "Pick a URL…";
       const short = url.length > 40 ? url.slice(0, 38) + "…" : url;
       return `${config.http_probe.method} ${short}`;
+    }
+    case "http_request": {
+      const url = config.http_request.url;
+      if (!url) return "Pick a URL…";
+      const short = url.length > 40 ? url.slice(0, 38) + "…" : url;
+      return `${config.http_request.method} ${short}`;
+    }
+    case "if_condition": {
+      const target = config.if_condition.target_node;
+      if (!target) return "Pick a block to check…";
+      const node = ctx.listNodes?.().find((n) => n.id === target);
+      return node ? `If ${node.label}` : "Block not found";
     }
     case "logic_and":
       return "All inputs true";
@@ -308,6 +329,10 @@ function iconFor(kind: NodeConfig["kind"]): string {
       return "⚡";
     case "http_probe":
       return "🌐";
+    case "http_request":
+      return "🌐";
+    case "if_condition":
+      return "?";
     case "logic_and":
       return "∧";
     case "logic_or":
@@ -370,6 +395,21 @@ function renderBody(config: NodeConfig, update: (c: NodeConfig) => void, ctx: Ed
       );
     case "http_probe":
       return <HttpProbeBody config={config.http_probe} onChange={(http_probe) => update({ kind: "http_probe", http_probe })} />;
+    case "http_request":
+      return (
+        <HttpRequestBody
+          config={config.http_request}
+          onChange={(http_request) => update({ kind: "http_request", http_request })}
+        />
+      );
+    case "if_condition":
+      return (
+        <IfConditionBody
+          config={config.if_condition}
+          ctx={ctx}
+          onChange={(if_condition) => update({ kind: "if_condition", if_condition })}
+        />
+      );
     case "logic_and":
     case "logic_or":
     case "logic_not":
@@ -787,6 +827,137 @@ function HttpProbeBody({
     </>
   );
 }
+// ---------- HTTP request (action variant: same fields as probe, no poll) ----------
+
+interface HttpRequestBodyConfig {
+  url: string;
+  method: string;
+  headers: Record<string, string>;
+  body?: string | null;
+  status_match: string;
+  body_contains?: string | null;
+}
+
+function HttpRequestBody({
+  config,
+  onChange,
+}: {
+  config: HttpRequestBodyConfig;
+  onChange: (cfg: HttpRequestBodyConfig) => void;
+}) {
+  const [advancedOpen, setAdvancedOpen] = useState(false);
+  return (
+    <>
+      <div className="fb-row">
+        <Field label="Method">
+          <select
+            value={config.method}
+            onChange={(e) => onChange({ ...config, method: e.target.value })}
+          >
+            <option>GET</option>
+            <option>POST</option>
+            <option>HEAD</option>
+            <option>PUT</option>
+          </select>
+        </Field>
+        <Field label="Status match">
+          <input
+            type="text"
+            value={config.status_match}
+            onChange={(e) => onChange({ ...config, status_match: e.target.value })}
+            placeholder="200-299"
+            spellCheck={false}
+          />
+        </Field>
+      </div>
+      <Field label="URL">
+        <input
+          type="text"
+          value={config.url}
+          onChange={(e) => onChange({ ...config, url: e.target.value })}
+          placeholder="https://example.com/webhook"
+          spellCheck={false}
+        />
+      </Field>
+      <details
+        className="fb-collapse"
+        open={advancedOpen}
+        onToggle={(e) => setAdvancedOpen((e.target as HTMLDetailsElement).open)}
+      >
+        <summary>Advanced</summary>
+        <Field label="Headers (one per line, Key: value)">
+          <textarea
+            rows={2}
+            value={headersToText(config.headers)}
+            onChange={(e) => onChange({ ...config, headers: textToHeaders(e.target.value) })}
+            placeholder="Authorization: Bearer …"
+            spellCheck={false}
+          />
+        </Field>
+        <Field label="Request body (optional)">
+          <textarea
+            rows={2}
+            value={config.body ?? ""}
+            onChange={(e) => onChange({ ...config, body: e.target.value || null })}
+            spellCheck={false}
+          />
+        </Field>
+        <Field label="Body must contain (optional)">
+          <input
+            type="text"
+            value={config.body_contains ?? ""}
+            onChange={(e) => onChange({ ...config, body_contains: e.target.value || null })}
+            spellCheck={false}
+          />
+        </Field>
+      </details>
+      <p className="fb-node-hint">
+        Sends one request each time the input pulse arrives. The OK socket
+        emits true if the response matched.
+      </p>
+    </>
+  );
+}
+
+// ---------- If: route based on another block's last value ----------
+
+function IfConditionBody({
+  config,
+  ctx,
+  onChange,
+}: {
+  config: { target_node: string };
+  ctx: EditorCtx;
+  onChange: (cfg: { target_node: string }) => void;
+}) {
+  const nodes = ctx.listNodes?.() ?? [];
+  return (
+    <>
+      <Field label="Check the result of">
+        {nodes.length === 0 ? (
+          <p className="fb-node-hint">Add another block first to reference it.</p>
+        ) : (
+          <select
+            value={config.target_node}
+            onChange={(e) => onChange({ target_node: e.target.value })}
+          >
+            <option value="">— pick a block —</option>
+            {nodes.map((n) => (
+              <option key={n.id} value={n.id}>
+                {n.label}
+              </option>
+            ))}
+          </select>
+        )}
+      </Field>
+      <p className="fb-node-hint">
+        On each input pulse, the YES output fires if the chosen block's last
+        result was true; otherwise NO fires.
+      </p>
+    </>
+  );
+}
+
 function headersToText(headers: Record<string, string>): string {
   return Object.entries(headers)
     .map(([k, v]) => `${k}: ${v}`)
