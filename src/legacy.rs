@@ -1,5 +1,6 @@
 use crate::api_error::AppError;
 use crate::settings::Settings;
+use crate::state::*;
 use crate::time::{deserialize_optional_label, now_ms};
 use std::collections::BTreeMap;
 use std::ffi::OsString;
@@ -21,7 +22,9 @@ use axum::http::{StatusCode, header};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
-use chrono::{DateTime, Datelike, Days, Duration as ChronoDuration, Local, NaiveDate, Timelike, Utc};
+use chrono::{
+    DateTime, Datelike, Days, Duration as ChronoDuration, Local, NaiveDate, Timelike, Utc,
+};
 use cron::Schedule as CronSchedule;
 use reqwest::Method as HttpMethod;
 use rust_xlsxwriter::{Format, FormatAlign, FormatBorder, Workbook};
@@ -37,96 +40,12 @@ use tokio::time::sleep;
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
-
-
-pub(crate) const STATE_VERSION: u32 = 2;
 pub(crate) const ALL_TIME_USAGE_START_YEAR: i32 = 2020;
 pub(crate) const TAPO_HANDSHAKE_RETRY_ATTEMPTS: usize = 3;
 pub(crate) const TAPO_HANDSHAKE_RETRY_DELAY: Duration = Duration::from_millis(350);
-pub(crate) const SWITCH_SOUND_BYTES: &[u8] = include_bytes!("../assets/348224__tbrook__switch-light-06.wav");
+pub(crate) const SWITCH_SOUND_BYTES: &[u8] =
+    include_bytes!("../assets/348224__tbrook__switch-light-06.wav");
 pub(crate) const APP_BUNDLE_JS: &str = include_str!("../web/dist/app.js");
-
-#[derive(Debug, Clone)]
-pub(crate) struct AppState {
-    controller: TapoController,
-    credentials: TapoCredentials,
-    devices: Arc<RwLock<BTreeMap<String, ManagedDevice>>>,
-    device_locks: Arc<RwLock<BTreeMap<IpAddr, Arc<Mutex<()>>>>>,
-    device_events: watch::Sender<DeviceListResponse>,
-    schedules: Arc<RwLock<BTreeMap<String, ScheduleConfig>>>,
-    conditions: Arc<RwLock<BTreeMap<String, ConditionConfig>>>,
-    device_intents: Arc<RwLock<BTreeMap<String, DeviceIntent>>>,
-    hooks: Arc<RwLock<BTreeMap<String, HookConfig>>>,
-    automations: Arc<RwLock<BTreeMap<String, Automation>>>,
-    http_client: reqwest::Client,
-    discovery_timeout_seconds: u64,
-    discovery_targets: Vec<String>,
-    refresh_seconds: u64,
-    scan_seconds: u64,
-    energy_price_pence_per_kwh: f64,
-    state_path: PathBuf,
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct ManagedDevice {
-    name: String,
-    config: DeviceConfig,
-    snapshot: Option<DeviceSnapshot>,
-    last_error: Option<String>,
-    discovered_at_ms: u128,
-    updated_at_ms: Option<u128>,
-    /// Number of consecutive refresh failures since the last successful
-    /// read. Used to debounce flaky LAN behaviour before declaring the
-    /// device offline. Not persisted — resets on server restart.
-    consecutive_failures: u32,
-    /// True once we've fired an Offline hook event for the current
-    /// outage. Prevents repeated Offline events and gates the next
-    /// Online event.
-    offline_announced: bool,
-}
-
-pub(crate) const DEVICE_OFFLINE_FAILURE_THRESHOLD: u32 = 3;
-
-#[derive(Debug, Clone, Serialize)]
-pub(crate) struct DeviceListResponse {
-    devices: Vec<DeviceView>,
-    updated_at_ms: u128,
-    energy_price_pence_per_kwh: f64,
-    scan_error: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub(crate) struct DeviceView {
-    name: String,
-    ip: String,
-    configured_model: DeviceModel,
-    model: String,
-    nickname: String,
-    device_type: String,
-    device_on: Option<bool>,
-    on_time_seconds: Option<u64>,
-    energy: Option<EnergyView>,
-    last_error: Option<String>,
-    discovered_at_ms: u128,
-    updated_at_ms: Option<u128>,
-    manual_override: Option<bool>,
-    manual_override_until_ms: Option<u128>,
-    schedule_intent: Option<bool>,
-    condition_intent: Option<bool>,
-    effective_intent: Option<bool>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub(crate) struct EnergyView {
-    current_power_mw: Option<u64>,
-    current_power_w: Option<u64>,
-    today_energy_wh: u64,
-    month_energy_wh: u64,
-    today_cost_pence: f64,
-    month_cost_pence: f64,
-    today_runtime_minutes: u64,
-    month_runtime_minutes: u64,
-}
 
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct UsageHistoryResponse {
@@ -256,22 +175,6 @@ pub(crate) struct SetPowerRequest {
 pub(crate) struct ToggleDeviceRequest {
     #[serde(default)]
     duration_seconds: Option<u64>,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub(crate) enum ScheduleAction {
-    On,
-    Off,
-    Toggle,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
-#[serde(rename_all = "lowercase")]
-pub(crate) enum ScheduleKind {
-    #[default]
-    Cron,
-    Interval,
 }
 
 pub(crate) const MIN_INTERVAL_CYCLE_SECONDS: u64 = 60;
@@ -567,39 +470,6 @@ pub(crate) struct ScheduleListResponse {
     schedules: Vec<ScheduleView>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct PersistedState {
-    version: u32,
-    devices: BTreeMap<String, DeviceConfig>,
-    #[serde(default)]
-    schedules: BTreeMap<String, ScheduleConfig>,
-    #[serde(default)]
-    conditions: BTreeMap<String, ConditionConfig>,
-    #[serde(default)]
-    device_intents: BTreeMap<String, DeviceIntent>,
-    #[serde(default)]
-    hooks: BTreeMap<String, HookConfig>,
-    #[serde(default)]
-    automations: BTreeMap<String, Automation>,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub(crate) struct DeviceIntent {
-    #[serde(default)]
-    schedule_intent: Option<bool>,
-    #[serde(default)]
-    manual_override: Option<bool>,
-    /// If set, the manual override is cleared automatically at this
-    /// epoch-ms timestamp. None means the override sticks until the
-    /// user releases it or a schedule fire overwrites it.
-    #[serde(default)]
-    manual_override_until_ms: Option<u128>,
-}
-
-pub(crate) const DEFAULT_MANUAL_OVERRIDE_SECONDS: u64 = 3600;
-pub(crate) const MIN_MANUAL_OVERRIDE_SECONDS: u64 = 30;
-pub(crate) const MAX_MANUAL_OVERRIDE_SECONDS: u64 = 24 * 3600;
-
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum HookEvent {
@@ -656,17 +526,33 @@ pub(crate) struct HookConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub(crate) enum AutomationNodeConfig {
-    CronTrigger { cron_trigger: CronTriggerCfg },
-    IntervalTrigger { interval_trigger: IntervalTriggerCfg },
-    DeviceEventTrigger { device_event_trigger: DeviceEventTriggerCfg },
-    HttpProbe { http_probe: HttpProbeCfg },
+    CronTrigger {
+        cron_trigger: CronTriggerCfg,
+    },
+    IntervalTrigger {
+        interval_trigger: IntervalTriggerCfg,
+    },
+    DeviceEventTrigger {
+        device_event_trigger: DeviceEventTriggerCfg,
+    },
+    HttpProbe {
+        http_probe: HttpProbeCfg,
+    },
     LogicAnd,
     LogicOr,
     LogicNot,
-    Debounce { debounce: DebounceCfg },
-    SetDevice { set_device: SetDeviceCfg },
-    ToggleDevice { toggle_device: ToggleDeviceCfg },
-    FireHook { fire_hook: FireHookCfg },
+    Debounce {
+        debounce: DebounceCfg,
+    },
+    SetDevice {
+        set_device: SetDeviceCfg,
+    },
+    ToggleDevice {
+        toggle_device: ToggleDeviceCfg,
+    },
+    FireHook {
+        fire_hook: FireHookCfg,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -850,7 +736,10 @@ pub(crate) async fn run() -> Result<()> {
         .route("/api/scan", post(scan_devices))
         .route("/api/devices/{name}/toggle", post(toggle_device))
         .route("/api/devices/{name}/power", post(set_device_power))
-        .route("/api/devices/{name}/release-override", post(release_device_override))
+        .route(
+            "/api/devices/{name}/release-override",
+            post(release_device_override),
+        )
         .route("/api/schedules", get(list_schedules).post(create_schedule))
         .route(
             "/api/schedules/{id}",
@@ -866,10 +755,7 @@ pub(crate) async fn run() -> Result<()> {
         )
         .route("/api/conditions/{id}/probe", post(probe_condition))
         .route("/api/hooks", get(list_hooks).post(create_hook))
-        .route(
-            "/api/hooks/{id}",
-            delete(delete_hook).patch(update_hook),
-        )
+        .route("/api/hooks/{id}", delete(delete_hook).patch(update_hook))
         .route("/api/hooks/{id}/test", post(test_hook))
         .route(
             "/api/automations",
@@ -897,104 +783,6 @@ pub(crate) fn init_logging() {
     tracing_subscriber::fmt().with_env_filter(filter).init();
 }
 
-impl AppState {
-    fn new(settings: &Settings) -> Self {
-        let credentials = TapoCredentials {
-            username: settings.username.clone(),
-            password: settings.password.clone(),
-        };
-        let controller = TapoController::new(credentials.clone());
-        let (device_events, _device_event_receiver) = watch::channel(DeviceListResponse {
-            devices: Vec::new(),
-            updated_at_ms: now_ms(),
-            energy_price_pence_per_kwh: settings.energy_price_pence_per_kwh,
-            scan_error: None,
-        });
-
-        let http_client = reqwest::Client::builder()
-            .timeout(CONDITION_HTTP_TIMEOUT)
-            .user_agent("fusebox/condition-poller")
-            .build()
-            .expect("reqwest client builds with valid defaults");
-
-        Self {
-            controller,
-            credentials,
-            devices: Arc::new(RwLock::new(BTreeMap::new())),
-            device_locks: Arc::new(RwLock::new(BTreeMap::new())),
-            device_events,
-            schedules: Arc::new(RwLock::new(BTreeMap::new())),
-            conditions: Arc::new(RwLock::new(BTreeMap::new())),
-            device_intents: Arc::new(RwLock::new(BTreeMap::new())),
-            hooks: Arc::new(RwLock::new(BTreeMap::new())),
-            automations: Arc::new(RwLock::new(BTreeMap::new())),
-            http_client,
-            discovery_timeout_seconds: settings.discovery_timeout_seconds,
-            discovery_targets: settings.discovery_targets.clone(),
-            refresh_seconds: settings.refresh_seconds,
-            scan_seconds: settings.scan_seconds,
-            energy_price_pence_per_kwh: settings.energy_price_pence_per_kwh,
-            state_path: settings.state_path.clone(),
-        }
-    }
-}
-
-impl ManagedDevice {
-    fn view(
-        &self,
-        energy_price_pence_per_kwh: f64,
-        intent: DeviceIntent,
-        condition_intent: Option<bool>,
-    ) -> DeviceView {
-        let snapshot = self.snapshot.as_ref();
-        let effective_intent =
-            compute_effective(intent.manual_override, intent.schedule_intent, condition_intent);
-
-        DeviceView {
-            name: self.name.clone(),
-            ip: self.config.ip.to_string(),
-            configured_model: self.config.model,
-            model: snapshot
-                .map(|snapshot| snapshot.device_model.clone())
-                .unwrap_or_else(|| self.config.model.to_string()),
-            nickname: snapshot
-                .map(|snapshot| snapshot.nickname.clone())
-                .unwrap_or_else(|| self.name.clone()),
-            device_type: snapshot
-                .map(|snapshot| snapshot.device_type.clone())
-                .unwrap_or_else(|| "Tapo device".to_string()),
-            device_on: snapshot.map(|snapshot| snapshot.device_on),
-            on_time_seconds: snapshot.map(|snapshot| snapshot.on_time_seconds),
-            energy: snapshot.and_then(|snapshot| {
-                snapshot.energy.as_ref().map(|energy| EnergyView {
-                    current_power_mw: energy.current_power_mw,
-                    current_power_w: energy.current_power_w,
-                    today_energy_wh: energy.today_energy_wh,
-                    month_energy_wh: energy.month_energy_wh,
-                    today_cost_pence: estimate_energy_cost_pence(
-                        energy.today_energy_wh,
-                        energy_price_pence_per_kwh,
-                    ),
-                    month_cost_pence: estimate_energy_cost_pence(
-                        energy.month_energy_wh,
-                        energy_price_pence_per_kwh,
-                    ),
-                    today_runtime_minutes: energy.today_runtime_minutes,
-                    month_runtime_minutes: energy.month_runtime_minutes,
-                })
-            }),
-            last_error: self.last_error.clone(),
-            discovered_at_ms: self.discovered_at_ms,
-            updated_at_ms: self.updated_at_ms,
-            manual_override: intent.manual_override,
-            manual_override_until_ms: intent.manual_override_until_ms,
-            schedule_intent: intent.schedule_intent,
-            condition_intent,
-            effective_intent,
-        }
-    }
-}
-
 pub(crate) async fn index() -> Html<&'static str> {
     Html(INDEX_HTML)
 }
@@ -1015,7 +803,10 @@ pub(crate) async fn switch_sound() -> Response {
 pub(crate) async fn app_bundle() -> Response {
     Response::builder()
         .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "application/javascript; charset=utf-8")
+        .header(
+            header::CONTENT_TYPE,
+            "application/javascript; charset=utf-8",
+        )
         .header(header::CACHE_CONTROL, "no-cache")
         .body(Body::from(APP_BUNDLE_JS))
         .expect("static app bundle response should be valid")
@@ -1041,7 +832,10 @@ pub(crate) async fn scan_devices(State(state): State<AppState>) -> Json<DeviceLi
     Json(response)
 }
 
-pub(crate) async fn devices_websocket(State(state): State<AppState>, websocket: WebSocketUpgrade) -> Response {
+pub(crate) async fn devices_websocket(
+    State(state): State<AppState>,
+    websocket: WebSocketUpgrade,
+) -> Response {
     websocket.on_upgrade(|socket| stream_device_events(socket, state))
 }
 
@@ -1078,7 +872,10 @@ pub(crate) async fn stream_device_events(mut socket: WebSocket, state: AppState)
     }
 }
 
-pub(crate) async fn send_device_event(socket: &mut WebSocket, response: DeviceListResponse) -> Result<()> {
+pub(crate) async fn send_device_event(
+    socket: &mut WebSocket,
+    response: DeviceListResponse,
+) -> Result<()> {
     let payload = serde_json::to_string(&response).context("failed to serialize device event")?;
     socket
         .send(Message::Text(payload.into()))
@@ -1093,7 +890,9 @@ pub(crate) async fn energy_history(
     Json(build_usage_history(&state, query.range.as_deref()).await)
 }
 
-pub(crate) async fn export_energy_workbook(State(state): State<AppState>) -> Result<Response, AppError> {
+pub(crate) async fn export_energy_workbook(
+    State(state): State<AppState>,
+) -> Result<Response, AppError> {
     let buffer = build_energy_export_workbook(&state).await?;
 
     Ok((
@@ -1146,7 +945,9 @@ pub(crate) async fn set_device_power(
     Path(name): Path<String>,
     Json(request): Json<SetPowerRequest>,
 ) -> Result<Json<DeviceView>, AppError> {
-    let duration = request.duration_seconds.unwrap_or(DEFAULT_MANUAL_OVERRIDE_SECONDS);
+    let duration = request
+        .duration_seconds
+        .unwrap_or(DEFAULT_MANUAL_OVERRIDE_SECONDS);
     let device = get_device_config(&state, &name).await?;
     let operation_lock = device_operation_lock(&state, &device).await;
     let _operation_guard = operation_lock.lock().await;
@@ -1278,7 +1079,10 @@ pub(crate) async fn create_schedule(
     Ok((StatusCode::CREATED, Json(schedule_view(&schedule))))
 }
 
-pub(crate) async fn ensure_device_exists(state: &AppState, device_name: &str) -> Result<(), AppError> {
+pub(crate) async fn ensure_device_exists(
+    state: &AppState,
+    device_name: &str,
+) -> Result<(), AppError> {
     let devices = state.devices.read().await;
     if !devices.contains_key(device_name) {
         return Err(AppError(anyhow!("unknown device '{}'", device_name)));
@@ -1436,8 +1240,7 @@ pub(crate) fn normalize_cron(expression: &str) -> Result<String> {
 
 pub(crate) fn parse_cron(expression: &str) -> Result<CronSchedule> {
     let translated = translate_cron_to_crate_format(expression);
-    CronSchedule::from_str(&translated)
-        .map_err(|error| anyhow!("invalid cron expression: {error}"))
+    CronSchedule::from_str(&translated).map_err(|error| anyhow!("invalid cron expression: {error}"))
 }
 
 pub(crate) fn translate_cron_to_crate_format(expression: &str) -> String {
@@ -1601,7 +1404,11 @@ pub(crate) fn next_interval_fire_ms(schedule: &ScheduleConfig, now: u128) -> Opt
 pub(crate) async fn list_conditions(State(state): State<AppState>) -> Json<ConditionListResponse> {
     let conditions = state.conditions.read().await;
     let mut views: Vec<ConditionView> = conditions.values().map(condition_view).collect();
-    views.sort_by(|a, b| a.name.cmp(&b.name).then(a.created_at_ms.cmp(&b.created_at_ms)));
+    views.sort_by(|a, b| {
+        a.name
+            .cmp(&b.name)
+            .then(a.created_at_ms.cmp(&b.created_at_ms))
+    });
     Json(ConditionListResponse { conditions: views })
 }
 
@@ -1796,12 +1603,9 @@ pub(crate) async fn probe_condition(
     }
     probe_and_record(&state, &id).await;
     let conditions = state.conditions.read().await;
-    Ok(Json(
-        conditions
-            .get(&id)
-            .map(condition_view)
-            .ok_or_else(|| AppError(anyhow!("condition vanished mid-probe")))?,
-    ))
+    Ok(Json(conditions.get(&id).map(condition_view).ok_or_else(
+        || AppError(anyhow!("condition vanished mid-probe")),
+    )?))
 }
 
 pub(crate) fn condition_view(condition: &ConditionConfig) -> ConditionView {
@@ -1930,7 +1734,11 @@ pub(crate) fn new_hook_id() -> String {
 pub(crate) async fn list_hooks(State(state): State<AppState>) -> Json<HookListResponse> {
     let hooks = state.hooks.read().await;
     let mut views: Vec<HookView> = hooks.values().map(hook_view).collect();
-    views.sort_by(|a, b| a.name.cmp(&b.name).then(a.created_at_ms.cmp(&b.created_at_ms)));
+    views.sort_by(|a, b| {
+        a.name
+            .cmp(&b.name)
+            .then(a.created_at_ms.cmp(&b.created_at_ms))
+    });
     Json(HookListResponse { hooks: views })
 }
 
@@ -2097,7 +1905,9 @@ pub(crate) fn new_automation_id() -> String {
     format!("auto-{}-{}", now_ms(), n)
 }
 
-pub(crate) async fn list_automations(State(state): State<AppState>) -> Json<AutomationListResponse> {
+pub(crate) async fn list_automations(
+    State(state): State<AppState>,
+) -> Json<AutomationListResponse> {
     let automations = state.automations.read().await;
     let mut list: Vec<Automation> = automations.values().cloned().collect();
     list.sort_by(|a, b| a.created_at_ms.cmp(&b.created_at_ms));
@@ -2205,7 +2015,10 @@ pub(crate) async fn delete_automation(
     Ok(StatusCode::NO_CONTENT)
 }
 
-pub(crate) fn validate_automation_graph(nodes: &[AutomationNode], edges: &[AutomationEdge]) -> Result<()> {
+pub(crate) fn validate_automation_graph(
+    nodes: &[AutomationNode],
+    edges: &[AutomationEdge],
+) -> Result<()> {
     use std::collections::HashSet;
     let mut ids: HashSet<&str> = HashSet::new();
     for n in nodes {
@@ -2222,7 +2035,10 @@ pub(crate) fn validate_automation_graph(nodes: &[AutomationNode], edges: &[Autom
             return Err(anyhow!("edge target '{}' not found", e.target_node));
         }
         if e.source_node == e.target_node {
-            return Err(anyhow!("self-edge on node '{}' is not allowed", e.source_node));
+            return Err(anyhow!(
+                "self-edge on node '{}' is not allowed",
+                e.source_node
+            ));
         }
     }
     // Cycle detection (DFS): trigger -> action graphs must be acyclic.
@@ -2288,7 +2104,9 @@ pub(crate) fn validate_node_config(config: &AutomationNodeConfig) -> Result<()> 
             parse_status_match(&http_probe.status_match)?;
             clamp_poll_seconds(http_probe.poll_seconds)?;
         }
-        AutomationNodeConfig::DeviceEventTrigger { device_event_trigger } => {
+        AutomationNodeConfig::DeviceEventTrigger {
+            device_event_trigger,
+        } => {
             if device_event_trigger.device_name.is_empty() {
                 return Err(anyhow!("device event trigger requires a device_name"));
             }
@@ -2456,7 +2274,10 @@ pub(crate) async fn probe_condition_once(
         error: if status_ok && body_match {
             None
         } else if !status_ok {
-            Some(format!("status {status} did not match '{}'", condition.status_match))
+            Some(format!(
+                "status {status} did not match '{}'",
+                condition.status_match
+            ))
         } else {
             Some(format!(
                 "body did not contain '{}'",
@@ -2467,10 +2288,7 @@ pub(crate) async fn probe_condition_once(
 }
 
 pub(crate) async fn read_response_body(response: reqwest::Response) -> Result<String> {
-    let bytes = response
-        .bytes()
-        .await
-        .map_err(|error| anyhow!("{error}"))?;
+    let bytes = response.bytes().await.map_err(|error| anyhow!("{error}"))?;
     let truncated = if bytes.len() > MAX_CONDITION_BODY_BYTES {
         &bytes[..MAX_CONDITION_BODY_BYTES]
     } else {
@@ -2631,7 +2449,10 @@ pub(crate) fn compute_effective(
 ///   - None if no enabled conditions target the device
 ///   - Some(false) if any enabled condition is failing or has never been probed (fail closed)
 ///   - Some(true) if at least one enabled condition exists and all are passing
-pub(crate) async fn condition_intent_for_device(state: &AppState, device_name: &str) -> Option<bool> {
+pub(crate) async fn condition_intent_for_device(
+    state: &AppState,
+    device_name: &str,
+) -> Option<bool> {
     let conditions = state.conditions.read().await;
     let mut have_any = false;
     let mut all_passing = true;
@@ -2725,7 +2546,8 @@ pub(crate) async fn reconcile_device(state: &AppState, device_name: &str, source
     let operation_lock = device_operation_lock(state, &device_cfg).await;
     let _operation_guard = operation_lock.lock().await;
 
-    if let Err(error) = retry_tapo_handshake(|| state.controller.set_power(&device_cfg, target)).await
+    if let Err(error) =
+        retry_tapo_handshake(|| state.controller.set_power(&device_cfg, target)).await
     {
         warn!(device = %device_name, %error, "reconcile set_power failed");
         return;
@@ -2750,7 +2572,11 @@ pub(crate) async fn reconcile_device(state: &AppState, device_name: &str, source
         device_name,
         &nickname,
         &model,
-        if target { HookEvent::On } else { HookEvent::Off },
+        if target {
+            HookEvent::On
+        } else {
+            HookEvent::Off
+        },
         source,
         current_state,
         Some(target),
@@ -2857,7 +2683,11 @@ pub(crate) async fn evaluate_all_automations(
 ) -> Result<()> {
     let snapshots: Vec<Automation> = {
         let automations = state.automations.read().await;
-        automations.values().filter(|a| a.enabled).cloned().collect()
+        automations
+            .values()
+            .filter(|a| a.enabled)
+            .cloned()
+            .collect()
     };
 
     for automation in snapshots {
@@ -2993,9 +2823,11 @@ pub(crate) async fn evaluate_one_automation(
                             || p.last_fired_at_ms != state_update.last_fired_at_ms
                             || p.last_error != state_update.last_error
                     }
-                    None => state_update.last_value.is_some()
-                        || state_update.last_fired_at_ms.is_some()
-                        || state_update.last_error.is_some(),
+                    None => {
+                        state_update.last_value.is_some()
+                            || state_update.last_fired_at_ms.is_some()
+                            || state_update.last_error.is_some()
+                    }
                 };
                 if changed {
                     dirty = true;
@@ -3035,7 +2867,10 @@ pub(crate) async fn evaluate_one_automation(
     }
 }
 
-pub(crate) fn topo_sort_nodes(nodes: &[AutomationNode], edges: &[AutomationEdge]) -> Option<Vec<String>> {
+pub(crate) fn topo_sort_nodes(
+    nodes: &[AutomationNode],
+    edges: &[AutomationEdge],
+) -> Option<Vec<String>> {
     let mut indeg: BTreeMap<String, usize> = BTreeMap::new();
     let mut adj: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for n in nodes {
@@ -3095,8 +2930,7 @@ pub(crate) async fn evaluate_node(
                 }
             };
             let prev_dt = DateTime::<Local>::from(
-                std::time::UNIX_EPOCH
-                    + Duration::from_millis(previous_tick_ms as u64),
+                std::time::UNIX_EPOCH + Duration::from_millis(previous_tick_ms as u64),
             );
             let now_dt = DateTime::<Local>::from(
                 std::time::UNIX_EPOCH + Duration::from_millis(tick_ms as u64),
@@ -3126,7 +2960,9 @@ pub(crate) async fn evaluate_node(
             };
             (Some(active), next)
         }
-        AutomationNodeConfig::DeviceEventTrigger { device_event_trigger } => {
+        AutomationNodeConfig::DeviceEventTrigger {
+            device_event_trigger,
+        } => {
             // Edge-detect against current device snapshot. We only support
             // on/off events through snapshot polling; online/offline are
             // handled via the existing offline tracking flags.
@@ -3376,7 +3212,9 @@ pub(crate) async fn execute_action(
             set_schedule_intent(state, &toggle_device.device_name, target).await;
             Ok(Some(toggle_device.device_name.clone()))
         }
-        AutomationNodeConfig::FireHook { fire_hook: fire_hook_cfg } => {
+        AutomationNodeConfig::FireHook {
+            fire_hook: fire_hook_cfg,
+        } => {
             let hook = {
                 let hooks = state.hooks.read().await;
                 hooks.get(&fire_hook_cfg.hook_id).cloned()
@@ -3428,13 +3266,15 @@ pub(crate) async fn run_condition_poller(state: AppState) {
 
         let now = now_ms();
         for (_key, members) in groups {
-            let due = members.iter().any(|(_id, poll_seconds, last_checked_at_ms)| {
-                let interval_ms = (*poll_seconds as u128) * 1000;
-                match last_checked_at_ms {
-                    None => true,
-                    Some(last) => now.saturating_sub(*last) >= interval_ms,
-                }
-            });
+            let due = members
+                .iter()
+                .any(|(_id, poll_seconds, last_checked_at_ms)| {
+                    let interval_ms = (*poll_seconds as u128) * 1000;
+                    match last_checked_at_ms {
+                        None => true,
+                        Some(last) => now.saturating_sub(*last) >= interval_ms,
+                    }
+                });
             if !due {
                 continue;
             }
@@ -3512,8 +3352,7 @@ pub(crate) async fn evaluate_schedules(
                 }
             }
             ScheduleKind::Interval => {
-                let prev_ms = u128::try_from(previous_tick.timestamp_millis().max(0))
-                    .unwrap_or(0);
+                let prev_ms = u128::try_from(previous_tick.timestamp_millis().max(0)).unwrap_or(0);
                 let now_ms_local = u128::try_from(now.timestamp_millis().max(0)).unwrap_or(0);
 
                 let Some(target_phase) = interval_phase_at(&schedule, now_ms_local) else {
@@ -3530,7 +3369,11 @@ pub(crate) async fn evaluate_schedules(
     }
 }
 
-pub(crate) async fn fire_schedule(state: &AppState, schedule: &ScheduleConfig, action: ScheduleAction) {
+pub(crate) async fn fire_schedule(
+    state: &AppState,
+    schedule: &ScheduleConfig,
+    action: ScheduleAction,
+) {
     info!(
         schedule_id = %schedule.id,
         device = %schedule.device_name,
@@ -3713,125 +3556,6 @@ pub(crate) async fn discover_devices(state: &AppState) -> Result<()> {
     }
 
     Ok(())
-}
-
-pub(crate) async fn load_persisted_state(state: &AppState) -> Result<()> {
-    let contents = match fs::read_to_string(&state.state_path) {
-        Ok(contents) => contents,
-        Err(error) if error.kind() == ErrorKind::NotFound => {
-            info!(path = %state.state_path.display(), "no persisted state found");
-            return Ok(());
-        }
-        Err(error) => return Err(error).context("failed to read persisted state"),
-    };
-
-    let mut persisted: PersistedState =
-        serde_json::from_str(&contents).context("failed to parse persisted state")?;
-
-    let mut migrated_from: Option<u32> = None;
-    if persisted.version < STATE_VERSION {
-        migrated_from = Some(persisted.version);
-        migrate_to_automations(&mut persisted);
-        persisted.version = STATE_VERSION;
-    } else if persisted.version > STATE_VERSION {
-        return Err(anyhow!(
-            "unsupported state version {}; expected {}",
-            persisted.version,
-            STATE_VERSION,
-        ));
-    }
-
-    let loaded_count = persisted.devices.len();
-    let loaded_schedule_count = persisted.schedules.len();
-    let loaded_condition_count = persisted.conditions.len();
-    let loaded_automation_count = persisted.automations.len();
-    {
-        let mut devices = state.devices.write().await;
-
-        for (name, config) in persisted.devices {
-            devices.insert(name.clone(), managed_device_from_config(name, config));
-        }
-    }
-
-    {
-        let mut schedules = state.schedules.write().await;
-        for (id, schedule) in persisted.schedules {
-            schedules.insert(id, schedule);
-        }
-    }
-
-    {
-        let mut conditions = state.conditions.write().await;
-        for (id, condition) in persisted.conditions {
-            conditions.insert(id, condition);
-        }
-    }
-
-    {
-        let mut intents = state.device_intents.write().await;
-        for (name, intent) in persisted.device_intents {
-            intents.insert(name, intent);
-        }
-    }
-
-    {
-        let mut hooks = state.hooks.write().await;
-        for (id, hook) in persisted.hooks {
-            hooks.insert(id, hook);
-        }
-    }
-
-    {
-        let mut automations = state.automations.write().await;
-        for (id, automation) in persisted.automations {
-            automations.insert(id, automation);
-        }
-    }
-
-    info!(
-        loaded_count,
-        loaded_schedule_count,
-        loaded_condition_count,
-        loaded_automation_count,
-        migrated_from = ?migrated_from,
-        path = %state.state_path.display(),
-        "loaded persisted state",
-    );
-
-    if migrated_from.is_some() {
-        if let Err(error) = save_persisted_state(state).await {
-            warn!(%error, "failed to persist state after automation migration");
-        } else {
-            info!("persisted migrated state at new version {STATE_VERSION}");
-        }
-    }
-    Ok(())
-}
-
-pub(crate) async fn save_persisted_state(state: &AppState) -> Result<()> {
-    let persisted = {
-        let devices = state.devices.read().await;
-        let schedules = state.schedules.read().await;
-        let conditions = state.conditions.read().await;
-        let intents = state.device_intents.read().await;
-        let hooks = state.hooks.read().await;
-        let automations = state.automations.read().await;
-
-        PersistedState {
-            version: STATE_VERSION,
-            devices: devices
-                .iter()
-                .map(|(name, device)| (name.clone(), device.config.clone()))
-                .collect(),
-            schedules: schedules.clone(),
-            conditions: conditions.clone(),
-            device_intents: intents.clone(),
-            hooks: hooks.clone(),
-            automations: automations.clone(),
-        }
-    };
-
-    write_json_atomically(&state.state_path, &persisted)
 }
 
 /// Convert legacy `ScheduleConfig` and `ConditionConfig` entries into
@@ -4073,62 +3797,6 @@ pub(crate) fn migrate_to_automations(persisted: &mut PersistedState) {
     persisted.conditions.clear();
 }
 
-pub(crate) fn managed_device_from_config(name: String, config: DeviceConfig) -> ManagedDevice {
-    ManagedDevice {
-        name,
-        config,
-        snapshot: None,
-        last_error: None,
-        discovered_at_ms: now_ms(),
-        updated_at_ms: None,
-        consecutive_failures: 0,
-        offline_announced: false,
-    }
-}
-
-pub(crate) fn write_json_atomically<T>(path: &FsPath, value: &T) -> Result<()>
-where
-    T: Serialize,
-{
-    if let Some(parent) = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-    {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create state directory {}", parent.display()))?;
-    }
-
-    let temp_path = temporary_path_for(path)?;
-    let mut contents = serde_json::to_string_pretty(value).context("failed to serialize state")?;
-    contents.push('\n');
-
-    fs::write(&temp_path, contents).with_context(|| {
-        format!(
-            "failed to write temporary state file {}",
-            temp_path.display()
-        )
-    })?;
-    fs::rename(&temp_path, path).with_context(|| {
-        format!(
-            "failed to move temporary state file {} to {}",
-            temp_path.display(),
-            path.display(),
-        )
-    })?;
-
-    Ok(())
-}
-
-pub(crate) fn temporary_path_for(path: &FsPath) -> Result<PathBuf> {
-    let file_name = path
-        .file_name()
-        .ok_or_else(|| anyhow!("state path must include a file name"))?;
-    let mut temporary_name = OsString::from(file_name);
-    temporary_name.push(".tmp");
-
-    Ok(path.with_file_name(temporary_name))
-}
-
 pub(crate) async fn refresh_all_devices(state: &AppState) {
     let devices = {
         let devices = state.devices.read().await;
@@ -4187,7 +3855,10 @@ pub(crate) fn is_tapo_handshake_error(error: &anyhow::Error) -> bool {
         .any(|cause| cause.to_string().contains("Handshake2 failed"))
 }
 
-pub(crate) async fn device_operation_lock(state: &AppState, device: &DeviceConfig) -> Arc<Mutex<()>> {
+pub(crate) async fn device_operation_lock(
+    state: &AppState,
+    device: &DeviceConfig,
+) -> Arc<Mutex<()>> {
     if let Some(lock) = state.device_locks.read().await.get(&device.ip).cloned() {
         return lock;
     }
@@ -4209,7 +3880,9 @@ pub(crate) async fn update_device_snapshot(
     let (prev_on, was_offline_announced, nickname) = {
         let devices = state.devices.read().await;
         let device = devices.get(name);
-        let prev_on = device.and_then(|d| d.snapshot.as_ref()).map(|s| s.device_on);
+        let prev_on = device
+            .and_then(|d| d.snapshot.as_ref())
+            .map(|s| s.device_on);
         let was_offline_announced = device.is_some_and(|d| d.offline_announced);
         let nickname = device
             .and_then(|d| d.snapshot.as_ref())
@@ -4246,7 +3919,11 @@ pub(crate) async fn update_device_snapshot(
     // after startup has prev_on=None and is suppressed.
     if let Some(previous) = prev_on {
         if previous != new_on {
-            events.push(if new_on { HookEvent::On } else { HookEvent::Off });
+            events.push(if new_on {
+                HookEvent::On
+            } else {
+                HookEvent::Off
+            });
         }
     }
     for event in events {
@@ -4268,7 +3945,9 @@ pub(crate) async fn update_device_error(state: &AppState, name: &str, error: Str
     let (prev_on, prev_failures, was_offline_announced, nickname, model) = {
         let devices = state.devices.read().await;
         let device = devices.get(name);
-        let prev_on = device.and_then(|d| d.snapshot.as_ref()).map(|s| s.device_on);
+        let prev_on = device
+            .and_then(|d| d.snapshot.as_ref())
+            .map(|s| s.device_on);
         let prev_failures = device.map(|d| d.consecutive_failures).unwrap_or(0);
         let was_offline_announced = device.is_some_and(|d| d.offline_announced);
         let nickname = device
@@ -4283,7 +3962,13 @@ pub(crate) async fn update_device_error(state: &AppState, name: &str, error: Str
                     .map(|d| d.config.model.to_string())
                     .unwrap_or_default()
             });
-        (prev_on, prev_failures, was_offline_announced, nickname, model)
+        (
+            prev_on,
+            prev_failures,
+            was_offline_announced,
+            nickname,
+            model,
+        )
     };
 
     let new_failures = prev_failures.saturating_add(1);
@@ -4572,7 +4257,10 @@ pub(crate) async fn device_views(state: &AppState) -> Vec<DeviceView> {
     views
 }
 
-pub(crate) async fn device_list_response(state: &AppState, scan_error: Option<String>) -> DeviceListResponse {
+pub(crate) async fn device_list_response(
+    state: &AppState,
+    scan_error: Option<String>,
+) -> DeviceListResponse {
     DeviceListResponse {
         devices: device_views(state).await,
         updated_at_ms: now_ms(),
@@ -4636,7 +4324,10 @@ pub(crate) async fn build_energy_export_workbook(state: &AppState) -> Result<Vec
     write_export_workbook(&device_names, &tables, &errors)
 }
 
-pub(crate) async fn build_usage_history(state: &AppState, range_key: Option<&str>) -> UsageHistoryResponse {
+pub(crate) async fn build_usage_history(
+    state: &AppState,
+    range_key: Option<&str>,
+) -> UsageHistoryResponse {
     let range = usage_history_range(range_key);
     let devices = export_devices(state).await;
     let now = Utc::now();
@@ -4733,7 +4424,10 @@ pub(crate) async fn read_usage_history_entries(
     }
 }
 
-pub(crate) fn usage_history_start_datetime(start: UsageHistoryStart, now: DateTime<Utc>) -> DateTime<Utc> {
+pub(crate) fn usage_history_start_datetime(
+    start: UsageHistoryStart,
+    now: DateTime<Utc>,
+) -> DateTime<Utc> {
     match start {
         UsageHistoryStart::Duration(duration) => now.checked_sub_signed(duration).unwrap_or(now),
         UsageHistoryStart::YearToDate => date_start_datetime(current_year_start(now.date_naive())),
@@ -5719,11 +5413,26 @@ mod tests {
             last_error: None,
         };
 
-        assert_eq!(interval_phase_at(&schedule, 1_000), Some(ScheduleAction::On));
-        assert_eq!(interval_phase_at(&schedule, 60_000), Some(ScheduleAction::On));
-        assert_eq!(interval_phase_at(&schedule, 61_001), Some(ScheduleAction::Off));
-        assert_eq!(interval_phase_at(&schedule, 180_000), Some(ScheduleAction::Off));
-        assert_eq!(interval_phase_at(&schedule, 181_001), Some(ScheduleAction::On));
+        assert_eq!(
+            interval_phase_at(&schedule, 1_000),
+            Some(ScheduleAction::On)
+        );
+        assert_eq!(
+            interval_phase_at(&schedule, 60_000),
+            Some(ScheduleAction::On)
+        );
+        assert_eq!(
+            interval_phase_at(&schedule, 61_001),
+            Some(ScheduleAction::Off)
+        );
+        assert_eq!(
+            interval_phase_at(&schedule, 180_000),
+            Some(ScheduleAction::Off)
+        );
+        assert_eq!(
+            interval_phase_at(&schedule, 181_001),
+            Some(ScheduleAction::On)
+        );
         assert_eq!(interval_phase_at(&schedule, 500), None);
 
         // Next fire from t=30s should be at t=61s (the on→off transition).
@@ -5804,9 +5513,18 @@ mod tests {
 
         assert_eq!(condition_probe_key(&a), condition_probe_key(&b));
         assert_ne!(condition_probe_key(&a), condition_probe_key(&different_url));
-        assert_ne!(condition_probe_key(&a), condition_probe_key(&different_status));
-        assert_ne!(condition_probe_key(&a), condition_probe_key(&different_method));
-        assert_ne!(condition_probe_key(&a), condition_probe_key(&different_headers));
+        assert_ne!(
+            condition_probe_key(&a),
+            condition_probe_key(&different_status)
+        );
+        assert_ne!(
+            condition_probe_key(&a),
+            condition_probe_key(&different_method)
+        );
+        assert_ne!(
+            condition_probe_key(&a),
+            condition_probe_key(&different_headers)
+        );
     }
 
     #[test]
@@ -5978,10 +5696,7 @@ mod tests {
             timestamp_ms: 1_700_000_000_000,
         };
 
-        assert_eq!(
-            ctx.render("{{nickname}} -> {{event}}"),
-            "Lights -> off",
-        );
+        assert_eq!(ctx.render("{{nickname}} -> {{event}}"), "Lights -> off",);
         assert_eq!(
             ctx.render("https://ntfy.example/topic/{{device}}"),
             "https://ntfy.example/topic/lights",
@@ -5998,10 +5713,8 @@ mod tests {
 
     fn dummy_device(name: &str, ip: &str, model: DeviceModel, on: bool) -> ManagedDevice {
         let ip_addr: IpAddr = ip.parse().unwrap();
-        let mut device = managed_device_from_config(
-            name.to_string(),
-            DeviceConfig { ip: ip_addr, model },
-        );
+        let mut device =
+            managed_device_from_config(name.to_string(), DeviceConfig { ip: ip_addr, model });
         device.snapshot = Some(DeviceSnapshot {
             ip: ip_addr,
             model,
@@ -6061,7 +5774,11 @@ mod tests {
         {
             let conditions = state.conditions.read().await;
             let stored = conditions.get("c").unwrap();
-            assert_eq!(stored.last_passing, Some(true), "hysteresis should hold previous value");
+            assert_eq!(
+                stored.last_passing,
+                Some(true),
+                "hysteresis should hold previous value"
+            );
             assert_eq!(stored.pending_value, Some(false));
             assert!(stored.pending_since_ms.is_some());
         }
@@ -6076,7 +5793,11 @@ mod tests {
         {
             let conditions = state.conditions.read().await;
             let stored = conditions.get("c").unwrap();
-            assert_eq!(stored.last_passing, Some(false), "hysteresis should commit after stable window");
+            assert_eq!(
+                stored.last_passing,
+                Some(false),
+                "hysteresis should commit after stable window"
+            );
             assert_eq!(stored.pending_value, None);
         }
 
@@ -6089,7 +5810,8 @@ mod tests {
         let settings = test_settings(state_path.clone());
         let state = AppState::new(&settings);
 
-        let captured = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::<(String, HookEvent)>::new()));
+        let captured =
+            std::sync::Arc::new(tokio::sync::Mutex::new(Vec::<(String, HookEvent)>::new()));
         // Insert a hook so dispatch_hook_events has something to match against.
         let hook = sample_hook(Vec::new(), Vec::new());
         {
@@ -6128,7 +5850,10 @@ mod tests {
         // device's hook record is untouched.
         let hooks = state.hooks.read().await;
         let stored = hooks.values().next().unwrap();
-        assert_eq!(stored.last_fired_at_ms, None, "first read should not have fired the hook");
+        assert_eq!(
+            stored.last_fired_at_ms, None,
+            "first read should not have fired the hook"
+        );
         let _ = captured;
 
         let _ = fs::remove_file(state_path);
