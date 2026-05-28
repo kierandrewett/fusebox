@@ -2050,6 +2050,7 @@
 .fb-node-pins-out { bottom: -14px; }
 
 .fb-pin {
+  position: relative;
   display: inline-flex;
   align-items: center;
   gap: 4px;
