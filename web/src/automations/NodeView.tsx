@@ -1244,7 +1244,7 @@ function ExpressionBody({
         ) : null}
         {preview && preview.input_fields.length === 0 && /\binput\b/.test(value) ? (
           <p className="fb-node-hint">
-            No live data from the upstream block yet — save and let it run once
+            No live data from the upstream block yet. Save and let it run once
             (trigger it) so its outputs are recorded.
           </p>
         ) : null}

@@ -332,6 +332,23 @@ pub(crate) struct AutomationListResponse {
     pub(crate) automations: Vec<Automation>,
 }
 
+/// A single predicted device state change in the forecast window.
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct ForecastEvent {
+    pub(crate) at_ms: u128,
+    pub(crate) device_name: String,
+    pub(crate) action: ScheduleAction,
+    pub(crate) automation_id: String,
+    pub(crate) automation_name: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct ForecastResponse {
+    pub(crate) generated_at_ms: u128,
+    pub(crate) horizon_ms: u128,
+    pub(crate) events: Vec<ForecastEvent>,
+}
+
 /// Request to evaluate an expression against an automation's live state, for
 /// the editor's preview feature. `upstream_id` is the logical id of the node
 /// wired to IN, whose recorded outputs become the `input` dictionary.

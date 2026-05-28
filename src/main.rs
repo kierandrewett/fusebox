@@ -20,8 +20,8 @@ use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
 use crate::automations::api::{
-    create_automation, delete_automation, export_automation, import_automation, list_automations,
-    preview_expression, update_automation,
+    create_automation, delete_automation, device_forecast, export_automation, import_automation,
+    list_automations, preview_expression, update_automation,
 };
 use crate::automations::engine::run_automation_engine;
 use crate::conditions::{
@@ -68,6 +68,7 @@ async fn main() -> Result<()> {
         .route("/assets/app.js", get(crate::web::app_bundle))
         .route("/health", get(crate::web::health))
         .route("/api/devices", get(list_devices))
+        .route("/api/devices/forecast", get(device_forecast))
         .route("/api/energy/history.json", get(energy_history))
         .route("/api/energy/export.xlsx", get(export_energy_workbook))
         .route("/ws/devices", get(devices_websocket))

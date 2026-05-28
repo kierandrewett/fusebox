@@ -87,6 +87,24 @@ export async function listDeviceResponse(): Promise<DeviceListResponse> {
   return jsonOrThrow<DeviceListResponse>(res);
 }
 
+export interface ForecastEvent {
+  at_ms: number;
+  device_name: string;
+  action: "on" | "off" | "toggle";
+  automation_id: string;
+  automation_name: string;
+}
+export interface ForecastResponse {
+  generated_at_ms: number;
+  horizon_ms: number;
+  events: ForecastEvent[];
+}
+
+export async function getDeviceForecast(): Promise<ForecastResponse> {
+  const res = await fetch(`${BASE}/api/devices/forecast`);
+  return jsonOrThrow<ForecastResponse>(res);
+}
+
 export async function listDevices(): Promise<DeviceSummary[]> {
   const body = await listDeviceResponse();
   return body.devices.map((d) => ({ name: d.name, nickname: d.nickname ?? d.name, ip: d.ip ?? "", model: d.model ?? "" }));

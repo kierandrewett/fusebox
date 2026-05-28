@@ -4,6 +4,7 @@ import type { DeviceListResponse, UsageHistoryResponse } from "../types";
 import { subscribeDevices } from "../ws";
 import { DeviceCard } from "./DeviceCard";
 import { UsageChart, type HistoryRange } from "./UsageChart";
+import { UpcomingChanges } from "./UpcomingChanges";
 import { formatCost, formatEnergy } from "../format";
 
 interface Props {
@@ -110,6 +111,8 @@ export function DevicesTab({ registerScanSink }: Props) {
         range={state.historyRange}
         onRangeChange={(range) => dispatch({ type: "range", range })}
       />
+
+      <UpcomingChanges devices={devices} />
 
       {state.error ? <p className="notice" role="alert">{state.error}</p> : null}
 

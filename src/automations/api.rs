@@ -8,11 +8,12 @@ use axum::http::StatusCode;
 use tracing::warn;
 
 use crate::api_error::AppError;
+use crate::automations::engine::forecast_device_changes;
 use crate::automations::expr::{self, EvalContext};
 use crate::automations::types::{
     Automation, AutomationEdge, AutomationExport, AutomationListResponse, AutomationNode,
-    AutomationNodeConfig, AutomationStatus, CreateAutomationRequest, PreviewRequest,
-    PreviewResponse, UpdateAutomationRequest, export_kind, export_version,
+    AutomationNodeConfig, AutomationStatus, CreateAutomationRequest, ForecastResponse,
+    PreviewRequest, PreviewResponse, UpdateAutomationRequest, export_kind, export_version,
 };
 use crate::conditions::{clamp_poll_seconds, parse_status_match, validate_http_method, validate_url};
 use crate::schedules::{MIN_INTERVAL_CYCLE_SECONDS, parse_cron};
@@ -201,6 +202,21 @@ pub(crate) async fn import_automation(
         warn!(%error, "failed to persist imported automation");
     }
     Ok((StatusCode::CREATED, Json(automation)))
+}
+
+pub(crate) async fn device_forecast(State(state): State<AppState>) -> Json<ForecastResponse> {
+    const HORIZON_MS: u128 = 4 * 60 * 60 * 1000;
+    let now = now_ms();
+    let horizon = now + HORIZON_MS;
+    let events = {
+        let automations = state.automations.read().await;
+        forecast_device_changes(&automations, now, horizon)
+    };
+    Json(ForecastResponse {
+        generated_at_ms: now,
+        horizon_ms: horizon,
+        events,
+    })
 }
 
 pub(crate) async fn preview_expression(

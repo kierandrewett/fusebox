@@ -10,8 +10,8 @@ use serde_json::Value;
 
 use crate::automations::expr::{self, EvalContext};
 use crate::automations::types::{
-    Automation, AutomationEdge, AutomationNode, AutomationNodeConfig, IfConditionCfg, IfOp,
-    NodeRuntimeState,
+    Automation, AutomationEdge, AutomationNode, AutomationNodeConfig, ForecastEvent,
+    IfConditionCfg, IfOp, IntervalTriggerCfg, NodeRuntimeState,
 };
 use crate::conditions::{ConditionConfig, parse_status_match, probe_condition_once, status_matches};
 use crate::hooks::{HookEvent, HookSource, HookTemplateContext, fire_hook};
@@ -317,6 +317,128 @@ pub(crate) fn topo_sort_nodes(
     } else {
         None
     }
+}
+
+/// Predict device state changes over [now_ms, horizon_ms] from the
+/// deterministic, time-based triggers (cron + interval) that drive a device
+/// action directly. Conditional/data-dependent paths (IF, HTTP, variables)
+/// can't be predicted ahead of time and are intentionally excluded.
+pub(crate) fn forecast_device_changes(
+    automations: &BTreeMap<String, Automation>,
+    now_ms: u128,
+    horizon_ms: u128,
+) -> Vec<ForecastEvent> {
+    const MAX_EVENTS: usize = 500;
+    let now_dt = DateTime::<Local>::from(std::time::UNIX_EPOCH + Duration::from_millis(now_ms as u64));
+    let horizon_dt =
+        DateTime::<Local>::from(std::time::UNIX_EPOCH + Duration::from_millis(horizon_ms as u64));
+
+    let mut events: Vec<ForecastEvent> = Vec::new();
+    for automation in automations.values() {
+        if !automation.enabled {
+            continue;
+        }
+        for node in &automation.nodes {
+            // Direct device-action targets wired off this trigger.
+            let targets: Vec<(String, ScheduleAction)> = automation
+                .edges
+                .iter()
+                .filter(|e| e.source_node == node.id)
+                .filter_map(|e| automation.nodes.iter().find(|n| n.id == e.target_node))
+                .filter_map(|target| match &target.config {
+                    AutomationNodeConfig::SetDevice { set_device }
+                        if !set_device.device_name.is_empty() =>
+                    {
+                        Some((set_device.device_name.clone(), set_device.action))
+                    }
+                    AutomationNodeConfig::ToggleDevice { toggle_device }
+                        if !toggle_device.device_name.is_empty() =>
+                    {
+                        Some((toggle_device.device_name.clone(), ScheduleAction::Toggle))
+                    }
+                    _ => None,
+                })
+                .collect();
+            if targets.is_empty() {
+                continue;
+            }
+
+            let fire_times: Vec<u128> = match &node.config {
+                AutomationNodeConfig::CronTrigger { cron_trigger } => match parse_cron(&cron_trigger.cron) {
+                    Ok(schedule) => schedule
+                        .after(&now_dt)
+                        .take_while(|t| *t <= horizon_dt)
+                        .take(MAX_EVENTS)
+                        .map(|t| t.timestamp_millis().max(0) as u128)
+                        .collect(),
+                    Err(_) => continue,
+                },
+                AutomationNodeConfig::IntervalTrigger { interval_trigger } => {
+                    interval_rising_times(interval_trigger, now_ms, horizon_ms)
+                }
+                // Immediate already fired; device events aren't predictable.
+                _ => continue,
+            };
+
+            for at in fire_times {
+                for (device, action) in &targets {
+                    events.push(ForecastEvent {
+                        at_ms: at,
+                        device_name: device.clone(),
+                        action: *action,
+                        automation_id: automation.id.clone(),
+                        automation_name: automation.name.clone(),
+                    });
+                }
+            }
+        }
+    }
+    events.sort_by_key(|e| e.at_ms);
+    events.truncate(MAX_EVENTS);
+    events
+}
+
+/// Rising-edge (start-of-active-window) times of an interval trigger within
+/// (now_ms, horizon_ms]. A constant interval (on or off is zero) has no
+/// recurring transitions, so it produces nothing.
+fn interval_rising_times(cfg: &IntervalTriggerCfg, now_ms: u128, horizon_ms: u128) -> Vec<u128> {
+    let total = cfg.on_seconds.saturating_add(cfg.off_seconds);
+    if total == 0 || cfg.on_seconds == 0 || cfg.off_seconds == 0 {
+        return Vec::new();
+    }
+    // For start=on/toggle the active window begins at phase 0; for start=off
+    // it begins once the on-window has elapsed.
+    let offset_s = if matches!(cfg.start_action, ScheduleAction::Off) {
+        cfg.on_seconds
+    } else {
+        0
+    };
+    let starts = cfg.starts_at_ms.unwrap_or(0) as i128;
+    let base = starts + (offset_s as i128) * 1000;
+    let period = (total as i128) * 1000;
+    let now = now_ms as i128;
+    let horizon = horizon_ms as i128;
+
+    // Jump straight to the cycle near `now` rather than counting from epoch.
+    let mut k = if now > base { (now - base) / period } else { 0 };
+    if k < 0 {
+        k = 0;
+    }
+    let mut times = Vec::new();
+    loop {
+        let t = base + k * period;
+        if t > horizon {
+            break;
+        }
+        if t > now && t >= 0 {
+            times.push(t as u128);
+        }
+        k += 1;
+        if times.len() >= 500 {
+            break;
+        }
+    }
+    times
 }
 
 /// One edge feeding into the node being evaluated, with its (possibly
