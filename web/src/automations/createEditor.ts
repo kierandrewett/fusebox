@@ -2,6 +2,7 @@ import { NodeEditor, ClassicPreset, GetSchemes } from "rete";
 import { AreaPlugin, AreaExtensions } from "rete-area-plugin";
 import { ConnectionPlugin, Presets as ConnectionPresets } from "rete-connection-plugin";
 import { ReactPlugin, Presets as ReactPresets, ReactArea2D } from "rete-react-plugin";
+import { getDOMSocketPosition } from "rete-render-utils";
 import { createRoot } from "react-dom/client";
 
 import type { AutomationNode, AutomationEdge, NodeConfig } from "../types";
@@ -110,6 +111,15 @@ export async function createEditor(
 
   react.addPreset(
     ReactPresets.classic.setup({
+      // Anchor connections at the centre of each pin chip (the default adds a
+      // ±12px horizontal offset meant for left→right layouts, which pushed
+      // the line off the YES/NO chips). Nudge slightly toward the outer edge.
+      socketPositionWatcher: getDOMSocketPosition<Schemes, AreaExtra>({
+        offset: (position, _nodeId, side) => ({
+          x: position.x,
+          y: position.y + (side === "input" ? -8 : 8),
+        }),
+      }),
       customize: {
         node() {
           return NodeView as any;
@@ -117,6 +127,20 @@ export async function createEditor(
       },
     }),
   );
+
+  // Draw connections as a vertical curve (down out of the source, up into the
+  // target) instead of the classic horizontal bezier — our blocks flow
+  // top→bottom, so the default sideways control points made an S-bend and the
+  // line appeared to leave from between the YES/NO pins.
+  react.addPipe((context) => {
+    if (context && (context as any).type === "connectionpath") {
+      const points = (context as any).data?.points;
+      if (Array.isArray(points) && points[0] && points[1]) {
+        (context as any).data.path = verticalConnectionPath(points[0], points[1]);
+      }
+    }
+    return context;
+  });
 
   connection.addPreset(ConnectionPresets.classic.setup());
 
@@ -308,4 +332,13 @@ export async function createEditor(
 function reverseLookup<K, V>(map: Map<K, V>, value: V): K | undefined {
   for (const [k, v] of map.entries()) if (v === value) return k;
   return undefined;
+}
+
+/** A mostly-vertical cubic bezier: leaves the source going straight down and
+ *  enters the target going straight up. Far less bendy than the classic
+ *  horizontal path for our top→bottom block layout. */
+function verticalConnectionPath(a: { x: number; y: number }, b: { x: number; y: number }): string {
+  const dy = Math.abs(b.y - a.y);
+  const k = Math.max(20, Math.min(dy * 0.6, 80));
+  return `M ${a.x} ${a.y} C ${a.x} ${a.y + k} ${b.x} ${b.y - k} ${b.x} ${b.y}`;
 }
