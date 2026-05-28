@@ -619,9 +619,26 @@ pub(crate) async fn evaluate_node(
             if !rising {
                 return (prev.last_value, next);
             }
-            // Inspect the wired upstream block (for input.* fields). A
-            // `$var` field reads a variable instead, so a missing upstream is
-            // fine in that case.
+            // Expression mode: evaluate a full boolean expression with access
+            // to both $variables and input.* (the wired upstream's outputs).
+            if !if_condition.expression.trim().is_empty() {
+                let input = fetch_source_outputs(state, automation_id, inputs).await;
+                let matched = {
+                    let ctx = EvalContext {
+                        variables,
+                        input,
+                    };
+                    match expr::evaluate(&if_condition.expression, &ctx) {
+                        Ok(value) => expr::truthy(&value),
+                        Err(error) => {
+                            next.last_error = Some(error);
+                            false
+                        }
+                    }
+                };
+                return (Some(matched), next);
+            }
+            // Builder mode: read one field ($var or input.field) and compare.
             let source_state: Option<NodeRuntimeState> = match inputs.first() {
                 Some(input) => {
                     let automations = state.automations.read().await;

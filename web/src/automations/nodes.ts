@@ -31,7 +31,6 @@ export interface NodeTemplate {
 }
 
 const SINGLE_OK: SocketSpec[] = [{ key: "out", label: "OK", variant: "default" }];
-const NO_OUTPUT: SocketSpec[] = [];
 const DEFAULT_DATA_OUTPUTS: DataOutputSpec[] = [{ key: "value", label: "Value (true/false)" }];
 
 export const NODE_TEMPLATES: NodeTemplate[] = [
@@ -126,7 +125,7 @@ export const NODE_TEMPLATES: NodeTemplate[] = [
     dataOutputs: DEFAULT_DATA_OUTPUTS,
     defaultConfig: () => ({
       kind: "if_condition",
-      if_condition: { field: "value", op: "is_true", value: "" },
+      if_condition: { expression: "", field: "value", op: "is_true", value: "" },
     }),
   },
   {
@@ -208,9 +207,9 @@ export const NODE_TEMPLATES: NodeTemplate[] = [
     kind: "set_device",
     label: "Set device",
     category: "action",
-    description: "Sets a device on/off/toggle when the input fires.",
+    description: "Sets a device on/off/toggle when the input fires. OK fires after, so you can chain actions.",
     hasInput: true,
-    outputs: NO_OUTPUT,
+    outputs: SINGLE_OK,
     dataOutputs: DEFAULT_DATA_OUTPUTS,
     defaultConfig: () => ({
       kind: "set_device",
@@ -221,9 +220,9 @@ export const NODE_TEMPLATES: NodeTemplate[] = [
     kind: "toggle_device",
     label: "Toggle device",
     category: "action",
-    description: "Toggles a device every time the input fires.",
+    description: "Toggles a device every time the input fires. OK fires after, so you can chain actions.",
     hasInput: true,
-    outputs: NO_OUTPUT,
+    outputs: SINGLE_OK,
     dataOutputs: DEFAULT_DATA_OUTPUTS,
     defaultConfig: () => ({
       kind: "toggle_device",
@@ -234,9 +233,9 @@ export const NODE_TEMPLATES: NodeTemplate[] = [
     kind: "fire_hook",
     label: "Fire hook",
     category: "action",
-    description: "Triggers a named hook when the input fires.",
+    description: "Triggers a named hook when the input fires. OK fires after, so you can chain actions.",
     hasInput: true,
-    outputs: NO_OUTPUT,
+    outputs: SINGLE_OK,
     dataOutputs: DEFAULT_DATA_OUTPUTS,
     defaultConfig: () => ({
       kind: "fire_hook",

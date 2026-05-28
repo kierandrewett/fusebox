@@ -399,13 +399,18 @@ pub(crate) fn validate_node_config(config: &AutomationNodeConfig) -> Result<()> 
                     .map_err(|e| anyhow!("invalid expression: {e}"))?;
             }
         }
+        AutomationNodeConfig::IfCondition { if_condition } => {
+            if !if_condition.expression.trim().is_empty() {
+                crate::automations::expr::validate(&if_condition.expression)
+                    .map_err(|e| anyhow!("invalid expression: {e}"))?;
+            }
+        }
         AutomationNodeConfig::DeviceEventTrigger { .. }
         | AutomationNodeConfig::SetDevice { .. }
         | AutomationNodeConfig::ToggleDevice { .. }
         | AutomationNodeConfig::FireHook { .. }
         | AutomationNodeConfig::GetVariable { .. }
-        | AutomationNodeConfig::ImmediateTrigger
-        | AutomationNodeConfig::IfCondition { .. } => {
+        | AutomationNodeConfig::ImmediateTrigger => {
             // Picker may be empty while the user is still wiring things up.
         }
         AutomationNodeConfig::LogicAnd

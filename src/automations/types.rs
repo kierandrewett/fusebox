@@ -156,6 +156,12 @@ pub(crate) enum IfOp {
 /// available keys depend on the upstream node kind.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct IfConditionCfg {
+    /// When non-empty, a full boolean expression evaluated against the
+    /// automation's variables (`$name`) and the wired upstream block's
+    /// outputs (`input.field`). Takes precedence over the field/op/value
+    /// builder below.
+    #[serde(default)]
+    pub(crate) expression: String,
     #[serde(default = "default_if_field")]
     pub(crate) field: String,
     #[serde(default)]

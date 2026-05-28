@@ -62,6 +62,9 @@ export type IfOp =
   | "lte";
 
 export interface IfConditionConfig {
+  /** When non-empty, a boolean expression ($vars + input.*) used instead of
+   *  the field/op/value builder below. */
+  expression: string;
   /** Name of the upstream node's output to inspect (e.g. "value", "body"). */
   field: string;
   op: IfOp;

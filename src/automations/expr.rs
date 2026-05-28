@@ -706,13 +706,30 @@ fn num(f: f64) -> Value {
 }
 
 fn values_equal(a: &Value, b: &Value) -> bool {
-    match (a, b) {
-        (Value::Number(_), _) | (_, Value::Number(_))
-            if !a.is_string() && !b.is_string() && !a.is_null() && !b.is_null() =>
-        {
-            to_number(a) == to_number(b)
+    if a == b {
+        return true;
+    }
+    // Loose numeric equality so stringified inputs compare naturally:
+    // "200" == 200, 42 == 42.0, "42" == $level. Bools stay strict (compare
+    // a bool to "true" with == "true" instead).
+    if let (Some(x), Some(y)) = (numeric_coercion(a), numeric_coercion(b)) {
+        return x == y;
+    }
+    false
+}
+
+fn numeric_coercion(v: &Value) -> Option<f64> {
+    match v {
+        Value::Number(n) => n.as_f64(),
+        Value::String(s) => {
+            let t = s.trim();
+            if t.is_empty() {
+                None
+            } else {
+                t.parse::<f64>().ok()
+            }
         }
-        _ => a == b,
+        _ => None,
     }
 }
 

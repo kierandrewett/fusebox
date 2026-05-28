@@ -185,7 +185,8 @@ function summarizeNode(config: NodeConfig, ctx: EditorCtx): string {
       return `${config.http_request.method} ${short}`;
     }
     case "if_condition": {
-      const { field, op, value } = config.if_condition;
+      const { expression, field, op, value } = config.if_condition;
+      if (expression.trim()) return truncate(expression.trim(), 32);
       const fieldLabel = field || "value";
       switch (op) {
         case "is_true":
@@ -954,6 +955,13 @@ function HttpRequestBody({
 
 const DEFAULT_OUTPUT: DataOutputSpec = { key: "value", label: "Value (true/false)" };
 
+interface IfCfg {
+  expression: string;
+  field: string;
+  op: IfOp;
+  value: string;
+}
+
 function IfConditionBody({
   nodeId,
   config,
@@ -961,23 +969,24 @@ function IfConditionBody({
   onChange,
 }: {
   nodeId: string;
-  config: { field: string; op: IfOp; value: string };
+  config: IfCfg;
   ctx: EditorCtx;
-  onChange: (cfg: { field: string; op: IfOp; value: string }) => void;
+  onChange: (cfg: IfCfg) => void;
 }) {
+  const [mode, setMode] = useState<"builder" | "expression">(
+    config.expression.trim() ? "expression" : "builder",
+  );
+
   const upstreamKind = ctx.findUpstreamKind?.(nodeId) ?? null;
   const upstreamLabel = upstreamKind ? templateFor(upstreamKind).label : null;
   const availableOutputs: DataOutputSpec[] = upstreamKind
     ? templateFor(upstreamKind).dataOutputs
     : [DEFAULT_OUTPUT];
-  // Variables are addressable too: a "$name" field reads the variable.
-  const variableOptions: DataOutputSpec[] = (ctx.variableNames?.() ?? []).map((v) => ({
-    key: `$${v}`,
-    label: `$${v}`,
-  }));
+  const variableNames = ctx.variableNames?.() ?? [];
+  const variableOptions: DataOutputSpec[] = variableNames.map((v) => ({ key: `$${v}`, label: `$${v}` }));
+  const inputFields = availableOutputs.map((o) => o.key);
 
-  // If the saved field isn't in either list anymore (e.g. rewired, or a
-  // variable that no longer exists), surface it so it isn't silently lost.
+  // Surface a saved field that's no longer in either list so it isn't lost.
   const known = [...availableOutputs, ...variableOptions].some((o) => o.key === config.field);
   const extraOption: DataOutputSpec[] = known
     ? []
@@ -996,66 +1005,98 @@ function IfConditionBody({
     : isNumeric ? "Number"
     : "Value";
 
+  const switchMode = (m: "builder" | "expression") => {
+    // Clearing the expression makes the engine use the builder fields again.
+    if (m === "builder") onChange({ ...config, expression: "" });
+    setMode(m);
+  };
+
   return (
     <>
-      <Field label="Read field">
-        <select
-          aria-label="Field to read"
-          value={config.field}
-          onChange={(e) => onChange({ ...config, field: e.target.value })}
-        >
-          <optgroup label={upstreamLabel ? `From ${upstreamLabel}` : "Input"}>
-            {availableOutputs.map((o) => (
-              <option key={o.key} value={o.key}>{o.label}</option>
-            ))}
-          </optgroup>
-          {variableOptions.length > 0 ? (
-            <optgroup label="Variables">
-              {variableOptions.map((o) => (
+      <ModeTabs
+        value={mode}
+        onChange={switchMode}
+        options={[
+          { value: "builder", label: "Builder" },
+          { value: "expression", label: "Expression" },
+        ]}
+      />
+      {mode === "builder" ? (
+        <>
+          <Field label="Read field">
+            <select
+              aria-label="Field to read"
+              value={config.field}
+              onChange={(e) => onChange({ ...config, field: e.target.value })}
+            >
+              <optgroup label={upstreamLabel ? `From ${upstreamLabel}` : "Input"}>
+                {availableOutputs.map((o) => (
+                  <option key={o.key} value={o.key}>{o.label}</option>
+                ))}
+              </optgroup>
+              {variableOptions.length > 0 ? (
+                <optgroup label="Variables">
+                  {variableOptions.map((o) => (
+                    <option key={o.key} value={o.key}>{o.label}</option>
+                  ))}
+                </optgroup>
+              ) : null}
+              {extraOption.map((o) => (
                 <option key={o.key} value={o.key}>{o.label}</option>
               ))}
-            </optgroup>
+            </select>
+          </Field>
+          <Field label="Compare">
+            <select
+              aria-label="Comparison"
+              value={config.op}
+              onChange={(e) => onChange({ ...config, op: e.target.value as IfOp })}
+            >
+              <option value="is_true">is true</option>
+              <option value="equals">equals</option>
+              <option value="contains">contains</option>
+              <option value="gt">&gt; greater than</option>
+              <option value="gte">≥ greater or equal</option>
+              <option value="lt">&lt; less than</option>
+              <option value="lte">≤ less or equal</option>
+              <option value="in_range">in range</option>
+            </select>
+          </Field>
+          {showValue ? (
+            <Field label={valueLabel}>
+              <input
+                type="text"
+                aria-label={valueLabel}
+                value={config.value}
+                onChange={(e) => onChange({ ...config, value: e.target.value })}
+                placeholder={placeholder}
+                spellCheck={false}
+              />
+            </Field>
           ) : null}
-          {extraOption.map((o) => (
-            <option key={o.key} value={o.key}>{o.label}</option>
-          ))}
-        </select>
-      </Field>
-      <Field label="Compare">
-        <select
-          aria-label="Comparison"
-          value={config.op}
-          onChange={(e) => onChange({ ...config, op: e.target.value as IfOp })}
-        >
-          <option value="is_true">is true</option>
-          <option value="equals">equals</option>
-          <option value="contains">contains</option>
-          <option value="gt">&gt; greater than</option>
-          <option value="gte">≥ greater or equal</option>
-          <option value="lt">&lt; less than</option>
-          <option value="lte">≤ less or equal</option>
-          <option value="in_range">in range</option>
-        </select>
-      </Field>
-      {showValue ? (
-        <Field label={valueLabel}>
-          <input
-            type="text"
-            aria-label={valueLabel}
-            value={config.value}
-            onChange={(e) => onChange({ ...config, value: e.target.value })}
-            placeholder={placeholder}
-            spellCheck={false}
-          />
-        </Field>
-      ) : null}
-      <p className="fb-node-hint">
-        {config.field.startsWith("$")
-          ? `Reading variable ${config.field}. YES fires on match, NO otherwise.`
-          : upstreamLabel
-            ? `Reading "${config.field}" from ${upstreamLabel}. YES fires on match, NO otherwise.`
-            : "Connect a block to IN (for input fields) or pick a variable. YES fires on match."}
-      </p>
+          <p className="fb-node-hint">
+            Reads one field ($variable or input field) and compares it. Switch
+            to Expression to combine variables and inputs in one condition.
+          </p>
+        </>
+      ) : (
+        <>
+          <Field label="Condition (true → YES)">
+            <ExpressionInput
+              ariaLabel="Condition expression"
+              value={config.expression}
+              onChange={(expression) => onChange({ ...config, expression })}
+              inputFields={inputFields}
+              variableNames={variableNames}
+            />
+          </Field>
+          <p className="fb-node-hint">
+            A boolean expression over <code>$variables</code> and{" "}
+            <code>input.fields</code>, e.g.{" "}
+            <code>$level &gt; 15 &amp;&amp; input.value == "true"</code>. YES when truthy.
+          </p>
+        </>
+      )}
     </>
   );
 }
