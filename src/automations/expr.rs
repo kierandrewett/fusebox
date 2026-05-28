@@ -26,6 +26,10 @@ use serde_json::Value;
 pub(crate) struct EvalContext<'a> {
     pub(crate) variables: &'a BTreeMap<String, Value>,
     pub(crate) input: Value,
+    /// Current device power state, keyed by both device name and nickname.
+    /// Present only for devices with a known snapshot; powers deviceOn/
+    /// deviceOff/deviceState.
+    pub(crate) devices: &'a BTreeMap<String, bool>,
 }
 
 pub(crate) fn evaluate(src: &str, ctx: &EvalContext) -> Result<Value, String> {
@@ -581,9 +585,42 @@ fn eval(expr: &Expr, ctx: &EvalContext) -> Result<Value, String> {
             for a in args {
                 values.push(eval(a, ctx)?);
             }
-            call_function(name, &values)
+            match name.as_str() {
+                "deviceOn" | "deviceOff" | "deviceState" => {
+                    eval_device_fn(name, &values, ctx.devices)
+                }
+                _ => call_function(name, &values),
+            }
         }
     }
+}
+
+/// deviceOn(name)/deviceOff(name) return a bool; deviceState(name) returns
+/// "on" / "off" / "unknown". `name` matches either the device name or its
+/// nickname. Unknown devices are treated as off / "unknown".
+fn eval_device_fn(
+    name: &str,
+    args: &[Value],
+    devices: &BTreeMap<String, bool>,
+) -> Result<Value, String> {
+    let key = match args.first() {
+        Some(v) => to_text(v),
+        None => return Err(format!("{name}: expected a device name")),
+    };
+    let on = devices.get(key.trim()).copied();
+    Ok(match name {
+        "deviceOn" => Value::Bool(on == Some(true)),
+        "deviceOff" => Value::Bool(on == Some(false)),
+        "deviceState" => Value::String(
+            match on {
+                Some(true) => "on",
+                Some(false) => "off",
+                None => "unknown",
+            }
+            .to_string(),
+        ),
+        _ => unreachable!(),
+    })
 }
 
 fn eval_binary(op: BinaryOp, l: &Expr, r: &Expr, ctx: &EvalContext) -> Result<Value, String> {
@@ -980,11 +1017,33 @@ mod tests {
     }
 
     fn eval_str(src: &str, vars: &BTreeMap<String, Value>, input: Value) -> Value {
+        let devices = BTreeMap::new();
         let ctx = EvalContext {
             variables: vars,
             input,
+            devices: &devices,
         };
         evaluate(src, &ctx).expect("eval ok")
+    }
+
+    #[test]
+    fn device_state_functions() {
+        let vars = BTreeMap::new();
+        let devices: BTreeMap<String, bool> =
+            [("lamp".to_string(), true), ("fan".to_string(), false)].into_iter().collect();
+        let run = |src: &str| {
+            let ctx = EvalContext {
+                variables: &vars,
+                input: Value::Null,
+                devices: &devices,
+            };
+            evaluate(src, &ctx).expect("eval ok")
+        };
+        assert_eq!(run("deviceOn(\"lamp\")"), Value::Bool(true));
+        assert_eq!(run("deviceOff(\"lamp\")"), Value::Bool(false));
+        assert_eq!(run("deviceOn(\"fan\")"), Value::Bool(false));
+        assert_eq!(run("deviceState(\"fan\")"), Value::String("off".to_string()));
+        assert_eq!(run("deviceState(\"missing\")"), Value::String("unknown".to_string()));
     }
 
     #[test]
@@ -1096,9 +1155,11 @@ mod tests {
     #[test]
     fn unknown_function_errors() {
         let vars = BTreeMap::new();
+        let devices = BTreeMap::new();
         let ctx = EvalContext {
             variables: &vars,
             input: Value::Null,
+            devices: &devices,
         };
         assert!(evaluate("bogus(1)", &ctx).is_err());
     }

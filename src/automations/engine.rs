@@ -98,6 +98,10 @@ pub(crate) async fn evaluate_one_automation(
     // persisted at the end if anything changed.
     let mut variables = automation.variables.clone();
 
+    // Snapshot of device power state for deviceOn/deviceOff/deviceState in
+    // expressions. Built once per tick; keyed by name and nickname.
+    let device_states = collect_device_states(state).await;
+
     let devices_to_reconcile = std::collections::BTreeSet::<String>::new();
     let mut devices_to_reconcile = devices_to_reconcile;
 
@@ -151,6 +155,7 @@ pub(crate) async fn evaluate_one_automation(
             &input_values,
             &prev_state,
             &mut variables,
+            &device_states,
             previous_tick_ms,
             tick_ms,
         )
@@ -456,6 +461,7 @@ pub(crate) async fn evaluate_node(
     inputs: &[IncomingInput],
     prev: &NodeRuntimeState,
     variables: &mut BTreeMap<String, Value>,
+    device_states: &BTreeMap<String, bool>,
     previous_tick_ms: u128,
     tick_ms: u128,
 ) -> (Option<bool>, NodeRuntimeState) {
@@ -627,6 +633,7 @@ pub(crate) async fn evaluate_node(
                     let ctx = EvalContext {
                         variables,
                         input,
+                        devices: device_states,
                     };
                     match expr::evaluate(&if_condition.expression, &ctx) {
                         Ok(value) => expr::truthy(&value),
@@ -734,6 +741,7 @@ pub(crate) async fn evaluate_node(
                 let ctx = EvalContext {
                     variables,
                     input,
+                    devices: device_states,
                 };
                 expr::evaluate(&expression.expression, &ctx)
             };
@@ -765,6 +773,7 @@ pub(crate) async fn evaluate_node(
                 let ctx = EvalContext {
                     variables,
                     input,
+                    devices: device_states,
                 };
                 expr::evaluate(&set_variable.expression, &ctx)
             };
@@ -801,6 +810,23 @@ pub(crate) async fn evaluate_node(
             (Some(active), next)
         }
     }
+}
+
+/// Snapshot of device power state for the deviceOn/deviceOff/deviceState
+/// expression functions. Keyed by both the device name and its nickname (so
+/// either works in an expression), for devices with a known snapshot.
+pub(crate) async fn collect_device_states(state: &AppState) -> BTreeMap<String, bool> {
+    let devices = state.devices.read().await;
+    let mut map = BTreeMap::new();
+    for (name, device) in devices.iter() {
+        if let Some(snap) = device.snapshot.as_ref() {
+            map.insert(name.clone(), snap.device_on);
+            if !snap.nickname.is_empty() {
+                map.insert(snap.nickname.clone(), snap.device_on);
+            }
+        }
+    }
+    map
 }
 
 /// Build the `input` dictionary an expression sees: the named outputs of

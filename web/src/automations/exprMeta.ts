@@ -40,6 +40,9 @@ export const EXPR_FUNCTIONS: ExprFunction[] = [
   { name: "type", signature: "type(value)", doc: "Type name: null/boolean/number/text/array/dictionary." },
   { name: "coalesce", signature: "coalesce(a, b, …)", doc: "First non-null argument." },
   { name: "now", signature: "now()", doc: "Current time in epoch milliseconds." },
+  { name: "deviceOn", signature: "deviceOn(name)", doc: "True if the named device is currently on." },
+  { name: "deviceOff", signature: "deviceOff(name)", doc: "True if the named device is currently off." },
+  { name: "deviceState", signature: "deviceState(name)", doc: "Device state: \"on\" / \"off\" / \"unknown\"." },
   { name: "keys", signature: "keys(object)", doc: "Array of an object's keys." },
   { name: "values", signature: "values(object)", doc: "Array of an object's values." },
 ];

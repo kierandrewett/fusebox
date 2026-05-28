@@ -254,9 +254,11 @@ pub(crate) async fn preview_expression(
         (variables, serde_json::Value::Object(map), fields)
     };
 
+    let device_states = crate::automations::engine::collect_device_states(&state).await;
     let ctx = EvalContext {
         variables: &variables,
         input,
+        devices: &device_states,
     };
     let response = match expr::evaluate(&req.expression, &ctx) {
         Ok(value) => {
