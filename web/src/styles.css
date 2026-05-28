@@ -1988,6 +1988,15 @@
     radial-gradient(circle at 20% 20%, rgba(229, 183, 91, 0.08), transparent 60%),
     linear-gradient(180deg, rgba(0, 0, 0, 0.35), rgba(0, 0, 0, 0.55));
 }
+/* Rubber-band selection box (left-drag on the background) */
+.fb-rubberband {
+  position: absolute;
+  z-index: 30;
+  pointer-events: none;
+  border: 1px solid rgba(229, 183, 91, 0.9);
+  background: rgba(229, 183, 91, 0.16);
+  border-radius: 2px;
+}
 
 .fb-loading {
   position: absolute;

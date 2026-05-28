@@ -5,10 +5,10 @@ import { createEditor, type CreateEditorResult } from "./createEditor";
 import { AutomationsSidebar } from "./AutomationsSidebar";
 import { AutomationToolbar } from "./AutomationToolbar";
 import { NodeInspector } from "./NodeInspector";
-import type { EditorCtx } from "./NodeView";
 import { useAutomationFiles } from "./useAutomationFiles";
 import { useAutomationCrud } from "./useAutomationCrud";
 import { useNodeOps } from "./useNodeOps";
+import { useInspectorCtx } from "./useInspectorCtx";
 
 interface Status {
   loading: boolean;
@@ -27,7 +27,8 @@ export function AutomationsTab() {
   const [automations, setAutomations] = useState<Automation[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   // Rete id of the block whose settings are open in the inspector.
-  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
+  // Selected canvas blocks (Rete ids). One → inspector opens; many → bulk ops.
+  const [selectedNodeIds, setSelectedNodeIds] = useState<string[]>([]);
   const [status, patchStatus] = useReducer(statusReducer, INITIAL_STATUS);
   const { loading, saving, dirty, error } = status;
   const setError = useCallback((error: string | null) => patchStatus({ error }), []);
@@ -41,12 +42,15 @@ export function AutomationsTab() {
   const hooksRef = useRef<HookSummary[]>([]);
   const variableNamesRef = useRef<string[]>([]);
   const selectedIdRef = useRef<string | null>(null);
-  const selectedNodeIdRef = useRef<string | null>(null);
-  selectedNodeIdRef.current = selectedNodeId;
+  const selectedNodeIdsRef = useRef<string[]>([]);
+  selectedNodeIdsRef.current = selectedNodeIds;
   const editorContainerRef = useRef<HTMLDivElement | null>(null);
   const editorApiRef = useRef<CreateEditorResult | null>(null);
   const editorReadyRef = useRef(false);
   const pendingLoadRef = useRef<{ id: string | null } | null>(null);
+
+  // The inspector edits exactly one block; hidden during a multi-selection.
+  const inspectorNodeId = selectedNodeIds.length === 1 ? selectedNodeIds[0] : null;
 
   // NodeViews live in their own React roots (Rete renders each node with a
   // standalone createRoot), so updates here don't automatically re-render the
@@ -57,16 +61,34 @@ export function AutomationsTab() {
     for (const cb of ctxListenersRef.current) cb();
   }, []);
 
-  // Selecting a block opens the inspector and re-highlights the canvas (the
-  // isolated NodeViews re-read selectedNodeId via notifyCtx).
-  const selectNode = useCallback(
-    (reteId: string | null) => {
-      selectedNodeIdRef.current = reteId;
-      setSelectedNodeId(reteId);
+  // Update the selection and re-highlight the canvas (the isolated NodeViews
+  // re-read it via notifyCtx).
+  const selectNodes = useCallback(
+    (ids: string[]) => {
+      selectedNodeIdsRef.current = ids;
+      setSelectedNodeIds(ids);
       notifyCtx();
     },
     [notifyCtx],
   );
+  const selectNode = useCallback(
+    (reteId: string | null) => selectNodes(reteId ? [reteId] : []),
+    [selectNodes],
+  );
+  const deleteSelectedNodes = useCallback(() => {
+    const api = editorApiRef.current;
+    const ids = selectedNodeIdsRef.current;
+    if (!api || ids.length === 0) return;
+    selectNodes([]);
+    // Sequential: connections between two selected nodes mustn't be removed
+    // concurrently by both nodes' teardown.
+    ids
+      .reduce<Promise<unknown>>(
+        (p, id) => p.then(() => api.removeNode(id).catch(() => {})),
+        Promise.resolve(),
+      )
+      .then(() => setDirty(true));
+  }, [selectNodes, setDirty]);
 
   // Initial load
   useEffect(() => {
@@ -154,7 +176,9 @@ export function AutomationsTab() {
       },
       listNodes: () => apiRef.current?.listNodes() ?? [],
       selectNode: (reteId) => selectNode(reteId),
-      selectedNodeId: () => selectedNodeIdRef.current,
+      selectNodes: (ids) => selectNodes(ids),
+      isSelected: (reteId) => selectedNodeIdsRef.current.includes(reteId),
+      deleteSelected: () => deleteSelectedNodes(),
       subscribeContext: (cb) => {
         listenersRef.current.add(cb);
         return () => listenersRef.current.delete(cb);
@@ -188,7 +212,7 @@ export function AutomationsTab() {
       apiRef.current = null;
       readyRef.current = false;
     };
-  }, [notifyCtx, setError, setDirty, selectNode]);
+  }, [notifyCtx, setError, setDirty, selectNode, selectNodes, deleteSelectedNodes]);
 
   useEffect(() => {
     void loadIntoEditor(selectedId);
@@ -226,23 +250,13 @@ export function AutomationsTab() {
     setError,
   });
 
-  // Context the inspector's NodeBody uses; delegates upstream lookups +
-  // preview to the live editor api and reads device/hook/variable pools.
-  const inspectorCtx: EditorCtx = {
-    devices: () => devicesRef.current,
-    hooks: () => hooksRef.current,
-    variableNames: () => variableNamesRef.current,
-    listNodes: () => editorApiRef.current?.listNodes() ?? [],
-    findUpstreamKind: (rid) => editorApiRef.current?.findUpstreamKind(rid) ?? null,
-    findUpstreamLogicalId: (rid) => editorApiRef.current?.findUpstreamLogicalId(rid) ?? null,
-    previewExpression: (upstreamId, expression) => {
-      const id = selectedIdRef.current;
-      if (!id) {
-        return Promise.resolve({ ok: false, error: "no automation selected", input_fields: [] });
-      }
-      return previewExpression(id, upstreamId, expression);
-    },
-  };
+  const inspectorCtx = useInspectorCtx({
+    devicesRef,
+    hooksRef,
+    variableNamesRef,
+    selectedIdRef,
+    editorApiRef,
+  });
 
   const { handleExport, handleImport } = useAutomationFiles({
     selected,
@@ -254,7 +268,7 @@ export function AutomationsTab() {
   });
 
   return (
-    <div className={`fb-automations ${selectedNodeId ? "with-inspector" : ""}`}>
+    <div className={`fb-automations ${inspectorNodeId ? "with-inspector" : ""}`}>
       {loading ? <div className="fb-loading">Loading automations…</div> : null}
       <AutomationsSidebar
         automations={automations}
@@ -290,10 +304,10 @@ export function AutomationsTab() {
           onDrop={handleCanvasDrop}
         />
       </main>
-      {selectedNodeId && editorApiRef.current ? (
+      {inspectorNodeId && editorApiRef.current ? (
         <NodeInspector
-          key={selectedNodeId}
-          nodeId={selectedNodeId}
+          key={inspectorNodeId}
+          nodeId={inspectorNodeId}
           api={editorApiRef.current}
           ctx={inspectorCtx}
           onDirty={() => setDirty(true)}

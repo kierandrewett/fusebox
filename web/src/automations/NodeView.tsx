@@ -36,8 +36,8 @@ export interface EditorCtx {
   previewExpression?: (upstreamId: string | null, expression: string) => Promise<PreviewResult>;
   /** Open the inspector for this node (by Rete id). */
   selectNode?: (reteId: string) => void;
-  /** Currently-selected node id, for the highlight. */
-  selectedNodeId?: () => string | null;
+  /** Whether this node is currently selected, for the highlight. */
+  isSelected?: (reteId: string) => boolean;
   subscribeContext?: (cb: () => void) => () => void;
 }
 
@@ -90,7 +90,7 @@ export function NodeView({ data, emit }: Props) {
   };
 
   const summary = summarizeNode(data.config, ctx);
-  const selected = ctx.selectedNodeId?.() === data.id;
+  const selected = ctx.isSelected?.(data.id) ?? false;
 
   return (
     <div

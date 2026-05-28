@@ -1,5 +1,5 @@
 import { NodeEditor, ClassicPreset, GetSchemes } from "rete";
-import { AreaPlugin, AreaExtensions } from "rete-area-plugin";
+import { AreaPlugin, AreaExtensions, Drag } from "rete-area-plugin";
 import { ConnectionPlugin, Presets as ConnectionPresets } from "rete-connection-plugin";
 import { ReactPlugin, Presets as ReactPresets, ReactArea2D } from "rete-react-plugin";
 import { getDOMSocketPosition } from "rete-render-utils";
@@ -89,10 +89,14 @@ export interface EditorContext {
     upstreamId: string | null,
     expression: string,
   ) => Promise<{ ok: boolean; result_text?: string; error?: string; input_fields: string[] }>;
-  /** Open the inspector for a node (by Rete id). */
+  /** Select a single node (click) — opens the inspector. */
   selectNode?: (reteId: string) => void;
-  /** Currently-selected node id, for the canvas highlight. */
-  selectedNodeId?: () => string | null;
+  /** Replace the selection with a set of nodes (rubber-band). */
+  selectNodes?: (reteIds: string[]) => void;
+  /** Whether a node is currently selected, for the canvas highlight. */
+  isSelected?: (reteId: string) => boolean;
+  /** Delete all currently-selected nodes (Delete key). */
+  deleteSelected?: () => void;
   /** Subscribe to changes in devices/hooks. Returns an unsubscribe. */
   subscribeContext: (cb: () => void) => () => void;
 }
@@ -150,6 +154,91 @@ export async function createEditor(
   area.use(react);
 
   AreaExtensions.simpleNodesOrder(area);
+
+  // Pan with the middle mouse button (touch still pans), freeing left-drag on
+  // the background for rubber-band selection below.
+  area.area.setDragHandler(
+    new Drag({
+      down: (e) => !(e.pointerType === "mouse" && e.button !== 1),
+      move: () => true,
+    }),
+  );
+  // Suppress the browser's middle-click autoscroll.
+  const preventAutoscroll = (e: PointerEvent) => {
+    if (e.button === 1) e.preventDefault();
+  };
+  container.addEventListener("pointerdown", preventAutoscroll);
+
+  // Rubber-band selection: left-drag on the empty background draws a box and
+  // selects the nodes it touches.
+  let band: { x0: number; y0: number; el: HTMLDivElement } | null = null;
+  const bandRect = () => {
+    if (!band) return null;
+    const r = container.getBoundingClientRect();
+    return { x0: band.x0 - r.left, y0: band.y0 - r.top, rect: r };
+  };
+  const drawBand = (cx: number, cy: number) => {
+    const info = bandRect();
+    if (!band || !info) return;
+    const x1 = cx - info.rect.left;
+    const y1 = cy - info.rect.top;
+    const left = Math.min(info.x0, x1);
+    const top = Math.min(info.y0, y1);
+    band.el.style.left = `${left}px`;
+    band.el.style.top = `${top}px`;
+    band.el.style.width = `${Math.abs(x1 - info.x0)}px`;
+    band.el.style.height = `${Math.abs(y1 - info.y0)}px`;
+  };
+  const onBandMove = (e: PointerEvent) => drawBand(e.clientX, e.clientY);
+  const onBandUp = (e: PointerEvent) => {
+    window.removeEventListener("pointermove", onBandMove);
+    if (!band) return;
+    const sel = new DOMRect(
+      Math.min(band.x0, e.clientX),
+      Math.min(band.y0, e.clientY),
+      Math.abs(e.clientX - band.x0),
+      Math.abs(e.clientY - band.y0),
+    );
+    band.el.remove();
+    band = null;
+    // Which nodes intersect the box (client coords)?
+    const hit: string[] = [];
+    for (const n of editor.getNodes()) {
+      const view = area.nodeViews.get(n.id);
+      const el = view?.element;
+      if (!el) continue;
+      const b = el.getBoundingClientRect();
+      const overlaps =
+        b.left < sel.right && b.right > sel.left && b.top < sel.bottom && b.bottom > sel.top;
+      if (overlaps) hit.push(n.id);
+    }
+    ctx.selectNodes?.(hit);
+  };
+  const onBandDown = (e: PointerEvent) => {
+    if (e.button !== 0) return;
+    const target = e.target as HTMLElement;
+    // Ignore drags that start on a node, a pin, or any control.
+    if (target.closest(".fb-node, .fb-pin")) return;
+    const el = document.createElement("div");
+    el.className = "fb-rubberband";
+    container.appendChild(el);
+    band = { x0: e.clientX, y0: e.clientY, el };
+    drawBand(e.clientX, e.clientY);
+    window.addEventListener("pointermove", onBandMove);
+    window.addEventListener("pointerup", onBandUp, { once: true });
+  };
+  container.addEventListener("pointerdown", onBandDown);
+
+  // Delete / Backspace removes the selected node(s). Scoped to this editor's
+  // lifetime (the listener is torn down with the automation tab) and ignores
+  // keystrokes while typing in a field.
+  const onKeyDown = (e: KeyboardEvent) => {
+    if (e.key !== "Delete" && e.key !== "Backspace") return;
+    const t = e.target as HTMLElement | null;
+    if (t && t.closest("input, textarea, select, [contenteditable='true']")) return;
+    ctx.deleteSelected?.();
+  };
+  window.addEventListener("keydown", onKeyDown);
 
   const listeners = new Set<() => void>();
   const notify = () => listeners.forEach((l) => l());
@@ -212,7 +301,14 @@ export async function createEditor(
     area,
     findUpstreamKind,
     findUpstreamLogicalId,
-    destroy: () => area.destroy(),
+    destroy: () => {
+      window.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("pointermove", onBandMove);
+      container.removeEventListener("pointerdown", preventAutoscroll);
+      container.removeEventListener("pointerdown", onBandDown);
+      band?.el.remove();
+      area.destroy();
+    },
     serialize() {
       const nodes: AutomationNode[] = [];
       for (const n of editor.getNodes()) {
