@@ -2206,6 +2206,10 @@
   gap: 4px;
   margin-top: 2px;
 }
+.fb-cron-desc {
+  font-weight: 600;
+  color: var(--brass, #c19b55);
+}
 .fb-preset-chip {
   background: rgba(0, 0, 0, 0.22);
   color: var(--muted);

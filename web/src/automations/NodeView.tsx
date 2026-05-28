@@ -212,10 +212,8 @@ export function NodeView({ data, emit }: Props) {
 
 function summarizeNode(config: NodeConfig, ctx: EditorCtx): string {
   switch (config.kind) {
-    case "cron_trigger": {
-      const simple = parseSimpleCronSummary(config.cron_trigger.cron);
-      return simple ?? config.cron_trigger.cron;
-    }
+    case "cron_trigger":
+      return describeCron(config.cron_trigger.cron) ?? config.cron_trigger.cron;
     case "interval_trigger": {
       const { on_seconds, off_seconds, start_action } = config.interval_trigger;
       const start = start_action === "off" ? "off" : "on";
@@ -294,20 +292,6 @@ function summarizeNode(config: NodeConfig, ctx: EditorCtx): string {
       return hook ? hook.name : "Unknown hook";
     }
   }
-}
-
-function parseSimpleCronSummary(cron: string): string | null {
-  const fields = cron.trim().split(/\s+/);
-  if (fields.length !== 5) return null;
-  const [min, hour, dom, month, dow] = fields;
-  if (dom !== "*" || month !== "*") return null;
-  const m = Number(min);
-  const h = Number(hour);
-  if (!Number.isInteger(m) || m < 0 || m > 59) return null;
-  if (!Number.isInteger(h) || h < 0 || h > 23) return null;
-  const time = `${h.toString().padStart(2, "0")}:${m.toString().padStart(2, "0")}`;
-  const days = describeDow(dow);
-  return days === "" ? `Daily ${time}` : `${days} ${time}`;
 }
 
 function describeDow(dow: string): string {
@@ -603,19 +587,135 @@ const WEEKDAY_LABELS = [
   { day: 0, label: "Sun" },
 ];
 
-const CRON_PRESETS: Array<{ label: string; cron: string }> = [
-  { label: "Weekdays 8am", cron: "0 8 * * 1-5" },
-  { label: "Weekends 9am", cron: "0 9 * * 0,6" },
-  { label: "Daily 7pm", cron: "0 19 * * *" },
-  { label: "Hourly", cron: "0 * * * *" },
+const CRON_EXAMPLES: Array<{ group: string; items: Array<{ label: string; cron: string }> }> = [
+  {
+    group: "Intervals",
+    items: [
+      { label: "Every minute", cron: "* * * * *" },
+      { label: "Every 5 minutes", cron: "*/5 * * * *" },
+      { label: "Every 10 minutes", cron: "*/10 * * * *" },
+      { label: "Every 15 minutes", cron: "*/15 * * * *" },
+      { label: "Every 30 minutes", cron: "*/30 * * * *" },
+      { label: "Every hour", cron: "0 * * * *" },
+      { label: "Every 2 hours", cron: "0 */2 * * *" },
+      { label: "Every 3 hours", cron: "0 */3 * * *" },
+      { label: "Every 6 hours", cron: "0 */6 * * *" },
+      { label: "Every 12 hours", cron: "0 */12 * * *" },
+    ],
+  },
+  {
+    group: "Every day",
+    items: [
+      { label: "Midnight (00:00)", cron: "0 0 * * *" },
+      { label: "6:00 AM", cron: "0 6 * * *" },
+      { label: "8:00 AM", cron: "0 8 * * *" },
+      { label: "Noon (12:00)", cron: "0 12 * * *" },
+      { label: "5:00 PM", cron: "0 17 * * *" },
+      { label: "6:00 PM", cron: "0 18 * * *" },
+      { label: "9:00 PM", cron: "0 21 * * *" },
+      { label: "11:00 PM", cron: "0 23 * * *" },
+    ],
+  },
+  {
+    group: "Weekdays & weekends",
+    items: [
+      { label: "Weekdays 8:00 AM", cron: "0 8 * * 1-5" },
+      { label: "Weekdays 9:00 AM", cron: "0 9 * * 1-5" },
+      { label: "Weekdays 6:00 PM", cron: "0 18 * * 1-5" },
+      { label: "Weekends 9:00 AM", cron: "0 9 * * 0,6" },
+      { label: "Weekends 10:00 AM", cron: "0 10 * * 0,6" },
+    ],
+  },
+  {
+    group: "Weekly",
+    items: [
+      { label: "Mondays 8:00 AM", cron: "0 8 * * 1" },
+      { label: "Wednesdays 9:00 AM", cron: "0 9 * * 3" },
+      { label: "Fridays 5:00 PM", cron: "0 17 * * 5" },
+      { label: "Saturdays 9:00 AM", cron: "0 9 * * 6" },
+      { label: "Sundays midnight", cron: "0 0 * * 0" },
+    ],
+  },
+  {
+    group: "Monthly",
+    items: [
+      { label: "1st at midnight", cron: "0 0 1 * *" },
+      { label: "1st at 9:00 AM", cron: "0 9 1 * *" },
+      { label: "15th at noon", cron: "0 12 15 * *" },
+      { label: "Last-ish (28th) 8 AM", cron: "0 8 28 * *" },
+    ],
+  },
 ];
+
+// Best-effort plain-English description of a 5-field cron, covering the
+// shapes our examples produce (intervals, daily/weekly times, monthly).
+// Returns null for anything it can't confidently describe.
+function describeCron(cron: string): string | null {
+  const fields = cron.trim().split(/\s+/);
+  if (fields.length !== 5) return null;
+  const [min, hour, dom, month, dow] = fields;
+  const allStar = (...xs: string[]) => xs.every((x) => x === "*");
+  let m: RegExpMatchArray | null;
+
+  if (allStar(min, hour, dom, month, dow)) return "Every minute";
+  if ((m = min.match(/^\*\/(\d+)$/)) && allStar(hour, dom, month, dow)) {
+    return `Every ${m[1]} minutes`;
+  }
+  if (/^\d+$/.test(min) && allStar(hour, dom, month, dow)) {
+    return min === "0" ? "Every hour" : `Every hour at :${pad(Number(min))}`;
+  }
+  if (/^\d+$/.test(min) && (m = hour.match(/^\*\/(\d+)$/)) && allStar(dom, month, dow)) {
+    return `Every ${m[1]} hours`;
+  }
+  if (/^\d+$/.test(min) && /^\d+$/.test(hour) && month === "*") {
+    const time = `${pad(Number(hour))}:${pad(Number(min))}`;
+    if (dom === "*") {
+      const days = describeDow(dow);
+      return days === "" ? `Daily at ${time}` : `${days} at ${time}`;
+    }
+    if (dow === "*" && /^\d+$/.test(dom)) {
+      return `Monthly on day ${dom} at ${time}`;
+    }
+  }
+  return null;
+}
 
 function CronBody({ config, onChange }: { config: { cron: string }; onChange: (cfg: { cron: string }) => void }) {
   const parsed = parseSimpleCron(config.cron);
   const [mode, setMode] = useState<"simple" | "advanced">(parsed ? "simple" : "advanced");
+  const description = describeCron(config.cron);
+
+  // Picking an example fills the expression and snaps the editor into the
+  // mode that can represent it (Simple for daily/weekly times, Advanced for
+  // intervals / monthly that the day+time picker can't express).
+  const pickExample = (cron: string) => {
+    onChange({ cron });
+    setMode(parseSimpleCron(cron) ? "simple" : "advanced");
+  };
 
   return (
     <>
+      <Field label="Examples">
+        <select
+          aria-label="Cron examples"
+          value=""
+          onChange={(e) => {
+            if (e.target.value) pickExample(e.target.value);
+          }}
+        >
+          <option value="">Pick a schedule…</option>
+          {CRON_EXAMPLES.map((g) => (
+            <optgroup key={g.group} label={g.group}>
+              {g.items.map((it) => (
+                <option key={it.cron} value={it.cron}>
+                  {it.label}
+                </option>
+              ))}
+            </optgroup>
+          ))}
+        </select>
+      </Field>
+
       <ModeTabs
         value={mode}
         onChange={setMode}
@@ -643,19 +743,10 @@ function CronBody({ config, onChange }: { config: { cron: string }; onChange: (c
           </p>
         </>
       )}
-      <div className="fb-presets">
-        {CRON_PRESETS.map((p) => (
-          <button
-            key={p.cron}
-            type="button"
-            className="fb-preset-chip"
-            onClick={() => onChange({ cron: p.cron })}
-            title={p.cron}
-          >
-            {p.label}
-          </button>
-        ))}
-      </div>
+
+      <p className="fb-node-hint fb-cron-desc">
+        {description ? `▶ ${description}` : "▶ Custom schedule"}
+      </p>
     </>
   );
 }
