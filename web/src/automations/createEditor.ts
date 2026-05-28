@@ -76,6 +76,8 @@ export interface EditorContext {
    *  Returns null when nothing is connected. Used by the IF block to
    *  populate its field dropdown with the upstream's data outputs. */
   findUpstreamKind?: (targetReteId: string) => NodeConfig["kind"] | null;
+  /** Names of the current automation's variables (for $-autocomplete). */
+  variableNames?: () => string[];
   /** Subscribe to changes in devices/hooks. Returns an unsubscribe. */
   subscribeContext: (cb: () => void) => () => void;
 }

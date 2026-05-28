@@ -42,6 +42,7 @@ export function AutomationsTab() {
   // explicitly when they change.
   const devicesRef = useRef<DeviceSummary[]>([]);
   const hooksRef = useRef<HookSummary[]>([]);
+  const variableNamesRef = useRef<string[]>([]);
   const editorContainerRef = useRef<HTMLDivElement | null>(null);
   const editorApiRef = useRef<CreateEditorResult | null>(null);
   const editorReadyRef = useRef(false);
@@ -84,6 +85,13 @@ export function AutomationsTab() {
     [automations, selectedId],
   );
 
+  // Keep the variable-name pool current for $-autocomplete and notify the
+  // isolated NodeViews so their dropdowns refresh.
+  useEffect(() => {
+    variableNamesRef.current = Object.keys(selected?.variables ?? {});
+    notifyCtx();
+  }, [selected, notifyCtx]);
+
   // Imperative load — kept off the render path so we don't need editorReady
   // as a state variable that triggers re-renders. Held in a ref so the mount
   // effect's `.then` callback can always invoke the latest version without
@@ -122,6 +130,7 @@ export function AutomationsTab() {
     createEditor(container, {
       devices: () => devicesRef.current,
       hooks: () => hooksRef.current,
+      variableNames: () => variableNamesRef.current,
       listNodes: () => apiRef.current?.listNodes() ?? [],
       subscribeContext: (cb) => {
         listenersRef.current.add(cb);

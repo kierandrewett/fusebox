@@ -132,6 +132,7 @@ export interface NodeRuntimeState {
   last_value?: boolean | null;
   last_fired_at_ms?: number | null;
   last_error?: string | null;
+  outputs?: Record<string, string>;
 }
 
 export interface Automation {
@@ -142,6 +143,7 @@ export interface Automation {
   edges: AutomationEdge[];
   created_at_ms: number;
   status: AutomationStatus;
+  variables?: Record<string, unknown>;
 }
 
 export interface DeviceSummary {

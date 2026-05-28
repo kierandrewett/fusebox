@@ -10,6 +10,7 @@ import type {
   ScheduleAction,
 } from "../types";
 import { templateFor, type DataOutputSpec } from "./nodes";
+import { ExpressionInput } from "./ExpressionInput";
 
 const { RefSocket } = Presets.classic;
 
@@ -23,6 +24,7 @@ interface EditorCtx {
   hooks: () => { id: string; name: string }[];
   listNodes?: () => { id: string; kind: string; label: string }[];
   findUpstreamKind?: (targetReteId: string) => NodeKind | null;
+  variableNames?: () => string[];
   subscribeContext?: (cb: () => void) => () => void;
 }
 
@@ -465,6 +467,8 @@ function NodeBody({
       return (
         <ExpressionBody
           label="Expression"
+          nodeId={nodeId}
+          ctx={ctx}
           value={config.expression.expression}
           onChange={(expression) => update({ kind: "expression", expression: { expression } })}
         />
@@ -486,6 +490,8 @@ function NodeBody({
           </Field>
           <ExpressionBody
             label="Set to"
+            nodeId={nodeId}
+            ctx={ctx}
             value={config.set_variable.expression}
             onChange={(expression) =>
               update({ ...config, set_variable: { ...config.set_variable, expression } })
@@ -1013,48 +1019,88 @@ function IfConditionBody({
 
 function ExpressionBody({
   label,
+  nodeId,
+  ctx,
   value,
   onChange,
 }: {
   label: string;
+  nodeId: string;
+  ctx: EditorCtx;
   value: string;
   onChange: (expression: string) => void;
 }) {
-  const [helpOpen, setHelpOpen] = useState(false);
+  const upstreamKind = ctx.findUpstreamKind?.(nodeId) ?? null;
+  const upstreamLabel = upstreamKind ? templateFor(upstreamKind).label : null;
+  const inputFields = upstreamKind
+    ? templateFor(upstreamKind).dataOutputs.map((o) => o.key)
+    : [];
+  const variableNames = ctx.variableNames?.() ?? [];
+
+  // Insert a snippet at the end (textarea caret tracking lives in
+  // ExpressionInput; chips just append a starting point to type from).
+  const insert = (snippet: string) => {
+    const sep = value && !value.endsWith(" ") ? " " : "";
+    onChange(value + sep + snippet);
+  };
+
   return (
     <>
       <Field label={label}>
-        <textarea
-          aria-label={label}
-          rows={2}
+        <ExpressionInput
+          ariaLabel={label}
           value={value}
-          onChange={(e) => onChange(e.target.value)}
-          placeholder={'jsonEncode({}) · $count + 1 · input.body'}
-          spellCheck={false}
+          onChange={onChange}
+          inputFields={inputFields}
+          variableNames={variableNames}
         />
       </Field>
-      <details
-        className="fb-collapse"
-        open={helpOpen}
-        onToggle={(e) => setHelpOpen((e.target as HTMLDetailsElement).open)}
-      >
-        <summary>Expression help</summary>
-        <p className="fb-node-hint">
-          <code>$name</code> reads a variable, <code>input.field</code> reads the
-          upstream block's output (e.g. <code>input.body</code>). Operators:
-          {" "}<code>+ - * / % == != &lt; &gt; &amp;&amp; || !</code> and
-          {" "}<code>cond ? a : b</code>.
-        </p>
-        <p className="fb-node-hint">
-          Functions: <code>jsonEncode</code>, <code>jsonDecode</code>,{" "}
-          <code>upper</code>, <code>lower</code>, <code>trim</code>,{" "}
-          <code>len</code>, <code>replace</code>, <code>split</code>,{" "}
-          <code>substr</code>, <code>contains</code>, <code>indexOf</code>,{" "}
-          <code>round</code>, <code>floor</code>, <code>ceil</code>,{" "}
-          <code>abs</code>, <code>min</code>, <code>max</code>,{" "}
-          <code>coalesce</code>, <code>now</code>.
-        </p>
-      </details>
+
+      {(inputFields.length > 0 || variableNames.length > 0) && (
+        <div className="fb-expr-refs">
+          {upstreamLabel && inputFields.length > 0 ? (
+            <div className="fb-expr-ref-group">
+              <span className="fb-expr-ref-title">From {upstreamLabel}</span>
+              <div className="fb-chip-row">
+                {inputFields.map((f) => (
+                  <button
+                    key={f}
+                    type="button"
+                    className="fb-chip"
+                    title={`Insert input.${f}`}
+                    onClick={() => insert(`input.${f}`)}
+                  >
+                    input.{f}
+                  </button>
+                ))}
+              </div>
+            </div>
+          ) : null}
+          {variableNames.length > 0 ? (
+            <div className="fb-expr-ref-group">
+              <span className="fb-expr-ref-title">Variables</span>
+              <div className="fb-chip-row">
+                {variableNames.map((v) => (
+                  <button
+                    key={v}
+                    type="button"
+                    className="fb-chip"
+                    title={`Insert $${v}`}
+                    onClick={() => insert(`$${v}`)}
+                  >
+                    ${v}
+                  </button>
+                ))}
+              </div>
+            </div>
+          ) : null}
+        </div>
+      )}
+
+      <p className="fb-node-hint">
+        Type <code>$</code>, <code>input.</code>, or a function name for
+        suggestions. {upstreamLabel ? `Reading from ${upstreamLabel}.` : "Connect a block to IN to read its outputs."}
+      </p>
     </>
   );
 }
