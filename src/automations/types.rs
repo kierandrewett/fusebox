@@ -137,6 +137,14 @@ pub(crate) enum IfOp {
     /// Field's value (parsed as integer) is in the range expression `value`
     /// (e.g. "200-299" or "200,404").
     InRange,
+    /// Field parsed as a number is greater than `value`.
+    Gt,
+    /// Field parsed as a number is greater than or equal to `value`.
+    Gte,
+    /// Field parsed as a number is less than `value`.
+    Lt,
+    /// Field parsed as a number is less than or equal to `value`.
+    Lte,
 }
 
 /// IF block routes a pulse based on a named output of its upstream node.

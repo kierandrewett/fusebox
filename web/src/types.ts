@@ -50,7 +50,15 @@ export interface HttpRequestConfig {
   status_match: string;
 }
 
-export type IfOp = "is_true" | "equals" | "contains" | "in_range";
+export type IfOp =
+  | "is_true"
+  | "equals"
+  | "contains"
+  | "in_range"
+  | "gt"
+  | "gte"
+  | "lt"
+  | "lte";
 
 export interface IfConditionConfig {
   /** Name of the upstream node's output to inspect (e.g. "value", "body"). */

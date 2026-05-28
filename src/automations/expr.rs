@@ -1044,6 +1044,33 @@ mod tests {
     }
 
     #[test]
+    fn decodes_and_navigates_nested_json() {
+        // Mirrors the open-meteo "cache today's temperature" flow: the HTTP
+        // body arrives as a string under input.body; jsonDecode + nested
+        // member/index access pulls out the number.
+        let vars = BTreeMap::new();
+        let body = r#"{"daily":{"time":["2026-05-28"],"temperature_2m_max":[29.7]}}"#;
+        let input = serde_json::json!({ "body": body });
+        assert_eq!(
+            eval_str(
+                "jsonDecode(input.body).daily.temperature_2m_max[0]",
+                &vars,
+                input.clone(),
+            ),
+            serde_json::json!(29.7)
+        );
+        // …and the > comparison the IF block performs on it.
+        assert_eq!(
+            eval_str(
+                "jsonDecode(input.body).daily.temperature_2m_max[0] > 15",
+                &vars,
+                input,
+            ),
+            Value::Bool(true)
+        );
+    }
+
+    #[test]
     fn unknown_function_errors() {
         let vars = BTreeMap::new();
         let ctx = EvalContext {

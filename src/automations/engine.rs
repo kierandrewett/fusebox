@@ -715,6 +715,23 @@ pub(crate) fn evaluate_if_check(
             };
             status_matches_range(&cfg.value, code).unwrap_or(false)
         }
+        IfOp::Gt | IfOp::Gte | IfOp::Lt | IfOp::Lte => {
+            let actual: f64 = match field_value.as_deref().and_then(|s| s.trim().parse().ok()) {
+                Some(n) => n,
+                None => return false,
+            };
+            let threshold: f64 = match cfg.value.trim().parse() {
+                Ok(n) => n,
+                Err(_) => return false,
+            };
+            match cfg.op {
+                IfOp::Gt => actual > threshold,
+                IfOp::Gte => actual >= threshold,
+                IfOp::Lt => actual < threshold,
+                IfOp::Lte => actual <= threshold,
+                _ => unreachable!(),
+            }
+        }
     }
 }
 

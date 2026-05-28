@@ -233,6 +233,14 @@ function summarizeNode(config: NodeConfig, ctx: EditorCtx): string {
           return value ? `${fieldLabel} contains "${truncate(value, 18)}"` : `${fieldLabel} contains…`;
         case "in_range":
           return value ? `${fieldLabel} in ${value}` : `${fieldLabel} in range…`;
+        case "gt":
+          return value ? `${fieldLabel} > ${value}` : `${fieldLabel} > …`;
+        case "gte":
+          return value ? `${fieldLabel} ≥ ${value}` : `${fieldLabel} ≥ …`;
+        case "lt":
+          return value ? `${fieldLabel} < ${value}` : `${fieldLabel} < …`;
+        case "lte":
+          return value ? `${fieldLabel} ≤ ${value}` : `${fieldLabel} ≤ …`;
       }
     }
     case "logic_and":
@@ -939,11 +947,17 @@ function IfConditionBody({
     : [...availableOutputs, { key: config.field, label: `${config.field} (missing)` }];
 
   const showValue = config.op !== "is_true";
+  const isNumeric = config.op === "gt" || config.op === "gte" || config.op === "lt" || config.op === "lte";
   const placeholder =
     config.op === "equals" ? "yes"
     : config.op === "contains" ? "ok"
     : config.op === "in_range" ? "200-299"
+    : isNumeric ? "15"
     : "";
+  const valueLabel =
+    config.op === "in_range" ? "Range (e.g. 200-299, 404)"
+    : isNumeric ? "Number"
+    : "Value";
 
   return (
     <>
@@ -967,14 +981,18 @@ function IfConditionBody({
           <option value="is_true">is true</option>
           <option value="equals">equals</option>
           <option value="contains">contains</option>
+          <option value="gt">&gt; greater than</option>
+          <option value="gte">≥ greater or equal</option>
+          <option value="lt">&lt; less than</option>
+          <option value="lte">≤ less or equal</option>
           <option value="in_range">in range</option>
         </select>
       </Field>
       {showValue ? (
-        <Field label={config.op === "in_range" ? "Range (e.g. 200-299, 404)" : "Value"}>
+        <Field label={valueLabel}>
           <input
             type="text"
-            aria-label={config.op === "in_range" ? "Range" : "Comparison value"}
+            aria-label={valueLabel}
             value={config.value}
             onChange={(e) => onChange({ ...config, value: e.target.value })}
             placeholder={placeholder}
