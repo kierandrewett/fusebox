@@ -173,6 +173,10 @@ function summarizeNode(config: NodeConfig, ctx: EditorCtx): string {
       const start = start_action === "off" ? "off" : "on";
       return `${humanDuration(on_seconds)} ${start} / ${humanDuration(off_seconds)}`;
     }
+    case "between": {
+      const { start, end } = config.between;
+      return start && end ? `${start} – ${end}` : "Set a time window…";
+    }
     case "device_event_trigger": {
       const dev = config.device_event_trigger.device_name;
       const evt = config.device_event_trigger.event;
@@ -359,6 +363,33 @@ export function NodeBody({
               }
             />
           </Field>
+        </>
+      );
+    case "between":
+      return (
+        <>
+          <div className="fb-row">
+            <Field label="From">
+              <input
+                type="time"
+                aria-label="Window start"
+                value={config.between.start}
+                onChange={(e) => update({ ...config, between: { ...config.between, start: e.target.value } })}
+              />
+            </Field>
+            <Field label="To">
+              <input
+                type="time"
+                aria-label="Window end"
+                value={config.between.end}
+                onChange={(e) => update({ ...config, between: { ...config.between, end: e.target.value } })}
+              />
+            </Field>
+          </div>
+          <p className="fb-node-hint">
+            YES while the current time is in the window, NO otherwise. A window
+            like 07:30 → 01:00 wraps past midnight.
+          </p>
         </>
       );
     case "http_request":

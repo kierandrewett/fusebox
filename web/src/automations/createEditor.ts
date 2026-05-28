@@ -15,6 +15,7 @@ const NODE_WIDTHS: Partial<Record<NodeConfig["kind"], number>> = {
   cron_trigger: 280,
   interval_trigger: 280,
   device_event_trigger: 260,
+  between: 260,
   http_request: 300,
   if_condition: 280,
   logic_and: 200,

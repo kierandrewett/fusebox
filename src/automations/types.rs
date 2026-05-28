@@ -23,6 +23,12 @@ pub(crate) enum AutomationNodeConfig {
     DeviceEventTrigger {
         device_event_trigger: DeviceEventTriggerCfg,
     },
+    /// Time-of-day window gate. Every tick it routes YES when the current
+    /// local time is within [start, end] (a window may wrap past midnight,
+    /// e.g. 07:30 → 01:00), otherwise NO.
+    Between {
+        between: BetweenCfg,
+    },
     /// Legacy: kept so old state.json files still deserialise. Auto-
     /// converted to HttpRequest at load time; new graphs never write this.
     HttpProbe {
@@ -182,6 +188,15 @@ fn default_if_field() -> String {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct DebounceCfg {
     pub(crate) hold_seconds: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct BetweenCfg {
+    /// "HH:MM" local time-of-day.
+    #[serde(default)]
+    pub(crate) start: String,
+    #[serde(default)]
+    pub(crate) end: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

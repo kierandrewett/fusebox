@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use anyhow::{Result, anyhow};
-use chrono::{DateTime, Local};
+use chrono::{DateTime, Local, Timelike};
 use tokio::time::sleep;
 use tracing::{info, warn};
 
@@ -519,6 +519,19 @@ pub(crate) async fn evaluate_node(
             };
             (Some(active), next)
         }
+        AutomationNodeConfig::Between { between } => {
+            let now_dt = DateTime::<Local>::from(
+                std::time::UNIX_EPOCH + Duration::from_millis(tick_ms as u64),
+            );
+            let now_min = now_dt.hour() * 60 + now_dt.minute();
+            match (parse_hhmm(&between.start), parse_hhmm(&between.end)) {
+                (Some(start), Some(end)) => (Some(time_in_window(now_min, start, end)), next),
+                _ => {
+                    next.last_error = Some("set start and end times (HH:MM)".to_string());
+                    (Some(false), next)
+                }
+            }
+        }
         AutomationNodeConfig::DeviceEventTrigger {
             device_event_trigger,
         } => {
@@ -921,6 +934,27 @@ fn write_value_outputs(next: &mut NodeRuntimeState, value: &Value) {
     }
 }
 
+/// Parse an "HH:MM" time-of-day into minutes since midnight (0..1439).
+pub(crate) fn parse_hhmm(s: &str) -> Option<u32> {
+    let (h, m) = s.trim().split_once(':')?;
+    let h: u32 = h.trim().parse().ok()?;
+    let m: u32 = m.trim().parse().ok()?;
+    if h > 23 || m > 59 {
+        return None;
+    }
+    Some(h * 60 + m)
+}
+
+/// Whether `now` (minutes since midnight) is within [start, end]. A window
+/// where start > end wraps past midnight (e.g. 07:30 → 01:00).
+pub(crate) fn time_in_window(now: u32, start: u32, end: u32) -> bool {
+    if start <= end {
+        now >= start && now <= end
+    } else {
+        now >= start || now <= end
+    }
+}
+
 /// Evaluate an IF block's predicate. Reads `cfg.field` from the source
 /// node's `outputs` map and applies `cfg.op` against `cfg.value`.
 pub(crate) fn evaluate_if_check(
@@ -1106,5 +1140,42 @@ pub(crate) async fn execute_action(
             Ok(None)
         }
         _ => Ok(None),
+    }
+}
+
+#[cfg(test)]
+mod between_tests {
+    use super::{parse_hhmm, time_in_window};
+
+    #[test]
+    fn parses_hhmm() {
+        assert_eq!(parse_hhmm("07:30"), Some(450));
+        assert_eq!(parse_hhmm("00:00"), Some(0));
+        assert_eq!(parse_hhmm("23:59"), Some(1439));
+        assert_eq!(parse_hhmm("24:00"), None);
+        assert_eq!(parse_hhmm("bad"), None);
+    }
+
+    #[test]
+    fn same_day_window() {
+        // 09:00–17:00
+        let (s, e) = (540, 1020);
+        assert!(time_in_window(600, s, e)); // 10:00 in
+        assert!(!time_in_window(480, s, e)); // 08:00 out
+        assert!(!time_in_window(1080, s, e)); // 18:00 out
+        assert!(time_in_window(540, s, e)); // boundary start
+        assert!(time_in_window(1020, s, e)); // boundary end
+    }
+
+    #[test]
+    fn overnight_window_wraps_midnight() {
+        // 07:30–01:00 (the user's example)
+        let (s, e) = (450, 60);
+        assert!(time_in_window(450, s, e)); // 07:30 in
+        assert!(time_in_window(1439, s, e)); // 23:59 in
+        assert!(time_in_window(0, s, e)); // 00:00 in
+        assert!(time_in_window(60, s, e)); // 01:00 in
+        assert!(!time_in_window(61, s, e)); // 01:01 out
+        assert!(!time_in_window(449, s, e)); // 07:29 out
     }
 }

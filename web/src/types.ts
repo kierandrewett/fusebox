@@ -3,6 +3,7 @@ export type NodeKind =
   | "cron_trigger"
   | "interval_trigger"
   | "device_event_trigger"
+  | "between"
   | "http_request"
   | "if_condition"
   | "logic_and"
@@ -73,6 +74,10 @@ export interface IfConditionConfig {
 export interface DebounceConfig {
   hold_seconds: number;
 }
+export interface BetweenConfig {
+  start: string;
+  end: string;
+}
 export interface SetVariableConfig {
   key: string;
   expression: string;
@@ -99,6 +104,7 @@ export type NodeConfig =
   | { kind: "cron_trigger"; cron_trigger: CronTriggerConfig }
   | { kind: "interval_trigger"; interval_trigger: IntervalTriggerConfig }
   | { kind: "device_event_trigger"; device_event_trigger: DeviceEventTriggerConfig }
+  | { kind: "between"; between: BetweenConfig }
   | { kind: "http_request"; http_request: HttpRequestConfig }
   | { kind: "if_condition"; if_condition: IfConditionConfig }
   | { kind: "logic_and" }

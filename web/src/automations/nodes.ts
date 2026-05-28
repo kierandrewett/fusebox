@@ -87,6 +87,23 @@ export const NODE_TEMPLATES: NodeTemplate[] = [
     }),
   },
   {
+    kind: "between",
+    label: "Between",
+    category: "trigger",
+    description:
+      "Routes YES while the current time is between two times of day (windows may wrap past midnight), otherwise NO.",
+    hasInput: false,
+    outputs: [
+      { key: "yes", label: "YES", variant: "yes" },
+      { key: "no", label: "NO", variant: "no" },
+    ],
+    dataOutputs: DEFAULT_DATA_OUTPUTS,
+    defaultConfig: () => ({
+      kind: "between",
+      between: { start: "07:30", end: "22:00" },
+    }),
+  },
+  {
     kind: "http_request",
     label: "HTTP request",
     category: "action",
@@ -255,6 +272,7 @@ const NODE_ICONS: Record<NodeKind, string> = {
   cron_trigger: "⏰",
   interval_trigger: "↻",
   device_event_trigger: "⚡",
+  between: "⏲",
   http_request: "🌐",
   if_condition: "?",
   logic_and: "∧",
