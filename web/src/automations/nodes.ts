@@ -100,7 +100,7 @@ export const NODE_TEMPLATES: NodeTemplate[] = [
     dataOutputs: DEFAULT_DATA_OUTPUTS,
     defaultConfig: () => ({
       kind: "between",
-      between: { start: "07:30", end: "22:00" },
+      between: { windows: [{ id: crypto.randomUUID(), days: [], start: "07:30", end: "22:00" }] },
     }),
   },
   {

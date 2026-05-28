@@ -2,6 +2,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Presets } from "rete-react-plugin";
 import type { FlowNode } from "./createEditor";
 import type {
+  BetweenConfig,
+  BetweenWindow,
   DeviceEvent,
   IfOp,
   IntervalTriggerConfig,
@@ -174,8 +176,16 @@ function summarizeNode(config: NodeConfig, ctx: EditorCtx): string {
       return `${humanDuration(on_seconds)} ${start} / ${humanDuration(off_seconds)}`;
     }
     case "between": {
-      const { start, end } = config.between;
-      return start && end ? `${start} – ${end}` : "Set a time window…";
+      const wins =
+        config.between.windows && config.between.windows.length > 0
+          ? config.between.windows
+          : config.between.start
+            ? [{ days: [], start: config.between.start, end: config.between.end ?? "" }]
+            : [];
+      if (wins.length === 0) return "Set a time window…";
+      const first = wins[0];
+      const base = `${first.start} – ${first.end}`;
+      return wins.length > 1 ? `${base} +${wins.length - 1}` : base;
     }
     case "device_event_trigger": {
       const dev = config.device_event_trigger.device_name;
@@ -367,30 +377,10 @@ export function NodeBody({
       );
     case "between":
       return (
-        <>
-          <div className="fb-row">
-            <Field label="From">
-              <input
-                type="time"
-                aria-label="Window start"
-                value={config.between.start}
-                onChange={(e) => update({ ...config, between: { ...config.between, start: e.target.value } })}
-              />
-            </Field>
-            <Field label="To">
-              <input
-                type="time"
-                aria-label="Window end"
-                value={config.between.end}
-                onChange={(e) => update({ ...config, between: { ...config.between, end: e.target.value } })}
-              />
-            </Field>
-          </div>
-          <p className="fb-node-hint">
-            YES while the current time is in the window, NO otherwise. A window
-            like 07:30 → 01:00 wraps past midnight.
-          </p>
-        </>
+        <BetweenBody
+          config={config.between}
+          onChange={(between) => update({ kind: "between", between })}
+        />
       );
     case "http_request":
       return (
@@ -895,6 +885,83 @@ function IntervalBody({
         ))}
       </div>
       <p className="fb-node-hint">Cycle repeats forever. Total on + off must be at least 1 minute.</p>
+    </>
+  );
+}
+
+// ---------- Between: time-of-day windows, optionally per weekday ----------
+
+let betweenWindowSeq = 0;
+const newWindowId = () => `bw${betweenWindowSeq++}`;
+
+function BetweenBody({
+  config,
+  onChange,
+}: {
+  config: BetweenConfig;
+  onChange: (cfg: BetweenConfig) => void;
+}) {
+  // Normalise legacy single-window configs into the windows array, and make
+  // sure every window has a stable id for list rendering.
+  const raw: BetweenWindow[] =
+    config.windows && config.windows.length > 0
+      ? config.windows
+      : [{ days: [], start: config.start ?? "07:30", end: config.end ?? "22:00" }];
+  const windows = raw.map((w, i) => (w.id ? w : { ...w, id: `w${i}` }));
+
+  const commit = (next: BetweenWindow[]) => onChange({ windows: next });
+  const patch = (i: number, w: Partial<BetweenWindow>) =>
+    commit(windows.map((win, idx) => (idx === i ? { ...win, ...w } : win)));
+  const addWindow = () =>
+    commit([...windows, { id: newWindowId(), days: [], start: "10:00", end: "02:00" }]);
+
+  return (
+    <>
+      {windows.map((w, i) => (
+        <div key={w.id} className="fb-between-window">
+          <div className="fb-row">
+            <Field label="From">
+              <input
+                type="time"
+                aria-label="Window start"
+                value={w.start}
+                onChange={(e) => patch(i, { start: e.target.value })}
+              />
+            </Field>
+            <Field label="To">
+              <input
+                type="time"
+                aria-label="Window end"
+                value={w.end}
+                onChange={(e) => patch(i, { end: e.target.value })}
+              />
+            </Field>
+          </div>
+          <Field label="Days (none = every day)">
+            <DayPicker value={w.days} onChange={(days) => patch(i, { days })} />
+          </Field>
+          {windows.length > 1 ? (
+            <button
+              type="button"
+              className="fb-preset-chip"
+              onClick={() => commit(windows.filter((_, idx) => idx !== i))}
+            >
+              Remove window
+            </button>
+          ) : null}
+        </div>
+      ))}
+      <button
+        type="button"
+        className="fb-preset-chip"
+        onClick={addWindow}
+      >
+        + Add window
+      </button>
+      <p className="fb-node-hint">
+        YES when the current time matches any window (and that day, if set);
+        NO otherwise. A window like 07:30 → 01:00 wraps past midnight.
+      </p>
     </>
   );
 }

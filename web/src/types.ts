@@ -74,9 +74,18 @@ export interface IfConditionConfig {
 export interface DebounceConfig {
   hold_seconds: number;
 }
-export interface BetweenConfig {
+export interface BetweenWindow {
+  /** Client-side stable id for list rendering (ignored by the backend). */
+  id?: string;
+  days: number[];
   start: string;
   end: string;
+}
+export interface BetweenConfig {
+  windows: BetweenWindow[];
+  /** Legacy single-window fields, kept for back-compat. */
+  start?: string;
+  end?: string;
 }
 export interface SetVariableConfig {
   key: string;

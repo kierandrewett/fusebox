@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use anyhow::{Result, anyhow};
-use chrono::{DateTime, Local, Timelike};
+use chrono::{DateTime, Datelike, Local, Timelike};
 use tokio::time::sleep;
 use tracing::{info, warn};
 
@@ -524,13 +524,24 @@ pub(crate) async fn evaluate_node(
                 std::time::UNIX_EPOCH + Duration::from_millis(tick_ms as u64),
             );
             let now_min = now_dt.hour() * 60 + now_dt.minute();
-            match (parse_hhmm(&between.start), parse_hhmm(&between.end)) {
-                (Some(start), Some(end)) => (Some(time_in_window(now_min, start, end)), next),
-                _ => {
-                    next.last_error = Some("set start and end times (HH:MM)".to_string());
-                    (Some(false), next)
+            let now_dow = now_dt.weekday().num_days_from_sunday() as u8; // 0=Sun..6=Sat
+            let in_any = if !between.windows.is_empty() {
+                between.windows.iter().any(|w| {
+                    let day_ok = w.days.is_empty() || w.days.contains(&now_dow);
+                    let time_ok = match (parse_hhmm(&w.start), parse_hhmm(&w.end)) {
+                        (Some(s), Some(e)) => time_in_window(now_min, s, e),
+                        _ => false,
+                    };
+                    day_ok && time_ok
+                })
+            } else {
+                // Legacy single window (all days).
+                match (parse_hhmm(&between.start), parse_hhmm(&between.end)) {
+                    (Some(s), Some(e)) => time_in_window(now_min, s, e),
+                    _ => false,
                 }
-            }
+            };
+            (Some(in_any), next)
         }
         AutomationNodeConfig::DeviceEventTrigger {
             device_event_trigger,

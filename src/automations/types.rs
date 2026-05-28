@@ -191,8 +191,25 @@ pub(crate) struct DebounceCfg {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub(crate) struct BetweenCfg {
+pub(crate) struct BetweenWindow {
+    /// Days of week this window applies to (0 = Sunday … 6 = Saturday).
+    /// Empty means every day.
+    #[serde(default)]
+    pub(crate) days: Vec<u8>,
     /// "HH:MM" local time-of-day.
+    #[serde(default)]
+    pub(crate) start: String,
+    #[serde(default)]
+    pub(crate) end: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct BetweenCfg {
+    /// One or more day+time windows; YES if today/now matches any of them.
+    #[serde(default)]
+    pub(crate) windows: Vec<BetweenWindow>,
+    /// Legacy single-window fields (all days). Migrated into `windows` on
+    /// edit; still honoured at runtime when `windows` is empty.
     #[serde(default)]
     pub(crate) start: String,
     #[serde(default)]

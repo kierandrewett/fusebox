@@ -2388,6 +2388,16 @@
   font-weight: 600;
   color: var(--brass, #c19b55);
 }
+.fb-between-window {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+  margin-bottom: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.18);
+}
 .fb-preset-chip {
   background: rgba(0, 0, 0, 0.22);
   color: var(--muted);
