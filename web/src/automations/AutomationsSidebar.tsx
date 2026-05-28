@@ -133,8 +133,13 @@ function Palette({
                     key={t.kind}
                     type="button"
                     disabled={disabled}
+                    draggable={!disabled}
+                    onDragStart={(e) => {
+                      e.dataTransfer.setData("application/fusebox-node", t.kind);
+                      e.dataTransfer.effectAllowed = "copy";
+                    }}
                     onClick={() => onAdd(t.defaultConfig())}
-                    title={t.description}
+                    title={`${t.description} — click or drag onto the canvas`}
                   >
                     {t.label}
                   </button>,

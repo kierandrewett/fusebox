@@ -970,14 +970,18 @@ function IfConditionBody({
   const availableOutputs: DataOutputSpec[] = upstreamKind
     ? templateFor(upstreamKind).dataOutputs
     : [DEFAULT_OUTPUT];
+  // Variables are addressable too: a "$name" field reads the variable.
+  const variableOptions: DataOutputSpec[] = (ctx.variableNames?.() ?? []).map((v) => ({
+    key: `$${v}`,
+    label: `$${v}`,
+  }));
 
-  // If the wired block doesn't expose the currently-selected field anymore
-  // (e.g. user rewired to a different kind), surface it in the dropdown so
-  // the user can see what's saved without silently losing it.
-  const hasField = availableOutputs.some((o) => o.key === config.field);
-  const fieldOptions: DataOutputSpec[] = hasField
-    ? availableOutputs
-    : [...availableOutputs, { key: config.field, label: `${config.field} (missing)` }];
+  // If the saved field isn't in either list anymore (e.g. rewired, or a
+  // variable that no longer exists), surface it so it isn't silently lost.
+  const known = [...availableOutputs, ...variableOptions].some((o) => o.key === config.field);
+  const extraOption: DataOutputSpec[] = known
+    ? []
+    : [{ key: config.field, label: `${config.field} (missing)` }];
 
   const showValue = config.op !== "is_true";
   const isNumeric = config.op === "gt" || config.op === "gte" || config.op === "lt" || config.op === "lte";
@@ -1000,7 +1004,19 @@ function IfConditionBody({
           value={config.field}
           onChange={(e) => onChange({ ...config, field: e.target.value })}
         >
-          {fieldOptions.map((o) => (
+          <optgroup label={upstreamLabel ? `From ${upstreamLabel}` : "Input"}>
+            {availableOutputs.map((o) => (
+              <option key={o.key} value={o.key}>{o.label}</option>
+            ))}
+          </optgroup>
+          {variableOptions.length > 0 ? (
+            <optgroup label="Variables">
+              {variableOptions.map((o) => (
+                <option key={o.key} value={o.key}>{o.label}</option>
+              ))}
+            </optgroup>
+          ) : null}
+          {extraOption.map((o) => (
             <option key={o.key} value={o.key}>{o.label}</option>
           ))}
         </select>
@@ -1034,9 +1050,11 @@ function IfConditionBody({
         </Field>
       ) : null}
       <p className="fb-node-hint">
-        {upstreamLabel
-          ? `Reading "${config.field}" from ${upstreamLabel}. YES fires on match, NO otherwise.`
-          : "Connect a block to IN. Its outputs will populate the field dropdown."}
+        {config.field.startsWith("$")
+          ? `Reading variable ${config.field}. YES fires on match, NO otherwise.`
+          : upstreamLabel
+            ? `Reading "${config.field}" from ${upstreamLabel}. YES fires on match, NO otherwise.`
+            : "Connect a block to IN (for input fields) or pick a variable. YES fires on match."}
       </p>
     </>
   );

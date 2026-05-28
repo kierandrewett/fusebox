@@ -58,6 +58,8 @@ export interface CreateEditorResult {
   serialize: () => { nodes: AutomationNode[]; edges: AutomationEdge[] };
   load: (nodes: AutomationNode[], edges: AutomationEdge[]) => Promise<void>;
   addNodeAt: (config: NodeConfig, x: number, y: number) => Promise<string>;
+  /** Add a node at a screen point (drag-and-drop from the palette). */
+  addNodeAtClient: (config: NodeConfig, clientX: number, clientY: number) => Promise<string>;
   removeNode: (nodeId: string) => Promise<void>;
   /** Snapshot of currently-loaded nodes for picker dropdowns (IF block). */
   listNodes: () => { id: string; kind: NodeConfig["kind"]; label: string }[];
@@ -170,6 +172,16 @@ export async function createEditor(
     return reverseLookup(idMap, conn.source) ?? conn.source;
   };
 
+  // Add a node at the given area-space position. Returns the Rete id.
+  const placeNode = async (config: NodeConfig, x: number, y: number): Promise<string> => {
+    const node = new FlowNode(config);
+    await editor.addNode(node as unknown as ClassicPreset.Node);
+    await area.translate(node.id, { x, y });
+    idMap.set(crypto.randomUUID(), node.id);
+    notify();
+    return node.id;
+  };
+
   const result: CreateEditorResult = {
     editor,
     area,
@@ -239,17 +251,22 @@ export async function createEditor(
         .then(() => undefined);
     },
     async addNodeAt(config, x, y) {
-      const node = new FlowNode(config);
-      await editor.addNode(node as unknown as ClassicPreset.Node);
-      await area.translate(node.id, { x, y });
-      const logicalId = crypto.randomUUID();
-      idMap.set(logicalId, node.id);
+      const id = await placeNode(config, x, y);
       // Keep the view centred on whatever's currently on the canvas so
-      // newly added nodes don't end up offscreen.
+      // click-added nodes don't end up offscreen.
       await AreaExtensions.zoomAt(area, editor.getNodes());
-      notify();
-      // Return the Rete id so the caller can open the inspector for it.
-      return node.id;
+      return id;
+    },
+    addNodeAtClient(config, clientX, clientY) {
+      // Translate a screen point (where the user dropped) into area space,
+      // accounting for the current pan/zoom, and drop the node there without
+      // recentering the view.
+      const rect = container.getBoundingClientRect();
+      const tf = (area as any).area?.transform ?? { x: 0, y: 0, k: 1 };
+      const k = tf.k || 1;
+      const x = (clientX - rect.left - tf.x) / k;
+      const y = (clientY - rect.top - tf.y) / k;
+      return placeNode(config, x, y);
     },
     listNodes() {
       const result: { id: string; kind: NodeConfig["kind"]; label: string }[] = [];

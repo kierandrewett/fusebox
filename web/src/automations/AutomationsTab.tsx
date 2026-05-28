@@ -1,14 +1,14 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import { listAutomations, updateAutomation, previewExpression, listDevices, listHooks } from "../api";
-import type { Automation, DeviceSummary, HookSummary, NodeConfig } from "../types";
+import type { Automation, DeviceSummary, HookSummary } from "../types";
 import { createEditor, type CreateEditorResult } from "./createEditor";
-import { templateFor } from "./nodes";
 import { AutomationsSidebar } from "./AutomationsSidebar";
 import { AutomationToolbar } from "./AutomationToolbar";
 import { NodeInspector } from "./NodeInspector";
 import type { EditorCtx } from "./NodeView";
 import { useAutomationFiles } from "./useAutomationFiles";
 import { useAutomationCrud } from "./useAutomationCrud";
+import { useNodeOps } from "./useNodeOps";
 
 interface Status {
   loading: boolean;
@@ -218,38 +218,13 @@ export function AutomationsTab() {
     }
   };
 
-  const handleAddNode = async (config: NodeConfig) => {
-    const api = editorApiRef.current;
-    if (!api) {
-      setError("editor not ready");
-      return;
-    }
-    const existing = api.editor.getNodes().length;
-    const cat = templateFor(config.kind).category;
-    const column = cat === "trigger" ? 0 : cat === "logic" ? 1 : 2;
-    const x = 60 + column * 280;
-    const y = 60 + (existing % 4) * 160;
-    try {
-      const reteId = await api.addNodeAt(config, x, y);
-      setDirty(true);
-      // Open the inspector on the freshly-added block so it can be configured.
-      selectNode(reteId);
-    } catch (err) {
-      setError(`add node failed: ${err}`);
-    }
-  };
-
-  const handleDeleteNode = async (reteId: string) => {
-    const api = editorApiRef.current;
-    if (!api) return;
-    try {
-      await api.removeNode(reteId);
-      selectNode(null);
-      setDirty(true);
-    } catch (err) {
-      setError(`delete failed: ${err}`);
-    }
-  };
+  const { handleAddNode, handleCanvasDrop, handleDeleteNode } = useNodeOps({
+    editorApiRef,
+    selected,
+    selectNode,
+    setDirty,
+    setError,
+  });
 
   // Context the inspector's NodeBody uses; delegates upstream lookups +
   // preview to the live editor api and reads device/hook/variable pools.
@@ -303,7 +278,17 @@ export function AutomationsTab() {
           onExport={handleExport}
         />
         {error ? <div className="fb-error-bar">{error}</div> : null}
-        <div className="fb-canvas" ref={editorContainerRef} />
+        <div
+          className="fb-canvas"
+          ref={editorContainerRef}
+          onDragOver={(e) => {
+            if (e.dataTransfer.types.includes("application/fusebox-node")) {
+              e.preventDefault();
+              e.dataTransfer.dropEffect = "copy";
+            }
+          }}
+          onDrop={handleCanvasDrop}
+        />
       </main>
       {selectedNodeId && editorApiRef.current ? (
         <NodeInspector

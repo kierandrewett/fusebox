@@ -619,20 +619,20 @@ pub(crate) async fn evaluate_node(
             if !rising {
                 return (prev.last_value, next);
             }
-            // Find the upstream block we should inspect. If there's no IN
-            // connection yet, route to NO.
-            let source_id = match inputs.first() {
-                Some(input) => input.source_node.clone(),
-                None => return (Some(false), next),
+            // Inspect the wired upstream block (for input.* fields). A
+            // `$var` field reads a variable instead, so a missing upstream is
+            // fine in that case.
+            let source_state: Option<NodeRuntimeState> = match inputs.first() {
+                Some(input) => {
+                    let automations = state.automations.read().await;
+                    automations
+                        .get(automation_id)
+                        .and_then(|a| a.status.node_states.get(&input.source_node))
+                        .cloned()
+                }
+                None => None,
             };
-            let source_state: Option<NodeRuntimeState> = {
-                let automations = state.automations.read().await;
-                automations
-                    .get(automation_id)
-                    .and_then(|a| a.status.node_states.get(&source_id))
-                    .cloned()
-            };
-            let matched = evaluate_if_check(if_condition, source_state.as_ref());
+            let matched = evaluate_if_check(if_condition, source_state.as_ref(), variables);
             (Some(matched), next)
         }
         AutomationNodeConfig::LogicAnd => {
@@ -882,12 +882,15 @@ fn write_value_outputs(next: &mut NodeRuntimeState, value: &Value) {
 pub(crate) fn evaluate_if_check(
     cfg: &IfConditionCfg,
     source: Option<&NodeRuntimeState>,
+    variables: &BTreeMap<String, Value>,
 ) -> bool {
-    let source = match source {
-        Some(s) => s,
-        None => return false,
+    // A `$name` field reads an automation variable; anything else reads the
+    // wired upstream block's output.
+    let field_value: Option<String> = if let Some(name) = cfg.field.strip_prefix('$') {
+        variables.get(name).map(expr::to_text)
+    } else {
+        source.and_then(|s| lookup_output(s, &cfg.field))
     };
-    let field_value = lookup_output(source, &cfg.field);
     match cfg.op {
         IfOp::IsTrue => matches!(field_value.as_deref(), Some("true")),
         IfOp::Equals => match field_value.as_deref() {

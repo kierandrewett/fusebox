@@ -1872,7 +1872,9 @@
 .fb-palette-items button:hover:not(:disabled) {
   border-color: rgba(229, 183, 91, 0.55);
   color: var(--title);
+  cursor: grab;
 }
+.fb-palette-items button:active:not(:disabled) { cursor: grabbing; }
 .fb-palette-items button:disabled { opacity: 0.4; cursor: not-allowed; }
 .fb-palette-items button::before {
   content: "";
