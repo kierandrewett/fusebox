@@ -159,6 +159,41 @@ export const NODE_TEMPLATES: NodeTemplate[] = [
     defaultConfig: () => ({ kind: "debounce", debounce: { hold_seconds: 30 } }),
   },
   {
+    kind: "expression",
+    label: "Expression",
+    category: "logic",
+    description:
+      "Evaluates an expression (math, strings, jsonEncode/decode, …) and exposes the result as 'value'.",
+    hasInput: true,
+    outputs: SINGLE_OK,
+    dataOutputs: DEFAULT_DATA_OUTPUTS,
+    defaultConfig: () => ({ kind: "expression", expression: { expression: "" } }),
+  },
+  {
+    kind: "set_variable",
+    label: "Set variable",
+    category: "logic",
+    description:
+      "Stores the result of an expression in a named variable when the input fires.",
+    hasInput: true,
+    outputs: SINGLE_OK,
+    dataOutputs: DEFAULT_DATA_OUTPUTS,
+    defaultConfig: () => ({
+      kind: "set_variable",
+      set_variable: { key: "", expression: "" },
+    }),
+  },
+  {
+    kind: "get_variable",
+    label: "Get variable",
+    category: "logic",
+    description: "Reads a stored variable and exposes it as 'value' for downstream blocks.",
+    hasInput: true,
+    outputs: SINGLE_OK,
+    dataOutputs: DEFAULT_DATA_OUTPUTS,
+    defaultConfig: () => ({ kind: "get_variable", get_variable: { key: "" } }),
+  },
+  {
     kind: "set_device",
     label: "Set device",
     category: "action",

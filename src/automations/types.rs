@@ -42,6 +42,22 @@ pub(crate) enum AutomationNodeConfig {
     Debounce {
         debounce: DebounceCfg,
     },
+    /// Evaluates an expression and stores the result in the automation's
+    /// per-automation variable store under `key`. Also exposes the stored
+    /// value as its own `value` output.
+    SetVariable {
+        set_variable: SetVariableCfg,
+    },
+    /// Reads a stored variable and exposes it as `value` so downstream
+    /// blocks (IF, HTTP, Expression) can use it.
+    GetVariable {
+        get_variable: GetVariableCfg,
+    },
+    /// Evaluates an expression and exposes the result as `value` without
+    /// storing it. Use for json encode/decode, math, string munging, etc.
+    Expression {
+        expression: ExpressionCfg,
+    },
     SetDevice {
         set_device: SetDeviceCfg,
     },
@@ -151,6 +167,25 @@ pub(crate) struct DebounceCfg {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct SetVariableCfg {
+    pub(crate) key: String,
+    /// Expression evaluated on each input pulse; its result is stored.
+    #[serde(default)]
+    pub(crate) expression: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct GetVariableCfg {
+    pub(crate) key: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct ExpressionCfg {
+    #[serde(default)]
+    pub(crate) expression: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct SetDeviceCfg {
     pub(crate) device_name: String,
     pub(crate) action: ScheduleAction,
@@ -251,6 +286,10 @@ pub(crate) struct Automation {
     pub(crate) created_at_ms: u128,
     #[serde(default)]
     pub(crate) status: AutomationStatus,
+    /// Per-automation key/value store written by SetVariable blocks and read
+    /// by GetVariable/Expression blocks. Persisted so values survive restarts.
+    #[serde(default)]
+    pub(crate) variables: BTreeMap<String, serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

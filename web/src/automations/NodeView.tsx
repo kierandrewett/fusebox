@@ -243,6 +243,17 @@ function summarizeNode(config: NodeConfig, ctx: EditorCtx): string {
       return "Invert input";
     case "debounce":
       return `Hold ${humanDuration(config.debounce.hold_seconds)}`;
+    case "expression": {
+      const e = config.expression.expression.trim();
+      return e ? truncate(e, 32) : "Enter an expression…";
+    }
+    case "set_variable": {
+      const { key, expression } = config.set_variable;
+      if (!key) return "Name a variable…";
+      return expression.trim() ? `${key} = ${truncate(expression.trim(), 22)}` : `Set ${key}…`;
+    }
+    case "get_variable":
+      return config.get_variable.key ? `Read ${config.get_variable.key}` : "Name a variable…";
     case "set_device": {
       const dev = config.set_device.device_name;
       const verb =
@@ -345,6 +356,12 @@ function iconFor(kind: NodeConfig["kind"]): string {
       return "¬";
     case "debounce":
       return "⏳";
+    case "expression":
+      return "ƒ";
+    case "set_variable":
+      return "=";
+    case "get_variable":
+      return "x";
     case "set_device":
       return "▶";
     case "toggle_device":
@@ -435,6 +452,56 @@ function NodeBody({
             onChange={(v) => update({ ...config, debounce: { hold_seconds: v } })}
           />
         </Field>
+      );
+    case "expression":
+      return (
+        <ExpressionBody
+          label="Expression"
+          value={config.expression.expression}
+          onChange={(expression) => update({ kind: "expression", expression: { expression } })}
+        />
+      );
+    case "set_variable":
+      return (
+        <>
+          <Field label="Variable name">
+            <input
+              type="text"
+              aria-label="Variable name"
+              value={config.set_variable.key}
+              onChange={(e) =>
+                update({ ...config, set_variable: { ...config.set_variable, key: e.target.value } })
+              }
+              placeholder="counter"
+              spellCheck={false}
+            />
+          </Field>
+          <ExpressionBody
+            label="Set to"
+            value={config.set_variable.expression}
+            onChange={(expression) =>
+              update({ ...config, set_variable: { ...config.set_variable, expression } })
+            }
+          />
+        </>
+      );
+    case "get_variable":
+      return (
+        <>
+          <Field label="Variable name">
+            <input
+              type="text"
+              aria-label="Variable name"
+              value={config.get_variable.key}
+              onChange={(e) => update({ ...config, get_variable: { key: e.target.value } })}
+              placeholder="counter"
+              spellCheck={false}
+            />
+          </Field>
+          <p className="fb-node-hint">
+            Exposes the stored value as "value". Wire into an If block to branch on it.
+          </p>
+        </>
       );
     case "set_device":
       return (
@@ -920,6 +987,56 @@ function IfConditionBody({
           ? `Reading "${config.field}" from ${upstreamLabel}. YES fires on match, NO otherwise.`
           : "Connect a block to IN. Its outputs will populate the field dropdown."}
       </p>
+    </>
+  );
+}
+
+// ---------- Expression (used by Expression + Set variable blocks) ----------
+
+function ExpressionBody({
+  label,
+  value,
+  onChange,
+}: {
+  label: string;
+  value: string;
+  onChange: (expression: string) => void;
+}) {
+  const [helpOpen, setHelpOpen] = useState(false);
+  return (
+    <>
+      <Field label={label}>
+        <textarea
+          aria-label={label}
+          rows={2}
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          placeholder={'jsonEncode({}) · $count + 1 · input.body'}
+          spellCheck={false}
+        />
+      </Field>
+      <details
+        className="fb-collapse"
+        open={helpOpen}
+        onToggle={(e) => setHelpOpen((e.target as HTMLDetailsElement).open)}
+      >
+        <summary>Expression help</summary>
+        <p className="fb-node-hint">
+          <code>$name</code> reads a variable, <code>input.field</code> reads the
+          upstream block's output (e.g. <code>input.body</code>). Operators:
+          {" "}<code>+ - * / % == != &lt; &gt; &amp;&amp; || !</code> and
+          {" "}<code>cond ? a : b</code>.
+        </p>
+        <p className="fb-node-hint">
+          Functions: <code>jsonEncode</code>, <code>jsonDecode</code>,{" "}
+          <code>upper</code>, <code>lower</code>, <code>trim</code>,{" "}
+          <code>len</code>, <code>replace</code>, <code>split</code>,{" "}
+          <code>substr</code>, <code>contains</code>, <code>indexOf</code>,{" "}
+          <code>round</code>, <code>floor</code>, <code>ceil</code>,{" "}
+          <code>abs</code>, <code>min</code>, <code>max</code>,{" "}
+          <code>coalesce</code>, <code>now</code>.
+        </p>
+      </details>
     </>
   );
 }

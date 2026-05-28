@@ -9,6 +9,7 @@ import {
 } from "../api";
 import type { Automation, DeviceSummary, HookSummary, NodeConfig } from "../types";
 import { createEditor, type CreateEditorResult } from "./createEditor";
+import { templateFor } from "./nodes";
 import { AutomationsSidebar } from "./AutomationsSidebar";
 import { AutomationToolbar } from "./AutomationToolbar";
 
@@ -227,13 +228,9 @@ export function AutomationsTab() {
       return;
     }
     const existing = api.editor.getNodes().length;
-    const category = config.kind.startsWith("cron")
-      || config.kind.endsWith("_trigger")
-      ? 0
-      : config.kind.startsWith("logic_") || config.kind === "debounce"
-        ? 1
-        : 2;
-    const x = 60 + category * 280;
+    const cat = templateFor(config.kind).category;
+    const column = cat === "trigger" ? 0 : cat === "logic" ? 1 : 2;
+    const x = 60 + column * 280;
     const y = 60 + (existing % 4) * 160;
     try {
       await api.addNodeAt(config, x, y);

@@ -6,6 +6,9 @@ use chrono::{DateTime, Local};
 use tokio::time::sleep;
 use tracing::{info, warn};
 
+use serde_json::Value;
+
+use crate::automations::expr::{self, EvalContext};
 use crate::automations::types::{
     Automation, AutomationEdge, AutomationNode, AutomationNodeConfig, IfConditionCfg, IfOp,
     NodeRuntimeState,
@@ -83,6 +86,12 @@ pub(crate) async fn evaluate_one_automation(
     let mut transitions: Vec<(String, AutomationNodeConfig)> = Vec::new();
     let mut node_state_updates: BTreeMap<String, NodeRuntimeState> = BTreeMap::new();
 
+    // Live, mutable copy of the automation's variable store. SetVariable
+    // blocks write into it; GetVariable/Expression read from it. Updates are
+    // visible to later nodes in topological order within the same tick and
+    // persisted at the end if anything changed.
+    let mut variables = automation.variables.clone();
+
     let devices_to_reconcile = std::collections::BTreeSet::<String>::new();
     let mut devices_to_reconcile = devices_to_reconcile;
 
@@ -127,6 +136,7 @@ pub(crate) async fn evaluate_one_automation(
             node,
             &input_values,
             &prev_state,
+            &mut variables,
             previous_tick_ms,
             tick_ms,
         )
@@ -140,6 +150,16 @@ pub(crate) async fn evaluate_one_automation(
                 | AutomationNodeConfig::ToggleDevice { .. }
                 | AutomationNodeConfig::FireHook { .. }
         );
+        // These nodes write a richer "value" output themselves (a body,
+        // number, dictionary, …), so the loop must not clobber it with the
+        // boolean pulse.
+        let manages_own_value = matches!(
+            node.config,
+            AutomationNodeConfig::HttpRequest { .. }
+                | AutomationNodeConfig::SetVariable { .. }
+                | AutomationNodeConfig::GetVariable { .. }
+                | AutomationNodeConfig::Expression { .. }
+        );
         let rising = matches!(
             (prev_state.last_value, new_output),
             (None, Some(true)) | (Some(false), Some(true))
@@ -151,11 +171,13 @@ pub(crate) async fn evaluate_one_automation(
             transitions.push((node_id.clone(), node.config.clone()));
         }
         merged.last_value = new_output;
-        if let Some(v) = new_output {
-            // Every node exposes "value" (the boolean pulse it propagates).
-            // Node-specific outputs (body, status_code, ...) are written by
-            // the handler itself; we don't touch them here.
-            merged.outputs.insert("value".to_string(), v.to_string());
+        if !manages_own_value {
+            if let Some(v) = new_output {
+                // Every node exposes "value" (the boolean pulse it propagates).
+                // Node-specific outputs (body, status_code, ...) are written
+                // by the handler itself; we don't touch them here.
+                merged.outputs.insert("value".to_string(), v.to_string());
+            }
         }
         node_state_updates.insert(node_id.clone(), merged);
     }
@@ -186,6 +208,10 @@ pub(crate) async fn evaluate_one_automation(
     {
         let mut automations = state.automations.write().await;
         if let Some(a) = automations.get_mut(&automation.id) {
+            if a.variables != variables {
+                dirty = true;
+                a.variables = variables;
+            }
             for (node_id, state_update) in node_state_updates {
                 let prev = a.status.node_states.get(&node_id);
                 let changed = match prev {
@@ -293,6 +319,7 @@ pub(crate) async fn evaluate_node(
     node: &AutomationNode,
     inputs: &[IncomingInput],
     prev: &NodeRuntimeState,
+    variables: &mut BTreeMap<String, Value>,
     previous_tick_ms: u128,
     tick_ms: u128,
 ) -> (Option<bool>, NodeRuntimeState) {
@@ -528,6 +555,79 @@ pub(crate) async fn evaluate_node(
                 },
             }
         }
+        AutomationNodeConfig::Expression { expression } => {
+            // Re-evaluate on the rising edge of an input pulse; the result
+            // holds afterwards so downstream reads stay stable.
+            let rising = matches!(
+                (prev.last_value, inputs.iter().any(|i| matches!(i.value, Some(true)))),
+                (None, true) | (Some(false), true)
+            );
+            if !rising {
+                return (prev.last_value, next);
+            }
+            let input = fetch_source_outputs(state, automation_id, inputs).await;
+            let result = {
+                let ctx = EvalContext {
+                    variables,
+                    input,
+                };
+                expr::evaluate(&expression.expression, &ctx)
+            };
+            match result {
+                Ok(value) => {
+                    write_value_outputs(&mut next, &value);
+                    (Some(expr::truthy(&value)), next)
+                }
+                Err(error) => {
+                    next.last_error = Some(error);
+                    (Some(false), next)
+                }
+            }
+        }
+        AutomationNodeConfig::SetVariable { set_variable } => {
+            let rising = matches!(
+                (prev.last_value, inputs.iter().any(|i| matches!(i.value, Some(true)))),
+                (None, true) | (Some(false), true)
+            );
+            if !rising {
+                return (prev.last_value, next);
+            }
+            if set_variable.key.is_empty() {
+                next.last_error = Some("variable key is empty".to_string());
+                return (Some(false), next);
+            }
+            let input = fetch_source_outputs(state, automation_id, inputs).await;
+            let result = {
+                let ctx = EvalContext {
+                    variables,
+                    input,
+                };
+                expr::evaluate(&set_variable.expression, &ctx)
+            };
+            match result {
+                Ok(value) => {
+                    variables.insert(set_variable.key.clone(), value.clone());
+                    write_value_outputs(&mut next, &value);
+                    (Some(true), next)
+                }
+                Err(error) => {
+                    next.last_error = Some(error);
+                    (Some(false), next)
+                }
+            }
+        }
+        AutomationNodeConfig::GetVariable { get_variable } => {
+            // Source-style: always expose the current variable value. The
+            // boolean it propagates is just its input pulse passed through,
+            // so a downstream IF fires when the upstream trigger fires.
+            let value = variables
+                .get(&get_variable.key)
+                .cloned()
+                .unwrap_or(Value::Null);
+            write_value_outputs(&mut next, &value);
+            let pulse = inputs.iter().any(|i| matches!(i.value, Some(true)));
+            (Some(pulse), next)
+        }
         AutomationNodeConfig::SetDevice { .. }
         | AutomationNodeConfig::ToggleDevice { .. }
         | AutomationNodeConfig::FireHook { .. } => {
@@ -535,6 +635,50 @@ pub(crate) async fn evaluate_node(
             // can in turn drive other actions if connected.
             let active = inputs.iter().any(|i| matches!(i.value, Some(true)));
             (Some(active), next)
+        }
+    }
+}
+
+/// Build the `input` dictionary an expression sees: the named outputs of
+/// the node wired to this block's IN socket, as a JSON object of strings.
+/// Reads committed state (one tick behind, same as the IF block).
+async fn fetch_source_outputs(
+    state: &AppState,
+    automation_id: &str,
+    inputs: &[IncomingInput],
+) -> Value {
+    let source_id = match inputs.first() {
+        Some(input) => &input.source_node,
+        None => return Value::Object(Default::default()),
+    };
+    let outputs = {
+        let automations = state.automations.read().await;
+        automations
+            .get(automation_id)
+            .and_then(|a| a.status.node_states.get(source_id))
+            .map(|s| s.outputs.clone())
+            .unwrap_or_default()
+    };
+    let map: serde_json::Map<String, Value> = outputs
+        .into_iter()
+        .map(|(k, v)| (k, Value::String(v)))
+        .collect();
+    Value::Object(map)
+}
+
+/// Write an evaluated value into a node's runtime outputs: "value" carries
+/// the stringified result; if it's a dictionary, each entry is also exposed
+/// as its own output key so an IF block can read individual fields.
+fn write_value_outputs(next: &mut NodeRuntimeState, value: &Value) {
+    next.last_error = None;
+    next.outputs.clear();
+    next.outputs
+        .insert("value".to_string(), expr::to_text(value));
+    if let Value::Object(map) = value {
+        for (k, v) in map {
+            if k != "value" {
+                next.outputs.insert(k.clone(), expr::to_text(v));
+            }
         }
     }
 }

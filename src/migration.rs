@@ -136,6 +136,7 @@ pub(crate) fn migrate_to_automations(persisted: &mut PersistedState) {
                     cond.created_at_ms
                 },
                 status: AutomationStatus::default(),
+                variables: Default::default(),
             },
         );
     }
@@ -244,6 +245,7 @@ pub(crate) fn migrate_to_automations(persisted: &mut PersistedState) {
                     sched.created_at_ms
                 },
                 status: AutomationStatus::default(),
+                variables: Default::default(),
             },
         );
     }

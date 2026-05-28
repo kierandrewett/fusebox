@@ -51,6 +51,7 @@ pub(crate) async fn create_automation(
         edges: request.edges,
         created_at_ms: now_ms(),
         status: AutomationStatus::default(),
+        variables: Default::default(),
     };
     {
         let mut automations = state.automations.write().await;
@@ -235,10 +236,23 @@ pub(crate) fn validate_node_config(config: &AutomationNodeConfig) -> Result<()> 
             validate_http_method(&http_request.method)?;
             parse_status_match(&http_request.status_match)?;
         }
+        AutomationNodeConfig::Expression { expression } => {
+            if !expression.expression.trim().is_empty() {
+                crate::automations::expr::validate(&expression.expression)
+                    .map_err(|e| anyhow!("invalid expression: {e}"))?;
+            }
+        }
+        AutomationNodeConfig::SetVariable { set_variable } => {
+            if !set_variable.expression.trim().is_empty() {
+                crate::automations::expr::validate(&set_variable.expression)
+                    .map_err(|e| anyhow!("invalid expression: {e}"))?;
+            }
+        }
         AutomationNodeConfig::DeviceEventTrigger { .. }
         | AutomationNodeConfig::SetDevice { .. }
         | AutomationNodeConfig::ToggleDevice { .. }
         | AutomationNodeConfig::FireHook { .. }
+        | AutomationNodeConfig::GetVariable { .. }
         | AutomationNodeConfig::IfCondition { .. } => {
             // Picker may be empty while the user is still wiring things up.
         }

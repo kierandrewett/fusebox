@@ -8,6 +8,9 @@ export type NodeKind =
   | "logic_or"
   | "logic_not"
   | "debounce"
+  | "set_variable"
+  | "get_variable"
+  | "expression"
   | "set_device"
   | "toggle_device"
   | "fire_hook";
@@ -58,6 +61,16 @@ export interface IfConditionConfig {
 export interface DebounceConfig {
   hold_seconds: number;
 }
+export interface SetVariableConfig {
+  key: string;
+  expression: string;
+}
+export interface GetVariableConfig {
+  key: string;
+}
+export interface ExpressionConfig {
+  expression: string;
+}
 export interface SetDeviceConfig {
   device_name: string;
   action: ScheduleAction;
@@ -79,6 +92,9 @@ export type NodeConfig =
   | { kind: "logic_or" }
   | { kind: "logic_not" }
   | { kind: "debounce"; debounce: DebounceConfig }
+  | { kind: "set_variable"; set_variable: SetVariableConfig }
+  | { kind: "get_variable"; get_variable: GetVariableConfig }
+  | { kind: "expression"; expression: ExpressionConfig }
   | { kind: "set_device"; set_device: SetDeviceConfig }
   | { kind: "toggle_device"; toggle_device: ToggleDeviceConfig }
   | { kind: "fire_hook"; fire_hook: FireHookConfig };

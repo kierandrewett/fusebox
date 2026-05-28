@@ -1,4 +1,4 @@
-import { useEffect, useReducer } from "react";
+import { useEffect, useReducer, useRef } from "react";
 import type { Hook } from "../types";
 
 interface Props {
@@ -36,13 +36,13 @@ function initialState(hook?: Hook | null): FormState {
 export function HookModal({ hook, onSave, onClose }: Props) {
   const [form, dispatch] = useReducer(reducer, hook, initialState);
 
-  // Close on Escape from anywhere — the form is the focus target but keydowns
-  // on a non-interactive element trip lint warnings, so listen at the document.
+  const dialogRef = useRef<HTMLDialogElement | null>(null);
+
+  // Open as a modal on mount: native <dialog> gives us the focus trap,
+  // Escape-to-close, and top-layer backdrop for free.
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
-    document.addEventListener("keydown", onKey);
-    return () => document.removeEventListener("keydown", onKey);
-  }, [onClose]);
+    dialogRef.current?.showModal();
+  }, []);
 
   const submit = (event: React.FormEvent) => {
     event.preventDefault();
@@ -59,20 +59,17 @@ export function HookModal({ hook, onSave, onClose }: Props) {
   };
 
   return (
-    <div className="modal-backdrop">
-      <button
-        type="button"
-        className="modal-backdrop-button"
-        aria-label="Close dialog"
-        onClick={onClose}
-      />
-      <form
-        className="modal"
-        role="dialog"
-        aria-modal="true"
-        aria-label={hook?.id ? "Edit hook" : "New hook"}
-        onSubmit={submit}
-      >
+    <dialog
+      ref={dialogRef}
+      className="modal-dialog"
+      aria-label={hook?.id ? "Edit hook" : "New hook"}
+      onCancel={(e) => {
+        // Escape: let React unmount us rather than the native close path.
+        e.preventDefault();
+        onClose();
+      }}
+    >
+      <form className="modal" onSubmit={submit}>
         <h3>{hook?.id ? "Edit hook" : "New hook"}</h3>
         <label>
           Name
@@ -127,6 +124,6 @@ export function HookModal({ hook, onSave, onClose }: Props) {
           <button type="submit" className="scan-button">Save</button>
         </div>
       </form>
-    </div>
+    </dialog>
   );
 }
