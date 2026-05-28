@@ -1236,16 +1236,23 @@ function ExpressionBody({
           {previewing ? "Running…" : "Preview"}
         </button>
         {preview ? (
-          preview.ok ? (
+          preview.input_fields.length === 0 && /\binput\b/.test(value) ? (
+            // Upstream block has no recorded run, so any input.* is empty.
+            // Lead with that instead of a confusing eval error.
+            <div className="fb-expr-preview-error">
+              The upstream {upstreamLabel ?? "block"} hasn't run yet, so{" "}
+              <code>input</code> is empty. Save the automation and let it fire
+              once (it needs a trigger wired to IN), then Preview again.
+            </div>
+          ) : preview.ok ? (
             <pre className="fb-expr-preview-result">{preview.result_text || "(empty)"}</pre>
           ) : (
             <div className="fb-expr-preview-error">{preview.error}</div>
           )
         ) : null}
-        {preview && preview.input_fields.length === 0 && /\binput\b/.test(value) ? (
+        {preview && preview.input_fields.length > 0 ? (
           <p className="fb-node-hint">
-            No live data from the upstream block yet. Save and let it run once
-            (trigger it) so its outputs are recorded.
+            Available: {preview.input_fields.map((f) => `input.${f}`).join(", ")}
           </p>
         ) : null}
       </div>

@@ -761,6 +761,12 @@ fn call_function(name: &str, args: &[Value]) -> Result<Value, String> {
         )),
         "jsonDecode" => {
             let s = to_text(&arg(0));
+            if s.trim().is_empty() {
+                return Err(
+                    "jsonDecode: input is empty (the upstream block may not have run yet)"
+                        .to_string(),
+                );
+            }
             serde_json::from_str(&s).map_err(|e| format!("jsonDecode: {e}"))
         }
         // --- String ---
