@@ -250,3 +250,26 @@ export function templateFor(kind: NodeKind): NodeTemplate {
   if (!tpl) throw new Error(`unknown node kind: ${kind}`);
   return tpl;
 }
+
+const NODE_ICONS: Record<NodeKind, string> = {
+  immediate_trigger: "⚡",
+  cron_trigger: "⏰",
+  interval_trigger: "↻",
+  device_event_trigger: "⚡",
+  http_request: "🌐",
+  if_condition: "?",
+  logic_and: "∧",
+  logic_or: "∨",
+  logic_not: "¬",
+  debounce: "⏳",
+  expression: "ƒ",
+  set_variable: "=",
+  get_variable: "x",
+  set_device: "▶",
+  toggle_device: "⇄",
+  fire_hook: "🔔",
+};
+
+export function iconFor(kind: NodeKind): string {
+  return NODE_ICONS[kind] ?? "•";
+}

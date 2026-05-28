@@ -32,13 +32,10 @@ export class FlowNode extends ClassicPreset.Node {
   width: number;
   height = 120;
   config: NodeConfig;
-  expanded: boolean;
-  onChange?: () => void;
 
-  constructor(config: NodeConfig, expanded = false) {
+  constructor(config: NodeConfig) {
     super(templateFor(config.kind).label);
     this.config = config;
-    this.expanded = expanded;
     this.width = NODE_WIDTHS[config.kind] ?? 240;
     const tpl = templateFor(config.kind);
     if (tpl.hasInput) {
@@ -64,6 +61,8 @@ export interface CreateEditorResult {
   removeNode: (nodeId: string) => Promise<void>;
   /** Snapshot of currently-loaded nodes for picker dropdowns (IF block). */
   listNodes: () => { id: string; kind: NodeConfig["kind"]; label: string }[];
+  findUpstreamKind: (targetReteId: string) => NodeConfig["kind"] | null;
+  findUpstreamLogicalId: (targetReteId: string) => string | null;
   onChange: (cb: () => void) => () => void;
 }
 
@@ -86,6 +85,10 @@ export interface EditorContext {
     upstreamId: string | null,
     expression: string,
   ) => Promise<{ ok: boolean; result_text?: string; error?: string; input_fields: string[] }>;
+  /** Open the inspector for a node (by Rete id). */
+  selectNode?: (reteId: string) => void;
+  /** Currently-selected node id, for the canvas highlight. */
+  selectedNodeId?: () => string | null;
   /** Subscribe to changes in devices/hooks. Returns an unsubscribe. */
   subscribeContext: (cb: () => void) => () => void;
 }
@@ -136,16 +139,42 @@ export async function createEditor(
     return ctx;
   });
 
-  area.addPipe((ctx) => {
-    if (ctx.type === "nodedragged") notify();
-    return ctx;
+  area.addPipe((context) => {
+    if (context.type === "nodedragged") notify();
+    // Clicking (or starting to drag) a node "picks" it — open the inspector.
+    if ((context.type as string) === "nodepicked") {
+      const id = (context as any).data?.id;
+      if (id) ctx.selectNode?.(id);
+    }
+    return context;
   });
 
   const idMap = new Map<string, string>(); // logical id -> rete id
 
+  // Resolve "what's wired to this node's IN socket". Powers the IF block's
+  // field dropdown and the expression preview's upstream lookup.
+  const upstreamConnection = (targetReteId: string) =>
+    editor.getConnections().find(
+      (c: any) => c.target === targetReteId && (c.targetInput ?? "in") === "in",
+    );
+  const findUpstreamKind = (targetReteId: string): NodeConfig["kind"] | null => {
+    const conn = upstreamConnection(targetReteId);
+    if (!conn) return null;
+    const source = editor.getNode(conn.source);
+    if (!source) return null;
+    return (source as unknown as FlowNode).config.kind;
+  };
+  const findUpstreamLogicalId = (targetReteId: string): string | null => {
+    const conn = upstreamConnection(targetReteId);
+    if (!conn) return null;
+    return reverseLookup(idMap, conn.source) ?? conn.source;
+  };
+
   const result: CreateEditorResult = {
     editor,
     area,
+    findUpstreamKind,
+    findUpstreamLogicalId,
     destroy: () => area.destroy(),
     serialize() {
       const nodes: AutomationNode[] = [];
@@ -210,9 +239,7 @@ export async function createEditor(
         .then(() => undefined);
     },
     async addNodeAt(config, x, y) {
-      // Freshly-added nodes open expanded so the user can configure
-      // them immediately. Loaded nodes start collapsed (see load()).
-      const node = new FlowNode(config, true);
+      const node = new FlowNode(config);
       await editor.addNode(node as unknown as ClassicPreset.Node);
       await area.translate(node.id, { x, y });
       const logicalId = crypto.randomUUID();
@@ -221,7 +248,8 @@ export async function createEditor(
       // newly added nodes don't end up offscreen.
       await AreaExtensions.zoomAt(area, editor.getNodes());
       notify();
-      return logicalId;
+      // Return the Rete id so the caller can open the inspector for it.
+      return node.id;
     },
     listNodes() {
       const result: { id: string; kind: NodeConfig["kind"]; label: string }[] = [];
@@ -252,27 +280,7 @@ export async function createEditor(
     },
   };
 
-  // Resolve "what kind is wired to this node's IN socket" using direct
-  // access to the editor's connections. The IF block uses this to populate
-  // its field dropdown with the upstream's data outputs.
-  const upstreamConnection = (targetReteId: string) =>
-    editor.getConnections().find(
-      (c: any) => c.target === targetReteId && (c.targetInput ?? "in") === "in",
-    );
-  const findUpstreamKind = (targetReteId: string): NodeConfig["kind"] | null => {
-    const conn = upstreamConnection(targetReteId);
-    if (!conn) return null;
-    const source = editor.getNode(conn.source);
-    if (!source) return null;
-    return (source as unknown as FlowNode).config.kind;
-  };
-  const findUpstreamLogicalId = (targetReteId: string): string | null => {
-    const conn = upstreamConnection(targetReteId);
-    if (!conn) return null;
-    return reverseLookup(idMap, conn.source) ?? conn.source;
-  };
-
-  // Make context accessible to nodes for device/hook pickers
+  // Make context accessible to nodes for device/hook pickers + IF lookups.
   const enrichedCtx: EditorContext = { ...ctx, findUpstreamKind, findUpstreamLogicalId };
   (container as any).__fuseboxCtx = enrichedCtx;
   (container as any).__fuseboxEditor = result;

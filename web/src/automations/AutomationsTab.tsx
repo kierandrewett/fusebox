@@ -1,20 +1,14 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
-import {
-  listAutomations,
-  createAutomation,
-  updateAutomation,
-  deleteAutomation,
-  exportAutomation,
-  importAutomation,
-  previewExpression,
-  listDevices,
-  listHooks,
-} from "../api";
+import { listAutomations, updateAutomation, previewExpression, listDevices, listHooks } from "../api";
 import type { Automation, DeviceSummary, HookSummary, NodeConfig } from "../types";
 import { createEditor, type CreateEditorResult } from "./createEditor";
 import { templateFor } from "./nodes";
 import { AutomationsSidebar } from "./AutomationsSidebar";
 import { AutomationToolbar } from "./AutomationToolbar";
+import { NodeInspector } from "./NodeInspector";
+import type { EditorCtx } from "./NodeView";
+import { useAutomationFiles } from "./useAutomationFiles";
+import { useAutomationCrud } from "./useAutomationCrud";
 
 interface Status {
   loading: boolean;
@@ -32,6 +26,8 @@ function statusReducer(state: Status, patch: Partial<Status>): Status {
 export function AutomationsTab() {
   const [automations, setAutomations] = useState<Automation[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  // Rete id of the block whose settings are open in the inspector.
+  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [status, patchStatus] = useReducer(statusReducer, INITIAL_STATUS);
   const { loading, saving, dirty, error } = status;
   const setError = useCallback((error: string | null) => patchStatus({ error }), []);
@@ -45,6 +41,8 @@ export function AutomationsTab() {
   const hooksRef = useRef<HookSummary[]>([]);
   const variableNamesRef = useRef<string[]>([]);
   const selectedIdRef = useRef<string | null>(null);
+  const selectedNodeIdRef = useRef<string | null>(null);
+  selectedNodeIdRef.current = selectedNodeId;
   const editorContainerRef = useRef<HTMLDivElement | null>(null);
   const editorApiRef = useRef<CreateEditorResult | null>(null);
   const editorReadyRef = useRef(false);
@@ -58,6 +56,17 @@ export function AutomationsTab() {
   const notifyCtx = useCallback(() => {
     for (const cb of ctxListenersRef.current) cb();
   }, []);
+
+  // Selecting a block opens the inspector and re-highlights the canvas (the
+  // isolated NodeViews re-read selectedNodeId via notifyCtx).
+  const selectNode = useCallback(
+    (reteId: string | null) => {
+      selectedNodeIdRef.current = reteId;
+      setSelectedNodeId(reteId);
+      notifyCtx();
+    },
+    [notifyCtx],
+  );
 
   // Initial load
   useEffect(() => {
@@ -108,10 +117,12 @@ export function AutomationsTab() {
         pendingLoadRef.current = { id };
         return;
       }
+      // Swapping automations invalidates the old node ids — close the inspector.
+      selectNode(null);
       await api.load(target?.nodes ?? [], target?.edges ?? []);
       setDirty(false);
     },
-    [automations, setDirty],
+    [automations, setDirty, selectNode],
   );
   const loadIntoEditorRef = useRef(loadIntoEditor);
   loadIntoEditorRef.current = loadIntoEditor;
@@ -142,6 +153,8 @@ export function AutomationsTab() {
         return previewExpression(id, upstreamId, expression);
       },
       listNodes: () => apiRef.current?.listNodes() ?? [],
+      selectNode: (reteId) => selectNode(reteId),
+      selectedNodeId: () => selectedNodeIdRef.current,
       subscribeContext: (cb) => {
         listenersRef.current.add(cb);
         return () => listenersRef.current.delete(cb);
@@ -175,51 +188,14 @@ export function AutomationsTab() {
       apiRef.current = null;
       readyRef.current = false;
     };
-  }, [notifyCtx, setError, setDirty]);
+  }, [notifyCtx, setError, setDirty, selectNode]);
 
   useEffect(() => {
     void loadIntoEditor(selectedId);
   }, [selectedId, loadIntoEditor]);
 
-  const handleAdd = async () => {
-    setError(null);
-    try {
-      const created = await createAutomation("Untitled automation");
-      setAutomations((prev) => [...prev, created]);
-      setSelectedId(created.id);
-    } catch (e) {
-      setError(String(e));
-    }
-  };
-
-  const handleDelete = async (id: string) => {
-    if (!confirm("Delete this automation?")) return;
-    try {
-      await deleteAutomation(id);
-      setAutomations((prev) => prev.filter((a) => a.id !== id));
-      if (selectedId === id) setSelectedId(null);
-    } catch (e) {
-      setError(String(e));
-    }
-  };
-
-  const handleRename = async (id: string, name: string) => {
-    try {
-      const updated = await updateAutomation(id, { name });
-      setAutomations((prev) => prev.map((a) => (a.id === id ? updated : a)));
-    } catch (e) {
-      setError(String(e));
-    }
-  };
-
-  const handleToggleEnabled = async (id: string, enabled: boolean) => {
-    try {
-      const updated = await updateAutomation(id, { enabled });
-      setAutomations((prev) => prev.map((a) => (a.id === id ? updated : a)));
-    } catch (e) {
-      setError(String(e));
-    }
-  };
+  const { handleAdd, handleDelete, handleRename, handleToggleEnabled, handleRenameLocal } =
+    useAutomationCrud({ selectedId, setAutomations, setSelectedId, setError });
 
   const handleSave = async () => {
     if (!selected) return;
@@ -254,53 +230,56 @@ export function AutomationsTab() {
     const x = 60 + column * 280;
     const y = 60 + (existing % 4) * 160;
     try {
-      await api.addNodeAt(config, x, y);
+      const reteId = await api.addNodeAt(config, x, y);
       setDirty(true);
+      // Open the inspector on the freshly-added block so it can be configured.
+      selectNode(reteId);
     } catch (err) {
       setError(`add node failed: ${err}`);
     }
   };
 
-  const handleRenameLocal = (id: string, name: string) => {
-    setAutomations((prev) => prev.map((a) => (a.id === id ? { ...a, name } : a)));
-  };
-
-  const handleExport = async () => {
-    if (!selected) return;
-    setError(null);
+  const handleDeleteNode = async (reteId: string) => {
+    const api = editorApiRef.current;
+    if (!api) return;
     try {
-      const data = await exportAutomation(selected.id);
-      const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
-      const url = URL.createObjectURL(blob);
-      const slug = (selected.name || "automation")
-        .toLowerCase()
-        .replace(/[^a-z0-9]+/g, "-")
-        .replace(/(^-|-$)/g, "") || "automation";
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `${slug}.fusebox.json`;
-      a.click();
-      URL.revokeObjectURL(url);
-    } catch (e) {
-      setError(String(e));
+      await api.removeNode(reteId);
+      selectNode(null);
+      setDirty(true);
+    } catch (err) {
+      setError(`delete failed: ${err}`);
     }
   };
 
-  const handleImport = async (file: File) => {
-    setError(null);
-    try {
-      const text = await file.text();
-      const payload = JSON.parse(text);
-      const created = await importAutomation(payload);
+  // Context the inspector's NodeBody uses; delegates upstream lookups +
+  // preview to the live editor api and reads device/hook/variable pools.
+  const inspectorCtx: EditorCtx = {
+    devices: () => devicesRef.current,
+    hooks: () => hooksRef.current,
+    variableNames: () => variableNamesRef.current,
+    listNodes: () => editorApiRef.current?.listNodes() ?? [],
+    findUpstreamKind: (rid) => editorApiRef.current?.findUpstreamKind(rid) ?? null,
+    findUpstreamLogicalId: (rid) => editorApiRef.current?.findUpstreamLogicalId(rid) ?? null,
+    previewExpression: (upstreamId, expression) => {
+      const id = selectedIdRef.current;
+      if (!id) {
+        return Promise.resolve({ ok: false, error: "no automation selected", input_fields: [] });
+      }
+      return previewExpression(id, upstreamId, expression);
+    },
+  };
+
+  const { handleExport, handleImport } = useAutomationFiles({
+    selected,
+    setError,
+    onImported: (created) => {
       setAutomations((prev) => [...prev, created]);
       setSelectedId(created.id);
-    } catch (e) {
-      setError(`import failed: ${e instanceof Error ? e.message : String(e)}`);
-    }
-  };
+    },
+  });
 
   return (
-    <div className="fb-automations">
+    <div className={`fb-automations ${selectedNodeId ? "with-inspector" : ""}`}>
       {loading ? <div className="fb-loading">Loading automations…</div> : null}
       <AutomationsSidebar
         automations={automations}
@@ -326,6 +305,17 @@ export function AutomationsTab() {
         {error ? <div className="fb-error-bar">{error}</div> : null}
         <div className="fb-canvas" ref={editorContainerRef} />
       </main>
+      {selectedNodeId && editorApiRef.current ? (
+        <NodeInspector
+          key={selectedNodeId}
+          nodeId={selectedNodeId}
+          api={editorApiRef.current}
+          ctx={inspectorCtx}
+          onDirty={() => setDirty(true)}
+          onClose={() => selectNode(null)}
+          onDelete={handleDeleteNode}
+        />
+      ) : null}
     </div>
   );
 }

@@ -9,7 +9,7 @@ import type {
   NodeKind,
   ScheduleAction,
 } from "../types";
-import { templateFor, type DataOutputSpec } from "./nodes";
+import { templateFor, iconFor, type DataOutputSpec } from "./nodes";
 import { ExpressionInput } from "./ExpressionInput";
 
 const { RefSocket } = Presets.classic;
@@ -26,7 +26,7 @@ interface PreviewResult {
   input_fields: string[];
 }
 
-interface EditorCtx {
+export interface EditorCtx {
   devices: () => { name: string; nickname: string }[];
   hooks: () => { id: string; name: string }[];
   listNodes?: () => { id: string; kind: string; label: string }[];
@@ -34,6 +34,10 @@ interface EditorCtx {
   findUpstreamLogicalId?: (targetReteId: string) => string | null;
   variableNames?: () => string[];
   previewExpression?: (upstreamId: string | null, expression: string) => Promise<PreviewResult>;
+  /** Open the inspector for this node (by Rete id). */
+  selectNode?: (reteId: string) => void;
+  /** Currently-selected node id, for the highlight. */
+  selectedNodeId?: () => string | null;
   subscribeContext?: (cb: () => void) => () => void;
 }
 
@@ -43,6 +47,7 @@ export function NodeView({ data, emit }: Props) {
   const [ctx, setCtx] = useState<EditorCtx>(EMPTY_CTX);
   const [, force] = useState(0);
   const containerRef = useRef<HTMLDivElement | null>(null);
+  const downRef = useRef<{ x: number; y: number; onPin: boolean } | null>(null);
   const tpl = templateFor(data.config.kind);
   const inputs = Object.entries(data.inputs);
   const outputs = Object.entries(data.outputs);
@@ -63,58 +68,38 @@ export function NodeView({ data, emit }: Props) {
     }
   }, []);
 
-  // Once ctx is found, subscribe to its change notifier so the device/hook
-  // dropdowns repopulate the moment data arrives.
+  // Once ctx is found, subscribe to its change notifier so the summary and
+  // the selected-highlight refresh when devices/hooks/selection change.
   useEffect(() => {
     if (!ctx.subscribeContext) return;
     return ctx.subscribeContext(() => force((n) => n + 1));
   }, [ctx]);
 
-  const update = (next: NodeConfig) => {
-    data.config = next;
-    data.onChange?.();
-    force((n) => n + 1);
+  // Distinguish a click (select → open inspector) from a drag (move the
+  // node). A click on a socket starts a connection, so we ignore those.
+  const onPointerDown = (e: React.PointerEvent) => {
+    const onPin = !!(e.target as HTMLElement).closest(".fb-pin");
+    downRef.current = { x: e.clientX, y: e.clientY, onPin };
   };
-
-  const findEditor = () => {
-    let el: HTMLElement | null = containerRef.current;
-    while (el) {
-      const editor = (el as any).__fuseboxEditor;
-      if (editor) return editor as { removeNode: (id: string) => Promise<void> };
-      el = el.parentElement;
-    }
-    return null;
-  };
-
-  const toggleExpanded = () => {
-    data.expanded = !data.expanded;
-    data.onChange?.();
-    force((n) => n + 1);
-  };
-
-  // Stop pointerdown from bubbling to Rete's drag handler ONLY when it
-  // originates inside an interactive control. Without this, clicks on
-  // inputs/selects/<summary> elements start a node-drag instead of doing
-  // the thing they should do. Letting the event bubble for clicks on plain
-  // node chrome keeps node dragging working.
-  const swallowOnFormControls = (event: React.PointerEvent) => {
-    const target = event.target as HTMLElement;
-    if (target.closest("input, select, textarea, button, summary, [role=button]")) {
-      event.stopPropagation();
-    }
+  const onPointerUp = (e: React.PointerEvent) => {
+    const d = downRef.current;
+    downRef.current = null;
+    if (!d || d.onPin) return;
+    const moved = Math.abs(e.clientX - d.x) + Math.abs(e.clientY - d.y);
+    if (moved < 5) ctx.selectNode?.(data.id);
   };
 
   const summary = summarizeNode(data.config, ctx);
-  const expanded = data.expanded;
+  const selected = ctx.selectedNodeId?.() === data.id;
 
   return (
     <div
       ref={setContainer}
-      className={`fb-node fb-node-${tpl.category} fb-node-${data.config.kind} ${expanded ? "expanded" : "compact"}`}
+      className={`fb-node fb-node-${tpl.category} fb-node-${data.config.kind} compact ${selected ? "selected" : ""}`}
       style={{ width: data.width }}
       data-context-menu="ignore"
-      onPointerDown={swallowOnFormControls}
-      onDoubleClick={(e) => e.stopPropagation()}
+      onPointerDown={onPointerDown}
+      onPointerUp={onPointerUp}
     >
       {/* IN socket: blue chip clinging to the top of the card (Automate style) */}
       <div className="fb-node-pins fb-node-pins-in">
@@ -135,14 +120,7 @@ export function NodeView({ data, emit }: Props) {
         )}
       </div>
 
-      <div
-        className="fb-node-head"
-        onDoubleClick={(e) => {
-          e.stopPropagation();
-          toggleExpanded();
-        }}
-        title="Drag to move · double-click or use chevron to expand"
-      >
+      <div className="fb-node-head" title="Click to edit · drag to move">
         <span className={`fb-node-icon fb-node-icon-${tpl.category}`} aria-hidden="true">
           {iconFor(data.config.kind)}
         </span>
@@ -150,33 +128,7 @@ export function NodeView({ data, emit }: Props) {
           <span className="fb-node-title">{tpl.label}</span>
           <span className="fb-node-summary">{summary}</span>
         </span>
-        <button
-          type="button"
-          className={`fb-node-chevron ${expanded ? "open" : ""}`}
-          aria-expanded={expanded}
-          aria-label={expanded ? "Collapse block" : "Expand block"}
-          onClick={toggleExpanded}
-        >
-          ▾
-        </button>
       </div>
-      {expanded ? (
-        <>
-          <div className="fb-node-body">
-            <NodeBody nodeId={data.id} config={data.config} update={update} ctx={ctx} />
-          </div>
-          <div className="fb-node-actions">
-            <button
-              type="button"
-              className="fb-node-delete"
-              title="Delete this block"
-              onClick={() => void findEditor()?.removeNode(data.id)}
-            >
-              Delete
-            </button>
-          </div>
-        </>
-      ) : null}
 
       {/* Output socket(s): bottom-of-card chip(s). Single OK pin for most
           nodes; If block exposes labelled yes/no branches. */}
@@ -341,44 +293,7 @@ function truncate(s: string, max: number): string {
   return s.length > max ? s.slice(0, max - 1) + "…" : s;
 }
 
-function iconFor(kind: NodeConfig["kind"]): string {
-  switch (kind) {
-    case "immediate_trigger":
-      return "⚡";
-    case "cron_trigger":
-      return "⏰";
-    case "interval_trigger":
-      return "↻";
-    case "device_event_trigger":
-      return "⚡";
-    case "http_request":
-      return "🌐";
-    case "if_condition":
-      return "?";
-    case "logic_and":
-      return "∧";
-    case "logic_or":
-      return "∨";
-    case "logic_not":
-      return "¬";
-    case "debounce":
-      return "⏳";
-    case "expression":
-      return "ƒ";
-    case "set_variable":
-      return "=";
-    case "get_variable":
-      return "x";
-    case "set_device":
-      return "▶";
-    case "toggle_device":
-      return "⇄";
-    case "fire_hook":
-      return "🔔";
-  }
-}
-
-function NodeBody({
+export function NodeBody({
   nodeId,
   config,
   update,
