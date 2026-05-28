@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { AutomationsTab } from "./automations/AutomationsTab";
 import { DevicesTab } from "./devices/DevicesTab";
 import { HooksPanel } from "./hooks/HooksPanel";
@@ -13,8 +13,14 @@ export function App() {
   const [tab, setTab] = useState<TabName>("devices");
   const [theme, setThemeState] = useState<ThemeName>(() => getInitialTheme());
   const [scanning, setScanning] = useState(false);
-  const [scanResult, setScanResult] = useState<DeviceListResponse | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+
+  // DevicesTab installs a sink here; the Scan button pushes results through it
+  // directly instead of mirroring scan state into a prop (no derived state).
+  const scanSinkRef = useRef<(payload: DeviceListResponse) => void>(() => {});
+  const registerScanSink = useCallback((fn: (payload: DeviceListResponse) => void) => {
+    scanSinkRef.current = fn;
+  }, []);
 
   useEffect(() => {
     setTheme(theme);
@@ -30,7 +36,7 @@ export function App() {
     setNotice(null);
     try {
       const payload = await scanDevices();
-      setScanResult(payload);
+      scanSinkRef.current(payload);
       if (payload.scan_error) setNotice(payload.scan_error);
     } catch (err) {
       setNotice(String(err));
@@ -69,7 +75,7 @@ export function App() {
         </div>
       </header>
 
-      <nav className="tab-bar" role="tablist" aria-label="Sections">
+      <div className="tab-bar" role="tablist" aria-label="Sections">
         <button
           type="button"
           role="tab"
@@ -97,11 +103,11 @@ export function App() {
         >
           Automations
         </button>
-      </nav>
+      </div>
 
       {notice ? <p className="notice" role="status">{notice}</p> : null}
 
-      {tab === "devices" ? <DevicesTab scanOverride={scanResult} onClearScanOverride={() => setScanResult(null)} /> : null}
+      {tab === "devices" ? <DevicesTab registerScanSink={registerScanSink} /> : null}
       {tab === "hooks" ? <HooksPanel /> : null}
       {tab === "automations" ? <AutomationsTab /> : null}
     </main>

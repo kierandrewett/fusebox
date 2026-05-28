@@ -7,9 +7,10 @@ use tokio::time::sleep;
 use tracing::{info, warn};
 
 use crate::automations::types::{
-    Automation, AutomationEdge, AutomationNode, AutomationNodeConfig, NodeRuntimeState,
+    Automation, AutomationEdge, AutomationNode, AutomationNodeConfig, IfConditionCfg, IfOp,
+    NodeRuntimeState,
 };
-use crate::conditions::{ConditionConfig, probe_condition_once};
+use crate::conditions::{ConditionConfig, parse_status_match, probe_condition_once, status_matches};
 use crate::hooks::{HookEvent, HookSource, HookTemplateContext, fire_hook};
 use crate::devices::reconcile::{reconcile_device, set_schedule_intent};
 use crate::schedules::parse_cron;
@@ -100,17 +101,21 @@ pub(crate) async fn evaluate_one_automation(
                 .unwrap_or_default()
         };
 
-        // Pull each upstream node's value and, if the edge came from a
-        // "no" socket (the IfCondition branch), invert it so downstream
-        // sees a rising edge when the condition routed to "no".
-        let input_values: Vec<Option<bool>> = incoming
+        // Pull each upstream node's value and source id. If the edge came
+        // from a "no" socket (the IfCondition NO branch), invert the value
+        // so downstream sees a rising edge when the condition routed there.
+        let input_values: Vec<IncomingInput> = incoming
             .get(node_id)
             .map(|sources| {
                 sources
                     .iter()
                     .map(|(src, socket)| {
                         let value = outputs.get(src).copied().unwrap_or(None);
-                        if socket == "no" { value.map(|v| !v) } else { value }
+                        let adjusted = if socket == "no" { value.map(|v| !v) } else { value };
+                        IncomingInput {
+                            source_node: src.clone(),
+                            value: adjusted,
+                        }
                     })
                     .collect()
             })
@@ -146,6 +151,12 @@ pub(crate) async fn evaluate_one_automation(
             transitions.push((node_id.clone(), node.config.clone()));
         }
         merged.last_value = new_output;
+        if let Some(v) = new_output {
+            // Every node exposes "value" (the boolean pulse it propagates).
+            // Node-specific outputs (body, status_code, ...) are written by
+            // the handler itself; we don't touch them here.
+            merged.outputs.insert("value".to_string(), v.to_string());
+        }
         node_state_updates.insert(node_id.clone(), merged);
     }
 
@@ -268,11 +279,19 @@ pub(crate) fn topo_sort_nodes(
     }
 }
 
+/// One edge feeding into the node being evaluated, with its (possibly
+/// branch-inverted) boolean value and the source node id (so IF blocks
+/// can look up the source's recorded body/status).
+pub(crate) struct IncomingInput {
+    pub(crate) source_node: String,
+    pub(crate) value: Option<bool>,
+}
+
 pub(crate) async fn evaluate_node(
     state: &AppState,
     automation_id: &str,
     node: &AutomationNode,
-    inputs: &[Option<bool>],
+    inputs: &[IncomingInput],
     prev: &NodeRuntimeState,
     previous_tick_ms: u128,
     tick_ms: u128,
@@ -345,96 +364,21 @@ pub(crate) async fn evaluate_node(
             };
             (value, next)
         }
-        AutomationNodeConfig::HttpProbe { http_probe } => {
-            let interval_ms = (http_probe.poll_seconds as u128) * 1000;
-            let due = match next.last_checked_at_ms {
-                None => true,
-                Some(last) => tick_ms.saturating_sub(last) >= interval_ms,
-            };
-            if !due {
-                return (prev.last_value, next);
-            }
-
-            let probe = ConditionConfig {
-                id: format!("auto/{automation_id}/node/{}", node.id),
-                name: node.id.clone(),
-                device_name: String::new(),
-                url: http_probe.url.clone(),
-                method: http_probe.method.clone(),
-                headers: http_probe.headers.clone(),
-                body: http_probe.body.clone(),
-                status_match: http_probe.status_match.clone(),
-                body_contains: http_probe.body_contains.clone(),
-                poll_seconds: http_probe.poll_seconds,
-                enabled: true,
-                action_on_pass: None,
-                action_on_fail: None,
-                created_at_ms: 0,
-                last_checked_at_ms: None,
-                last_passing: None,
-                last_status_code: None,
-                last_error: None,
-                last_action_at_ms: None,
-                last_action: None,
-                last_action_error: None,
-                min_stable_seconds: http_probe.min_stable_seconds,
-                pending_value: None,
-                pending_since_ms: None,
-            };
-
-            let outcome = probe_condition_once(&state.http_client, &probe).await;
-            next.last_checked_at_ms = Some(tick_ms);
-            if let Some(error) = outcome.error {
-                next.last_error = Some(error);
-            }
-
-            let new_value = outcome.passing;
-            let stable_ms = (http_probe.min_stable_seconds as u128) * 1000;
-
-            let committed = match prev.last_value {
-                Some(prev_val) if prev_val == new_value => {
-                    next.pending_value = None;
-                    next.pending_since_ms = None;
-                    Some(new_value)
-                }
-                _ if stable_ms == 0 => {
-                    next.pending_value = None;
-                    next.pending_since_ms = None;
-                    Some(new_value)
-                }
-                _ => match prev.pending_value {
-                    Some(pending) if pending == new_value => {
-                        let since = prev.pending_since_ms.unwrap_or(tick_ms);
-                        if tick_ms.saturating_sub(since) >= stable_ms {
-                            next.pending_value = None;
-                            next.pending_since_ms = None;
-                            Some(new_value)
-                        } else {
-                            next.pending_value = Some(new_value);
-                            next.pending_since_ms = Some(since);
-                            prev.last_value
-                        }
-                    }
-                    _ => {
-                        next.pending_value = Some(new_value);
-                        next.pending_since_ms = Some(tick_ms);
-                        prev.last_value
-                    }
-                },
-            };
-
-            (committed, next)
+        AutomationNodeConfig::HttpProbe { http_probe: _ } => {
+            // Legacy variant — converted at load time. If one slips through,
+            // treat as a no-op so we don't panic.
+            (None, next)
         }
         AutomationNodeConfig::HttpRequest { http_request } => {
             // Action variant: only fire a request on the rising edge of an
-            // input pulse. The last_value is whether the response matched.
+            // input pulse. last_value = matched status; last_body and
+            // last_status_code are populated so downstream If blocks can
+            // branch on the response.
             let rising = matches!(
-                (prev.last_value, inputs.iter().any(|v| matches!(v, Some(true)))),
+                (prev.last_value, inputs.iter().any(|i| matches!(i.value, Some(true)))),
                 (None, true) | (Some(false), true)
             );
             if !rising {
-                // Hold the previous value so downstream branches keep seeing
-                // the last result until the next pulse re-evaluates.
                 return (prev.last_value, next);
             }
             if http_request.url.is_empty() {
@@ -451,7 +395,7 @@ pub(crate) async fn evaluate_node(
                 headers: http_request.headers.clone(),
                 body: http_request.body.clone(),
                 status_match: http_request.status_match.clone(),
-                body_contains: http_request.body_contains.clone(),
+                body_contains: None,
                 poll_seconds: 60,
                 enabled: true,
                 action_on_pass: None,
@@ -470,50 +414,62 @@ pub(crate) async fn evaluate_node(
             };
             let outcome = probe_condition_once(&state.http_client, &probe).await;
             next.last_checked_at_ms = Some(tick_ms);
+            next.last_status_code = outcome.status_code;
+            next.last_body = outcome.body.clone();
+            next.outputs.clear();
+            next.outputs
+                .insert("value".to_string(), outcome.passing.to_string());
+            next.outputs
+                .insert("succeeded".to_string(), outcome.passing.to_string());
+            if let Some(body) = outcome.body.as_ref() {
+                next.outputs.insert("body".to_string(), body.clone());
+            }
+            if let Some(code) = outcome.status_code {
+                next.outputs
+                    .insert("status_code".to_string(), code.to_string());
+            }
             if let Some(error) = outcome.error {
                 next.last_error = Some(error);
+            } else {
+                next.last_error = None;
             }
             (Some(outcome.passing), next)
         }
         AutomationNodeConfig::IfCondition { if_condition } => {
-            // Only re-evaluate on the rising edge of an input pulse. The
-            // routing value (true/false) holds afterwards so that
-            // downstream pulses to either branch keep their last route.
+            // Re-evaluate on the rising edge of an input pulse. The route
+            // value holds afterwards so downstream pulses keep their route.
             let rising = matches!(
-                (prev.last_value, inputs.iter().any(|v| matches!(v, Some(true)))),
+                (prev.last_value, inputs.iter().any(|i| matches!(i.value, Some(true)))),
                 (None, true) | (Some(false), true)
             );
             if !rising {
                 return (prev.last_value, next);
             }
-            if if_condition.target_node.is_empty() {
-                return (Some(false), next);
-            }
-            // Look up the target's most recent value: first the current
-            // tick's outputs (if it was evaluated earlier in topo order),
-            // then fall back to its persisted last_value from a prior tick.
-            let target_value: Option<bool> = {
+            // Find the upstream block we should inspect. If there's no IN
+            // connection yet, route to NO.
+            let source_id = match inputs.first() {
+                Some(input) => input.source_node.clone(),
+                None => return (Some(false), next),
+            };
+            let source_state: Option<NodeRuntimeState> = {
                 let automations = state.automations.read().await;
                 automations
                     .get(automation_id)
-                    .and_then(|a| a.status.node_states.get(&if_condition.target_node))
-                    .and_then(|s| s.last_value)
+                    .and_then(|a| a.status.node_states.get(&source_id))
+                    .cloned()
             };
-            (target_value.or(Some(false)), next)
+            let matched = evaluate_if_check(if_condition, source_state.as_ref());
+            (Some(matched), next)
         }
         AutomationNodeConfig::LogicAnd => {
             if inputs.is_empty() {
                 return (Some(false), next);
             }
             let mut all_true = true;
-            for v in inputs {
-                match v {
+            for input in inputs {
+                match input.value {
                     Some(true) => continue,
-                    Some(false) => {
-                        all_true = false;
-                        break;
-                    }
-                    None => {
+                    _ => {
                         all_true = false;
                         break;
                     }
@@ -525,15 +481,15 @@ pub(crate) async fn evaluate_node(
             if inputs.is_empty() {
                 return (Some(false), next);
             }
-            let any_true = inputs.iter().any(|v| matches!(v, Some(true)));
+            let any_true = inputs.iter().any(|i| matches!(i.value, Some(true)));
             (Some(any_true), next)
         }
         AutomationNodeConfig::LogicNot => {
-            let v = inputs.first().copied().flatten();
+            let v = inputs.first().and_then(|i| i.value);
             (v.map(|b| !b), next)
         }
         AutomationNodeConfig::Debounce { debounce } => {
-            let new_value = inputs.first().copied().flatten();
+            let new_value = inputs.first().and_then(|i| i.value);
             let hold_ms = (debounce.hold_seconds as u128) * 1000;
             match (prev.last_value, new_value) {
                 (a, b) if a == b => {
@@ -577,10 +533,67 @@ pub(crate) async fn evaluate_node(
         | AutomationNodeConfig::FireHook { .. } => {
             // Actions just propagate the maximum of their inputs so they
             // can in turn drive other actions if connected.
-            let active = inputs.iter().any(|v| matches!(v, Some(true)));
+            let active = inputs.iter().any(|i| matches!(i.value, Some(true)));
             (Some(active), next)
         }
     }
+}
+
+/// Evaluate an IF block's predicate. Reads `cfg.field` from the source
+/// node's `outputs` map and applies `cfg.op` against `cfg.value`.
+pub(crate) fn evaluate_if_check(
+    cfg: &IfConditionCfg,
+    source: Option<&NodeRuntimeState>,
+) -> bool {
+    let source = match source {
+        Some(s) => s,
+        None => return false,
+    };
+    let field_value = lookup_output(source, &cfg.field);
+    match cfg.op {
+        IfOp::IsTrue => matches!(field_value.as_deref(), Some("true")),
+        IfOp::Equals => match field_value.as_deref() {
+            Some(actual) => actual.trim() == cfg.value.trim(),
+            None => false,
+        },
+        IfOp::Contains => {
+            if cfg.value.is_empty() {
+                return false;
+            }
+            field_value
+                .as_deref()
+                .is_some_and(|actual| actual.contains(&cfg.value))
+        }
+        IfOp::InRange => {
+            let code: u16 = match field_value.as_deref().and_then(|s| s.parse().ok()) {
+                Some(n) => n,
+                None => return false,
+            };
+            status_matches_range(&cfg.value, code).unwrap_or(false)
+        }
+    }
+}
+
+/// Resolve `field` against a node's outputs, with sensible legacy
+/// fall-throughs so old persisted state (which only had `last_body` /
+/// `last_status_code` / `last_value`) keeps working until it gets
+/// re-evaluated and populates `outputs`.
+fn lookup_output(state: &NodeRuntimeState, field: &str) -> Option<String> {
+    if let Some(v) = state.outputs.get(field) {
+        return Some(v.clone());
+    }
+    match field {
+        "value" => state.last_value.map(|b| b.to_string()),
+        "body" => state.last_body.clone(),
+        "status_code" => state.last_status_code.map(|c| c.to_string()),
+        "succeeded" => state.last_value.map(|b| b.to_string()),
+        _ => None,
+    }
+}
+
+fn status_matches_range(spec: &str, code: u16) -> Option<bool> {
+    let ranges = parse_status_match(spec).ok()?;
+    Some(status_matches(&ranges, code))
 }
 
 pub(crate) async fn execute_action(

@@ -254,3 +254,52 @@ pub(crate) fn migrate_to_automations(persisted: &mut PersistedState) {
     persisted.schedules.clear();
     persisted.conditions.clear();
 }
+
+/// Rewrite every legacy `HttpProbe` automation node into the new
+/// `HttpRequest` action variant. Dropped fields: `body_contains`,
+/// `poll_seconds`, `min_stable_seconds` — the new model handles
+/// these via the If block (body) and Interval triggers (polling).
+pub(crate) fn convert_http_probe_nodes(persisted: &mut PersistedState) {
+    for automation in persisted.automations.values_mut() {
+        for node in automation.nodes.iter_mut() {
+            if let crate::automations::types::AutomationNodeConfig::HttpProbe { http_probe } =
+                &node.config
+            {
+                node.config = crate::automations::types::AutomationNodeConfig::HttpRequest {
+                    http_request: crate::automations::types::HttpRequestCfg {
+                        url: http_probe.url.clone(),
+                        method: http_probe.method.clone(),
+                        headers: http_probe.headers.clone(),
+                        body: http_probe.body.clone(),
+                        status_match: http_probe.status_match.clone(),
+                    },
+                };
+            }
+        }
+    }
+}
+
+/// Translate the legacy IF-block `{check, value}` shape into the new
+/// `{field, op, value}` model. The old `check` enum encoded both which
+/// output to read and how to compare; the new model splits those into
+/// separate axes so any field can be paired with any op.
+pub(crate) fn migrate_if_blocks(persisted: &mut PersistedState) {
+    use crate::automations::types::{AutomationNodeConfig, IfOp};
+    for automation in persisted.automations.values_mut() {
+        for node in automation.nodes.iter_mut() {
+            if let AutomationNodeConfig::IfCondition { if_condition } = &mut node.config {
+                if let Some(check) = if_condition.check.take() {
+                    let (field, op) = match check.as_str() {
+                        "body_equals" => ("body", IfOp::Equals),
+                        "body_contains" => ("body", IfOp::Contains),
+                        "status_in" => ("status_code", IfOp::InRange),
+                        // "is_true" or anything unknown → default to value/is_true
+                        _ => ("value", IfOp::IsTrue),
+                    };
+                    if_condition.field = field.to_string();
+                    if_condition.op = op;
+                }
+            }
+        }
+    }
+}

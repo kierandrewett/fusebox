@@ -510,6 +510,7 @@ pub(crate) fn status_matches(ranges: &[std::ops::RangeInclusive<u16>], code: u16
 pub(crate) struct ProbeOutcome {
     pub(crate) passing: bool,
     pub(crate) status_code: Option<u16>,
+    pub(crate) body: Option<String>,
     pub(crate) error: Option<String>,
 }
 
@@ -523,6 +524,7 @@ pub(crate) async fn probe_condition_once(
             return ProbeOutcome {
                 passing: false,
                 status_code: None,
+                body: None,
                 error: Some(format!("invalid HTTP method: {error}")),
             };
         }
@@ -534,6 +536,7 @@ pub(crate) async fn probe_condition_once(
             return ProbeOutcome {
                 passing: false,
                 status_code: None,
+                body: None,
                 error: Some(format!("invalid status_match: {error}")),
             };
         }
@@ -553,6 +556,7 @@ pub(crate) async fn probe_condition_once(
             return ProbeOutcome {
                 passing: false,
                 status_code: None,
+                body: None,
                 error: Some(format!("{error}")),
             };
         }
@@ -561,24 +565,29 @@ pub(crate) async fn probe_condition_once(
     let status = response.status().as_u16();
     let status_ok = status_matches(&ranges, status);
 
-    let body_match = if let Some(needle) = condition.body_contains.as_deref() {
-        match read_response_body(response).await {
-            Ok(body) => body.contains(needle),
-            Err(error) => {
-                return ProbeOutcome {
-                    passing: false,
-                    status_code: Some(status),
-                    error: Some(format!("response read failed: {error}")),
-                };
-            }
+    // Always read the body so callers (the HTTP request action) can
+    // expose it to downstream If blocks. body_contains stays for the
+    // legacy ConditionConfig probe path.
+    let body_text = match read_response_body(response).await {
+        Ok(b) => Some(b),
+        Err(error) => {
+            return ProbeOutcome {
+                passing: false,
+                status_code: Some(status),
+                body: None,
+                error: Some(format!("response read failed: {error}")),
+            };
         }
-    } else {
-        true
+    };
+    let body_match = match condition.body_contains.as_deref() {
+        Some(needle) => body_text.as_deref().is_some_and(|b| b.contains(needle)),
+        None => true,
     };
 
     ProbeOutcome {
         passing: status_ok && body_match,
         status_code: Some(status),
+        body: body_text,
         error: if status_ok && body_match {
             None
         } else if !status_ok {

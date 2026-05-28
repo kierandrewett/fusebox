@@ -19,23 +19,23 @@ pub(crate) enum AutomationNodeConfig {
     DeviceEventTrigger {
         device_event_trigger: DeviceEventTriggerCfg,
     },
-    /// Legacy: polled HTTP probe. Kept so existing automations still
-    /// deserialise; freshly-built graphs use `HttpRequest` instead.
+    /// Legacy: kept so old state.json files still deserialise. Auto-
+    /// converted to HttpRequest at load time; new graphs never write this.
     HttpProbe {
         http_probe: HttpProbeCfg,
     },
     /// Action node: runs a single HTTP request on each input pulse and
-    /// records `last_value = matched`. Use Interval/Cron upstream to
-    /// schedule it.
+    /// records the response (body, status) for downstream If blocks to
+    /// inspect. Use Interval/Cron upstream to schedule it.
     HttpRequest {
         http_request: HttpRequestCfg,
     },
     LogicAnd,
     LogicOr,
     LogicNot,
-    /// Branches based on a target node's last recorded value. Has two
-    /// outputs: `yes` fires when the referenced node's last value was
-    /// `true`, `no` when it was `false` (or has never produced a value).
+    /// Branches on a property of the connected input block. Reads the
+    /// last recorded value/body/status of whatever upstream node is wired
+    /// to IN, applies the configured check, fires YES on match else NO.
     IfCondition {
         if_condition: IfConditionCfg,
     },
@@ -92,8 +92,9 @@ pub(crate) struct HttpProbeCfg {
     pub(crate) min_stable_seconds: u64,
 }
 
-/// On-demand HTTP request used as an action. Same matching rules as the
-/// legacy HttpProbe but no internal polling — runs once per input pulse.
+/// On-demand HTTP request used as an action. Runs once per input pulse;
+/// records body + status_code in its runtime state so downstream If
+/// blocks can branch on them.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct HttpRequestCfg {
     pub(crate) url: String,
@@ -105,16 +106,43 @@ pub(crate) struct HttpRequestCfg {
     pub(crate) body: Option<String>,
     #[serde(default = "default_status_match")]
     pub(crate) status_match: String,
-    #[serde(default)]
-    pub(crate) body_contains: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum IfOp {
+    /// Field's value is the boolean `true`.
+    #[default]
+    IsTrue,
+    /// Field's stringified value equals `value` (trimmed).
+    Equals,
+    /// Field's stringified value contains `value`.
+    Contains,
+    /// Field's value (parsed as integer) is in the range expression `value`
+    /// (e.g. "200-299" or "200,404").
+    InRange,
+}
+
+/// IF block routes a pulse based on a named output of its upstream node.
+/// `field` is the output key (e.g. "value", "body", "status_code"); the
+/// available keys depend on the upstream node kind.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct IfConditionCfg {
-    /// Logical node id whose `last_value` we inspect when an input pulse
-    /// arrives. Empty string = always routes to `no` (unconfigured).
+    #[serde(default = "default_if_field")]
+    pub(crate) field: String,
     #[serde(default)]
-    pub(crate) target_node: String,
+    pub(crate) op: IfOp,
+    #[serde(default)]
+    pub(crate) value: String,
+    /// Legacy field for the old `{check, value}` shape. Read on load,
+    /// translated to `(field, op)` by `migrate_if_blocks`, then dropped on
+    /// the next save (skip_serializing).
+    #[serde(default, skip_serializing)]
+    pub(crate) check: Option<String>,
+}
+
+fn default_if_field() -> String {
+    "value".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -174,6 +202,21 @@ pub(crate) struct NodeRuntimeState {
     pub(crate) last_fired_at_ms: Option<u128>,
     #[serde(default)]
     pub(crate) last_error: Option<String>,
+    /// HTTP request: most recent response body (truncated by the probe
+    /// reader). Empty for non-HTTP nodes. Persisted so an If node can
+    /// branch on it across server restarts.
+    #[serde(default)]
+    pub(crate) last_body: Option<String>,
+    /// HTTP request: most recent status code.
+    #[serde(default)]
+    pub(crate) last_status_code: Option<u16>,
+    /// Named output fields exposed for downstream IF blocks. All values are
+    /// stringified — numbers like "200" are parsed back by ops that need
+    /// them numeric (e.g. InRange). Different node kinds expose different
+    /// keys: most nodes expose "value" (true/false); http_request also
+    /// exposes "body", "status_code", and "succeeded".
+    #[serde(default)]
+    pub(crate) outputs: BTreeMap<String, String>,
     // Internal state for cron/interval/probe/debounce — not exposed in the
     // public view JSON. Reset on server restart.
     #[serde(skip)]

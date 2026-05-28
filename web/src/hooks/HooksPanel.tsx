@@ -1,32 +1,26 @@
-import { useEffect, useState } from "react";
-import { createHook, deleteHook, listHookDetails, testHook, updateHook } from "../api";
+import { useState, useSyncExternalStore } from "react";
+import { createHook, deleteHook, testHook, updateHook } from "../api";
 import type { Hook } from "../types";
 import { HookModal } from "./HookModal";
+import { getErrorSnapshot, getSnapshot, reloadHooks, subscribe } from "./hookStore";
 
 export function HooksPanel() {
-  const [hooks, setHooks] = useState<Hook[]>([]);
+  const hooks = useSyncExternalStore(subscribe, getSnapshot);
+  const storeError = useSyncExternalStore(subscribe, getErrorSnapshot);
   const [editing, setEditing] = useState<Hook | null | undefined>(undefined);
-  const [error, setError] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
 
-  const load = () => {
-    listHookDetails()
-      .then(setHooks)
-      .catch((err) => setError(String(err)));
-  };
-
-  useEffect(() => {
-    load();
-  }, []);
+  const error = actionError ?? storeError;
 
   const save = async (input: Partial<Hook>) => {
-    setError(null);
+    setActionError(null);
     try {
       if (editing?.id) await updateHook(editing.id, input);
       else await createHook(input);
       setEditing(undefined);
-      load();
+      await reloadHooks();
     } catch (err) {
-      setError(String(err));
+      setActionError(String(err));
     }
   };
 
@@ -38,7 +32,9 @@ export function HooksPanel() {
           <button type="button" className="schedule-add" onClick={() => setEditing(null)}>+ Add hook</button>
         </div>
         {error ? <p className="notice" role="alert">{error}</p> : null}
-        {hooks.length === 0 ? (
+        {hooks === undefined ? (
+          <p className="hooks-empty">Loading hooks…</p>
+        ) : hooks.length === 0 ? (
           <p className="hooks-empty">No hooks yet. Hooks fire an HTTP request when any device transitions on/off/online/offline.</p>
         ) : (
           <ul className="hook-list">
@@ -54,13 +50,13 @@ export function HooksPanel() {
                 </div>
                 <div className="hook-actions">
                   <button type="button" title="Edit" onClick={() => setEditing(hook)}>✎</button>
-                  <button type="button" title="Test" onClick={() => void testHook(hook.id).then(load)}>▶</button>
+                  <button type="button" title="Test" onClick={() => void testHook(hook.id).then(() => reloadHooks())}>▶</button>
                   <button
                     type="button"
                     className="hook-delete"
                     title="Delete"
                     onClick={() => {
-                      if (confirm(`Delete hook "${hook.name}"?`)) void deleteHook(hook.id).then(load);
+                      if (confirm(`Delete hook "${hook.name}"?`)) void deleteHook(hook.id).then(() => reloadHooks());
                     }}
                   >
                     ×

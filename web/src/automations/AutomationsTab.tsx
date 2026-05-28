@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import {
   listAutomations,
   createAutomation,
@@ -8,68 +8,121 @@ import {
   listHooks,
 } from "../api";
 import type { Automation, DeviceSummary, HookSummary, NodeConfig } from "../types";
-import { NODE_TEMPLATES } from "./nodes";
 import { createEditor, type CreateEditorResult } from "./createEditor";
+import { AutomationsSidebar } from "./AutomationsSidebar";
+import { AutomationToolbar } from "./AutomationToolbar";
+
+interface Status {
+  loading: boolean;
+  saving: boolean;
+  dirty: boolean;
+  error: string | null;
+}
+
+const INITIAL_STATUS: Status = { loading: true, saving: false, dirty: false, error: null };
+
+function statusReducer(state: Status, patch: Partial<Status>): Status {
+  return { ...state, ...patch };
+}
 
 export function AutomationsTab() {
   const [automations, setAutomations] = useState<Automation[]>([]);
-  const [devices, setDevices] = useState<DeviceSummary[]>([]);
-  const [hooks, setHooks] = useState<HookSummary[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
-  const [dirty, setDirty] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [status, patchStatus] = useReducer(statusReducer, INITIAL_STATUS);
+  const { loading, saving, dirty, error } = status;
+  const setError = useCallback((error: string | null) => patchStatus({ error }), []);
+  const setSaving = useCallback((saving: boolean) => patchStatus({ saving }), []);
+  const setDirty = useCallback((dirty: boolean) => patchStatus({ dirty }), []);
 
-  const editorContainerRef = useRef<HTMLDivElement | null>(null);
-  const editorApiRef = useRef<CreateEditorResult | null>(null);
-  const [editorReady, setEditorReady] = useState(false);
-
+  // These never participate in render — they only feed Rete's NodeViews via
+  // refs, so we hold them as refs (no re-render churn) and notify listeners
+  // explicitly when they change.
   const devicesRef = useRef<DeviceSummary[]>([]);
   const hooksRef = useRef<HookSummary[]>([]);
-  devicesRef.current = devices;
-  hooksRef.current = hooks;
+  const editorContainerRef = useRef<HTMLDivElement | null>(null);
+  const editorApiRef = useRef<CreateEditorResult | null>(null);
+  const editorReadyRef = useRef(false);
+  const pendingLoadRef = useRef<{ id: string | null } | null>(null);
 
   // NodeViews live in their own React roots (Rete renders each node with a
-  // standalone createRoot), so updates to devices/hooks state up here don't
-  // automatically re-render the inline pickers inside each block. Maintain
-  // a Set of node-view listeners and call them whenever the data changes.
+  // standalone createRoot), so updates here don't automatically re-render the
+  // inline pickers inside each block. Listeners are stored on a ref and
+  // invoked whenever the underlying data changes.
   const ctxListenersRef = useRef(new Set<() => void>());
-  useEffect(() => {
+  const notifyCtx = useCallback(() => {
     for (const cb of ctxListenersRef.current) cb();
-  }, [devices, hooks]);
+  }, []);
 
   // Initial load
   useEffect(() => {
+    let cancelled = false;
     (async () => {
       try {
         const [a, d, h] = await Promise.all([listAutomations(), listDevices(), listHooks()]);
+        if (cancelled) return;
         setAutomations(a);
-        setDevices(d);
-        setHooks(h);
+        devicesRef.current = d;
+        hooksRef.current = h;
+        notifyCtx();
         if (a.length > 0) setSelectedId(a[0].id);
       } catch (e) {
-        setError(String(e));
+        if (!cancelled) setError(String(e));
       } finally {
-        setLoading(false);
+        if (!cancelled) patchStatus({ loading: false });
       }
     })();
-  }, []);
+    return () => {
+      cancelled = true;
+    };
+  }, [notifyCtx, setError]);
 
-  // Mount the editor once
+  const selected = useMemo(
+    () => automations.find((a) => a.id === selectedId) ?? null,
+    [automations, selectedId],
+  );
+
+  // Imperative load — kept off the render path so we don't need editorReady
+  // as a state variable that triggers re-renders. Held in a ref so the mount
+  // effect's `.then` callback can always invoke the latest version without
+  // having to depend on it (which would otherwise re-create the editor on
+  // every automations update).
+  const loadIntoEditor = useCallback(
+    async (id: string | null) => {
+      const api = editorApiRef.current;
+      const target = id == null ? null : automations.find((a) => a.id === id) ?? null;
+      if (!api || !editorReadyRef.current) {
+        pendingLoadRef.current = { id };
+        return;
+      }
+      await api.load(target?.nodes ?? [], target?.edges ?? []);
+      setDirty(false);
+    },
+    [automations, setDirty],
+  );
+  const loadIntoEditorRef = useRef(loadIntoEditor);
+  loadIntoEditorRef.current = loadIntoEditor;
+
+  // Mount the editor once.
+  // Refs are captured into locals up-front so the cleanup never touches them
+  // by current-name (silences the "ref value will have changed by cleanup
+  // time" lint while preserving identical semantics).
   useEffect(() => {
     const container = editorContainerRef.current;
     if (!container) return;
+    const apiRef = editorApiRef;
+    const readyRef = editorReadyRef;
+    const pendingRef = pendingLoadRef;
+    const listenersRef = ctxListenersRef;
     let cancelled = false;
     let api: CreateEditorResult | null = null;
 
     createEditor(container, {
       devices: () => devicesRef.current,
       hooks: () => hooksRef.current,
-      listNodes: () => editorApiRef.current?.listNodes() ?? [],
+      listNodes: () => apiRef.current?.listNodes() ?? [],
       subscribeContext: (cb) => {
-        ctxListenersRef.current.add(cb);
-        return () => ctxListenersRef.current.delete(cb);
+        listenersRef.current.add(cb);
+        return () => listenersRef.current.delete(cb);
       },
     })
       .then((created) => {
@@ -78,14 +131,17 @@ export function AutomationsTab() {
           return;
         }
         api = created;
-        editorApiRef.current = created;
+        apiRef.current = created;
+        readyRef.current = true;
         created.onChange(() => {
           setDirty(true);
-          // Nodes added/removed → IF picker in any visible block needs to
-          // refresh its dropdown.
-          for (const cb of ctxListenersRef.current) cb();
+          notifyCtx();
         });
-        setEditorReady(true);
+        const pending = pendingRef.current;
+        if (pending) {
+          pendingRef.current = null;
+          void loadIntoEditorRef.current(pending.id);
+        }
       })
       .catch((err) => {
         setError(`editor failed: ${err}`);
@@ -94,27 +150,14 @@ export function AutomationsTab() {
     return () => {
       cancelled = true;
       api?.destroy();
-      editorApiRef.current = null;
-      setEditorReady(false);
+      apiRef.current = null;
+      readyRef.current = false;
     };
-  }, []);
+  }, [notifyCtx, setError, setDirty]);
 
-  // Load the selected automation into the editor
-  const selected = useMemo(
-    () => automations.find((a) => a.id === selectedId) ?? null,
-    [automations, selectedId],
-  );
   useEffect(() => {
-    const api = editorApiRef.current;
-    if (!api || !editorReady) return;
-    (async () => {
-      // load([], []) clears the canvas; passing the new selection swaps it
-      // in. Either way, the canvas always reflects the current selection
-      // (including "nothing selected" after a delete).
-      await api.load(selected?.nodes ?? [], selected?.edges ?? []);
-      setDirty(false);
-    })();
-  }, [selected?.id, editorReady]);
+    void loadIntoEditor(selectedId);
+  }, [selectedId, loadIntoEditor]);
 
   const handleAdd = async () => {
     setError(null);
@@ -183,11 +226,9 @@ export function AutomationsTab() {
       setError("editor not ready");
       return;
     }
-    // Stagger so successive nodes don't stack: columns by category, rows by count.
     const existing = api.editor.getNodes().length;
     const category = config.kind.startsWith("cron")
       || config.kind.endsWith("_trigger")
-      || config.kind === "http_probe"
       ? 0
       : config.kind.startsWith("logic_") || config.kind === "debounce"
         ? 1
@@ -202,140 +243,35 @@ export function AutomationsTab() {
     }
   };
 
+  const handleRenameLocal = (id: string, name: string) => {
+    setAutomations((prev) => prev.map((a) => (a.id === id ? { ...a, name } : a)));
+  };
+
   return (
     <div className="fb-automations">
       {loading ? <div className="fb-loading">Loading automations…</div> : null}
-      <aside className="fb-sidebar">
-        <div className="fb-sidebar-section">
-          <header className="fb-sidebar-header">
-            <h3>Automations</h3>
-            <button type="button" onClick={handleAdd}>
-              + New
-            </button>
-          </header>
-          <ul className="fb-auto-list">
-            {automations.length === 0 && (
-              <li className="fb-auto-empty">No automations yet.</li>
-            )}
-            {automations.map((a) => (
-              <li
-                key={a.id}
-                className={a.id === selectedId ? "selected" : ""}
-                onClick={() => setSelectedId(a.id)}
-              >
-                <div className="fb-auto-row">
-                  <span className={`fb-status-dot ${a.enabled ? "on" : "off"}`} />
-                  <span className="fb-auto-name">{a.name}</span>
-                  <button
-                    className="fb-icon-btn"
-                    type="button"
-                    title={a.enabled ? "Disable" : "Enable"}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      handleToggleEnabled(a.id, !a.enabled);
-                    }}
-                  >
-                    {a.enabled ? "⏸" : "▶"}
-                  </button>
-                  <button
-                    className="fb-icon-btn"
-                    type="button"
-                    title="Delete"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      handleDelete(a.id);
-                    }}
-                  >
-                    ×
-                  </button>
-                </div>
-                {a.status.last_error ? (
-                  <div className="fb-auto-error">⚠ {a.status.last_error}</div>
-                ) : null}
-              </li>
-            ))}
-          </ul>
-        </div>
-
-        <div className="fb-sidebar-section">
-          <header className="fb-sidebar-header">
-            <h3>Add block</h3>
-          </header>
-          <Palette onAdd={handleAddNode} disabled={!selected} />
-        </div>
-      </aside>
-
+      <AutomationsSidebar
+        automations={automations}
+        selectedId={selectedId}
+        onSelect={setSelectedId}
+        onAdd={handleAdd}
+        onToggleEnabled={handleToggleEnabled}
+        onDelete={handleDelete}
+        onAddNode={handleAddNode}
+        canAddNodes={!!selected}
+      />
       <main className="fb-canvas-wrap">
-        <header className="fb-canvas-toolbar">
-          {selected ? (
-            <>
-              <input
-                className="fb-rename"
-                type="text"
-                value={selected.name}
-                onChange={(e) =>
-                  setAutomations((prev) =>
-                    prev.map((a) => (a.id === selected.id ? { ...a, name: e.target.value } : a)),
-                  )
-                }
-                onBlur={(e) => handleRename(selected.id, e.target.value)}
-              />
-              <div className="fb-toolbar-spacer" />
-              <span className="fb-toolbar-status">
-                {dirty ? "Unsaved changes" : "Saved"}
-              </span>
-              <button
-                type="button"
-                onClick={handleSave}
-                disabled={!dirty || saving}
-                className="fb-save-btn"
-              >
-                {saving ? "Saving…" : "Save"}
-              </button>
-            </>
-          ) : (
-            <span className="fb-canvas-empty">Pick an automation, or click + New.</span>
-          )}
-        </header>
+        <AutomationToolbar
+          selected={selected}
+          dirty={dirty}
+          saving={saving}
+          onLocalRename={handleRenameLocal}
+          onCommitRename={handleRename}
+          onSave={handleSave}
+        />
         {error ? <div className="fb-error-bar">{error}</div> : null}
         <div className="fb-canvas" ref={editorContainerRef} />
       </main>
-    </div>
-  );
-}
-
-function Palette({
-  onAdd,
-  disabled,
-}: {
-  onAdd: (config: NodeConfig) => void;
-  disabled: boolean;
-}) {
-  const categories: Array<{ key: "trigger" | "logic" | "action"; label: string }> = [
-    { key: "trigger", label: "Triggers" },
-    { key: "logic", label: "Logic" },
-    { key: "action", label: "Actions" },
-  ];
-  return (
-    <div className="fb-palette">
-      {categories.map((cat) => (
-        <div key={cat.key} className={`fb-palette-cat fb-palette-${cat.key}`}>
-          <h4>{cat.label}</h4>
-          <div className="fb-palette-items">
-            {NODE_TEMPLATES.filter((t) => t.category === cat.key).map((t) => (
-              <button
-                key={t.kind}
-                type="button"
-                disabled={disabled}
-                onClick={() => onAdd(t.defaultConfig())}
-                title={t.description}
-              >
-                {t.label}
-              </button>
-            ))}
-          </div>
-        </div>
-      ))}
     </div>
   );
 }

@@ -1,18 +1,26 @@
-import { useEffect, useMemo, useRef } from "react";
-import {
-  Chart,
-  LineController,
-  LineElement,
-  PointElement,
-  LinearScale,
-  Tooltip,
-  Legend,
-  Filler,
-  type ChartConfiguration,
-} from "chart.js";
+import { useEffect, useRef } from "react";
+import type { Chart as ChartType, ChartConfiguration } from "chart.js";
 import type { UsageHistoryResponse } from "../types";
 
-Chart.register(LineController, LineElement, PointElement, LinearScale, Tooltip, Legend, Filler);
+// Heavy library — loaded lazily so it doesn't block the initial bundle.
+let chartCtorPromise: Promise<typeof ChartType> | null = null;
+async function loadChart(): Promise<typeof ChartType> {
+  if (!chartCtorPromise) {
+    chartCtorPromise = import("chart.js").then((mod) => {
+      mod.Chart.register(
+        mod.LineController,
+        mod.LineElement,
+        mod.PointElement,
+        mod.LinearScale,
+        mod.Tooltip,
+        mod.Legend,
+        mod.Filler,
+      );
+      return mod.Chart;
+    });
+  }
+  return chartCtorPromise;
+}
 
 export type HistoryRange =
   | "5m" | "30m" | "1h" | "6h" | "12h"
@@ -37,12 +45,9 @@ interface Props {
 
 export function UsageChart({ history, range, onRangeChange }: Props) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
-  const chartRef = useRef<Chart | null>(null);
+  const chartRef = useRef<ChartType | null>(null);
 
-  const hasData = useMemo(
-    () => !!history && history.totals.length > 0,
-    [history],
-  );
+  const hasData = !!history && history.totals.length > 0;
 
   useEffect(() => {
     if (!canvasRef.current) return;
@@ -52,6 +57,7 @@ export function UsageChart({ history, range, onRangeChange }: Props) {
     }
     if (!history || history.totals.length === 0) return;
 
+    let cancelled = false;
     const unit = (history as any).unit ?? "W";
     const config: ChartConfiguration = {
       type: "line",
@@ -122,8 +128,12 @@ export function UsageChart({ history, range, onRangeChange }: Props) {
         },
       },
     };
-    chartRef.current = new Chart(canvasRef.current, config);
+    void loadChart().then((ChartCtor) => {
+      if (cancelled || !canvasRef.current) return;
+      chartRef.current = new ChartCtor(canvasRef.current, config);
+    });
     return () => {
+      cancelled = true;
       chartRef.current?.destroy();
       chartRef.current = null;
     };

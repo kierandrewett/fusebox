@@ -1,13 +1,15 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Presets } from "rete-react-plugin";
 import type { FlowNode } from "./createEditor";
 import type {
   DeviceEvent,
+  IfOp,
   IntervalTriggerConfig,
   NodeConfig,
+  NodeKind,
   ScheduleAction,
 } from "../types";
-import { templateFor } from "./nodes";
+import { templateFor, type DataOutputSpec } from "./nodes";
 
 const { RefSocket } = Presets.classic;
 
@@ -20,46 +22,42 @@ interface EditorCtx {
   devices: () => { name: string; nickname: string }[];
   hooks: () => { id: string; name: string }[];
   listNodes?: () => { id: string; kind: string; label: string }[];
+  findUpstreamKind?: (targetReteId: string) => NodeKind | null;
   subscribeContext?: (cb: () => void) => () => void;
 }
 
+const EMPTY_CTX: EditorCtx = { devices: () => [], hooks: () => [] };
+
 export function NodeView({ data, emit }: Props) {
+  const [ctx, setCtx] = useState<EditorCtx>(EMPTY_CTX);
   const [, force] = useState(0);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const tpl = templateFor(data.config.kind);
   const inputs = Object.entries(data.inputs);
   const outputs = Object.entries(data.outputs);
 
-  const ctx: EditorCtx = (() => {
-    let el: HTMLElement | null = containerRef.current;
-    while (el) {
-      if ((el as any).__fuseboxCtx) return (el as any).__fuseboxCtx as EditorCtx;
-      el = el.parentElement;
-    }
-    return { devices: () => [], hooks: () => [] };
-  })();
-
-  // Each NodeView lives in its own React root (Rete renders nodes via a
-  // standalone createRoot), so state updates in the parent AutomationsTab
-  // don't propagate. Subscribe to the context's change notifier so the
-  // device/hook dropdowns repopulate the moment data arrives.
-  //
-  // Also force-rerender once on mount: containerRef.current is null during
-  // the first render (refs only bind after commit), so the DOM walk above
-  // returns the default empty context. We need a second pass so the
-  // dropdowns can find the real ctx via the now-bound ref.
-  useEffect(() => {
-    force((n) => n + 1);
-    let el: HTMLElement | null = containerRef.current;
-    while (el) {
-      const found = (el as any).__fuseboxCtx as EditorCtx | undefined;
-      if (found?.subscribeContext) {
-        return found.subscribeContext(() => force((n) => n + 1));
+  // Rete renders each node in its own React root, so the parent's React
+  // context can't reach us. We bridge by attaching the editor context to a
+  // DOM ancestor (`__fuseboxCtx`) and walking up to find it the moment the
+  // ref binds.
+  const setContainer = useCallback((el: HTMLDivElement | null) => {
+    containerRef.current = el;
+    if (!el) return;
+    for (let cur: HTMLElement | null = el; cur; cur = cur.parentElement) {
+      const found = (cur as any).__fuseboxCtx as EditorCtx | undefined;
+      if (found) {
+        setCtx(found);
+        return;
       }
-      el = el.parentElement;
     }
-    return undefined;
   }, []);
+
+  // Once ctx is found, subscribe to its change notifier so the device/hook
+  // dropdowns repopulate the moment data arrives.
+  useEffect(() => {
+    if (!ctx.subscribeContext) return;
+    return ctx.subscribeContext(() => force((n) => n + 1));
+  }, [ctx]);
 
   const update = (next: NodeConfig) => {
     data.config = next;
@@ -100,7 +98,7 @@ export function NodeView({ data, emit }: Props) {
 
   return (
     <div
-      ref={containerRef}
+      ref={setContainer}
       className={`fb-node fb-node-${tpl.category} fb-node-${data.config.kind} ${expanded ? "expanded" : "compact"}`}
       style={{ width: data.width }}
       data-context-menu="ignore"
@@ -153,7 +151,9 @@ export function NodeView({ data, emit }: Props) {
       </div>
       {expanded ? (
         <>
-          <div className="fb-node-body">{renderBody(data.config, update, ctx)}</div>
+          <div className="fb-node-body">
+            <NodeBody nodeId={data.id} config={data.config} update={update} ctx={ctx} />
+          </div>
           <div className="fb-node-actions">
             <button
               type="button"
@@ -215,12 +215,6 @@ function summarizeNode(config: NodeConfig, ctx: EditorCtx): string {
       const evt = config.device_event_trigger.event;
       return dev ? `${deviceLabel(dev, ctx)} → ${evt}` : "Pick a device…";
     }
-    case "http_probe": {
-      const url = config.http_probe.url;
-      if (!url) return "Pick a URL…";
-      const short = url.length > 40 ? url.slice(0, 38) + "…" : url;
-      return `${config.http_probe.method} ${short}`;
-    }
     case "http_request": {
       const url = config.http_request.url;
       if (!url) return "Pick a URL…";
@@ -228,10 +222,18 @@ function summarizeNode(config: NodeConfig, ctx: EditorCtx): string {
       return `${config.http_request.method} ${short}`;
     }
     case "if_condition": {
-      const target = config.if_condition.target_node;
-      if (!target) return "Pick a block to check…";
-      const node = ctx.listNodes?.().find((n) => n.id === target);
-      return node ? `If ${node.label}` : "Block not found";
+      const { field, op, value } = config.if_condition;
+      const fieldLabel = field || "value";
+      switch (op) {
+        case "is_true":
+          return `${fieldLabel} is true`;
+        case "equals":
+          return value ? `${fieldLabel} = "${truncate(value, 20)}"` : `${fieldLabel} equals…`;
+        case "contains":
+          return value ? `${fieldLabel} contains "${truncate(value, 18)}"` : `${fieldLabel} contains…`;
+        case "in_range":
+          return value ? `${fieldLabel} in ${value}` : `${fieldLabel} in range…`;
+      }
     }
     case "logic_and":
       return "All inputs true";
@@ -298,7 +300,7 @@ function describeDow(dow: string): string {
     }
   }
   if (set.size === 7) return "";
-  return [...set].sort().map((d) => NAMES[d]).join("·");
+  return Array.from(set).toSorted().map((d) => NAMES[d]).join("·");
 }
 
 function humanDuration(seconds: number): string {
@@ -319,6 +321,10 @@ function deviceLabel(name: string, ctx: EditorCtx): string {
   return d?.nickname || name;
 }
 
+function truncate(s: string, max: number): string {
+  return s.length > max ? s.slice(0, max - 1) + "…" : s;
+}
+
 function iconFor(kind: NodeConfig["kind"]): string {
   switch (kind) {
     case "cron_trigger":
@@ -327,8 +333,6 @@ function iconFor(kind: NodeConfig["kind"]): string {
       return "↻";
     case "device_event_trigger":
       return "⚡";
-    case "http_probe":
-      return "🌐";
     case "http_request":
       return "🌐";
     case "if_condition":
@@ -350,7 +354,17 @@ function iconFor(kind: NodeConfig["kind"]): string {
   }
 }
 
-function renderBody(config: NodeConfig, update: (c: NodeConfig) => void, ctx: EditorCtx) {
+function NodeBody({
+  nodeId,
+  config,
+  update,
+  ctx,
+}: {
+  nodeId: string;
+  config: NodeConfig;
+  update: (c: NodeConfig) => void;
+  ctx: EditorCtx;
+}) {
   switch (config.kind) {
     case "cron_trigger":
       return <CronBody config={config.cron_trigger} onChange={(cron_trigger) => update({ kind: "cron_trigger", cron_trigger })} />;
@@ -393,8 +407,6 @@ function renderBody(config: NodeConfig, update: (c: NodeConfig) => void, ctx: Ed
           </Field>
         </>
       );
-    case "http_probe":
-      return <HttpProbeBody config={config.http_probe} onChange={(http_probe) => update({ kind: "http_probe", http_probe })} />;
     case "http_request":
       return (
         <HttpRequestBody
@@ -405,6 +417,7 @@ function renderBody(config: NodeConfig, update: (c: NodeConfig) => void, ctx: Ed
     case "if_condition":
       return (
         <IfConditionBody
+          nodeId={nodeId}
           config={config.if_condition}
           ctx={ctx}
           onChange={(if_condition) => update({ kind: "if_condition", if_condition })}
@@ -474,7 +487,7 @@ function renderBody(config: NodeConfig, update: (c: NodeConfig) => void, ctx: Ed
               value={config.fire_hook.hook_id}
               onChange={(e) => update({ ...config, fire_hook: { hook_id: e.target.value } })}
             >
-              <option value="">— select hook —</option>
+              <option value="">(select a hook)</option>
               {hooks.map((h) => (
                 <option key={h.id} value={h.id}>
                   {h.name}
@@ -528,6 +541,7 @@ function CronBody({ config, onChange }: { config: { cron: string }; onChange: (c
           <Field label="Cron expression">
             <input
               type="text"
+              aria-label="Cron expression"
               value={config.cron}
               onChange={(e) => onChange({ cron: e.target.value })}
               placeholder="0 8 * * 1-5"
@@ -569,6 +583,7 @@ function SimpleCronBody({ value, onChange }: { value: SimpleCron; onChange: (v: 
       <Field label="Time">
         <input
           type="time"
+          aria-label="Time of day"
           value={timeValue}
           onChange={(e) => {
             const [h, m] = e.target.value.split(":");
@@ -651,7 +666,7 @@ function parseDowField(dow: string): number[] | null {
       return null;
     }
   }
-  return [...set].sort();
+  return Array.from(set).toSorted();
 }
 
 function buildSimpleCron({ hour, minute, days }: SimpleCron): string {
@@ -660,7 +675,7 @@ function buildSimpleCron({ hour, minute, days }: SimpleCron): string {
 }
 
 function formatDowField(days: number[]): string {
-  const sorted = [...new Set(days)].sort((a, b) => a - b);
+  const sorted = Array.from(new Set(days)).toSorted((a, b) => a - b);
   if (sorted.length === 7) return "*";
   if (sorted.length === 0) return "*";
   // Collapse contiguous runs into ranges (e.g., 1,2,3,4,5 → 1-5).
@@ -738,96 +753,7 @@ function IntervalBody({
   );
 }
 
-// ---------- HTTP probe ----------
-
-interface HttpProbeBodyConfig {
-  url: string;
-  method: string;
-  headers: Record<string, string>;
-  body?: string | null;
-  status_match: string;
-  body_contains?: string | null;
-  poll_seconds: number;
-  min_stable_seconds: number;
-}
-
-function HttpProbeBody({
-  config,
-  onChange,
-}: {
-  config: HttpProbeBodyConfig;
-  onChange: (cfg: HttpProbeBodyConfig) => void;
-}) {
-  const [advancedOpen, setAdvancedOpen] = useState(false);
-  return (
-    <>
-      <div className="fb-row">
-        <Field label="Method">
-          <select
-            value={config.method}
-            onChange={(e) => onChange({ ...config, method: e.target.value })}
-          >
-            <option>GET</option>
-            <option>POST</option>
-            <option>HEAD</option>
-            <option>PUT</option>
-          </select>
-        </Field>
-        <Field label="Status match">
-          <input
-            type="text"
-            value={config.status_match}
-            onChange={(e) => onChange({ ...config, status_match: e.target.value })}
-            placeholder="200-299"
-            spellCheck={false}
-          />
-        </Field>
-      </div>
-      <Field label="URL">
-        <input
-          type="text"
-          value={config.url}
-          onChange={(e) => onChange({ ...config, url: e.target.value })}
-          placeholder="https://example.com/status"
-          spellCheck={false}
-        />
-      </Field>
-      <details
-        className="fb-collapse"
-        open={advancedOpen}
-        onToggle={(e) => setAdvancedOpen((e.target as HTMLDetailsElement).open)}
-      >
-        <summary>Advanced</summary>
-        <Field label="Headers (one per line, Key: value)">
-          <textarea
-            rows={2}
-            value={headersToText(config.headers)}
-            onChange={(e) => onChange({ ...config, headers: textToHeaders(e.target.value) })}
-            placeholder="Authorization: Bearer …"
-            spellCheck={false}
-          />
-        </Field>
-        <Field label="Request body (optional)">
-          <textarea
-            rows={2}
-            value={config.body ?? ""}
-            onChange={(e) => onChange({ ...config, body: e.target.value || null })}
-            spellCheck={false}
-          />
-        </Field>
-        <Field label="Body must contain (optional)">
-          <input
-            type="text"
-            value={config.body_contains ?? ""}
-            onChange={(e) => onChange({ ...config, body_contains: e.target.value || null })}
-            spellCheck={false}
-          />
-        </Field>
-      </details>
-    </>
-  );
-}
-// ---------- HTTP request (action variant: same fields as probe, no poll) ----------
+// ---------- HTTP request (action — runs on input pulse, records body+status) ----------
 
 interface HttpRequestBodyConfig {
   url: string;
@@ -835,7 +761,6 @@ interface HttpRequestBodyConfig {
   headers: Record<string, string>;
   body?: string | null;
   status_match: string;
-  body_contains?: string | null;
 }
 
 function HttpRequestBody({
@@ -851,6 +776,7 @@ function HttpRequestBody({
       <div className="fb-row">
         <Field label="Method">
           <select
+            aria-label="HTTP method"
             value={config.method}
             onChange={(e) => onChange({ ...config, method: e.target.value })}
           >
@@ -863,6 +789,7 @@ function HttpRequestBody({
         <Field label="Status match">
           <input
             type="text"
+            aria-label="Status match"
             value={config.status_match}
             onChange={(e) => onChange({ ...config, status_match: e.target.value })}
             placeholder="200-299"
@@ -873,6 +800,7 @@ function HttpRequestBody({
       <Field label="URL">
         <input
           type="text"
+          aria-label="Request URL"
           value={config.url}
           onChange={(e) => onChange({ ...config, url: e.target.value })}
           placeholder="https://example.com/webhook"
@@ -887,6 +815,7 @@ function HttpRequestBody({
         <summary>Advanced</summary>
         <Field label="Headers (one per line, Key: value)">
           <textarea
+            aria-label="Request headers"
             rows={2}
             value={headersToText(config.headers)}
             onChange={(e) => onChange({ ...config, headers: textToHeaders(e.target.value) })}
@@ -896,63 +825,100 @@ function HttpRequestBody({
         </Field>
         <Field label="Request body (optional)">
           <textarea
+            aria-label="Request body"
             rows={2}
             value={config.body ?? ""}
             onChange={(e) => onChange({ ...config, body: e.target.value || null })}
             spellCheck={false}
           />
         </Field>
-        <Field label="Body must contain (optional)">
-          <input
-            type="text"
-            value={config.body_contains ?? ""}
-            onChange={(e) => onChange({ ...config, body_contains: e.target.value || null })}
-            spellCheck={false}
-          />
-        </Field>
       </details>
       <p className="fb-node-hint">
         Sends one request each time the input pulse arrives. The OK socket
-        emits true if the response matched.
+        emits true if the response matched. Wire into an If block to branch
+        on the body or status.
       </p>
     </>
   );
 }
 
-// ---------- If: route based on another block's last value ----------
+// ---------- If: route on a named output of the upstream block ----------
+
+const DEFAULT_OUTPUT: DataOutputSpec = { key: "value", label: "Value (true/false)" };
 
 function IfConditionBody({
+  nodeId,
   config,
   ctx,
   onChange,
 }: {
-  config: { target_node: string };
+  nodeId: string;
+  config: { field: string; op: IfOp; value: string };
   ctx: EditorCtx;
-  onChange: (cfg: { target_node: string }) => void;
+  onChange: (cfg: { field: string; op: IfOp; value: string }) => void;
 }) {
-  const nodes = ctx.listNodes?.() ?? [];
+  const upstreamKind = ctx.findUpstreamKind?.(nodeId) ?? null;
+  const upstreamLabel = upstreamKind ? templateFor(upstreamKind).label : null;
+  const availableOutputs: DataOutputSpec[] = upstreamKind
+    ? templateFor(upstreamKind).dataOutputs
+    : [DEFAULT_OUTPUT];
+
+  // If the wired block doesn't expose the currently-selected field anymore
+  // (e.g. user rewired to a different kind), surface it in the dropdown so
+  // the user can see what's saved without silently losing it.
+  const hasField = availableOutputs.some((o) => o.key === config.field);
+  const fieldOptions: DataOutputSpec[] = hasField
+    ? availableOutputs
+    : [...availableOutputs, { key: config.field, label: `${config.field} (missing)` }];
+
+  const showValue = config.op !== "is_true";
+  const placeholder =
+    config.op === "equals" ? "yes"
+    : config.op === "contains" ? "ok"
+    : config.op === "in_range" ? "200-299"
+    : "";
+
   return (
     <>
-      <Field label="Check the result of">
-        {nodes.length === 0 ? (
-          <p className="fb-node-hint">Add another block first to reference it.</p>
-        ) : (
-          <select
-            value={config.target_node}
-            onChange={(e) => onChange({ target_node: e.target.value })}
-          >
-            <option value="">— pick a block —</option>
-            {nodes.map((n) => (
-              <option key={n.id} value={n.id}>
-                {n.label}
-              </option>
-            ))}
-          </select>
-        )}
+      <Field label="Read field">
+        <select
+          aria-label="Field to read"
+          value={config.field}
+          onChange={(e) => onChange({ ...config, field: e.target.value })}
+        >
+          {fieldOptions.map((o) => (
+            <option key={o.key} value={o.key}>{o.label}</option>
+          ))}
+        </select>
       </Field>
+      <Field label="Compare">
+        <select
+          aria-label="Comparison"
+          value={config.op}
+          onChange={(e) => onChange({ ...config, op: e.target.value as IfOp })}
+        >
+          <option value="is_true">is true</option>
+          <option value="equals">equals</option>
+          <option value="contains">contains</option>
+          <option value="in_range">in range</option>
+        </select>
+      </Field>
+      {showValue ? (
+        <Field label={config.op === "in_range" ? "Range (e.g. 200-299, 404)" : "Value"}>
+          <input
+            type="text"
+            aria-label={config.op === "in_range" ? "Range" : "Comparison value"}
+            value={config.value}
+            onChange={(e) => onChange({ ...config, value: e.target.value })}
+            placeholder={placeholder}
+            spellCheck={false}
+          />
+        </Field>
+      ) : null}
       <p className="fb-node-hint">
-        On each input pulse, the YES output fires if the chosen block's last
-        result was true; otherwise NO fires.
+        {upstreamLabel
+          ? `Reading "${config.field}" from ${upstreamLabel}. YES fires on match, NO otherwise.`
+          : "Connect a block to IN. Its outputs will populate the field dropdown."}
       </p>
     </>
   );
@@ -964,15 +930,17 @@ function headersToText(headers: Record<string, string>): string {
     .join("\n");
 }
 
+const HEADER_LINE_PATTERN = /^([^:]+):(.*)$/;
+
 function textToHeaders(text: string): Record<string, string> {
   const result: Record<string, string> = {};
   for (const line of text.split(/\r?\n/)) {
     const trimmed = line.trim();
     if (!trimmed) continue;
-    const idx = trimmed.indexOf(":");
-    if (idx <= 0) continue;
-    const key = trimmed.slice(0, idx).trim();
-    const value = trimmed.slice(idx + 1).trim();
+    const match = HEADER_LINE_PATTERN.exec(trimmed);
+    if (!match) continue;
+    const key = match[1].trim();
+    const value = match[2].trim();
     if (key) result[key] = value;
   }
   return result;
@@ -1032,7 +1000,6 @@ function ModeTabs<T extends string>({
           type="button"
           role="tab"
           className="fb-mode-tab"
-          aria-pressed={value === opt.value}
           aria-selected={value === opt.value}
           onClick={() => onChange(opt.value)}
         >
@@ -1061,7 +1028,7 @@ function DevicePicker({
   }
   return (
     <select value={value} onChange={(e) => onChange(e.target.value)}>
-      <option value="">— select device —</option>
+      <option value="">(select a device)</option>
       {devices.map((d) => (
         <option key={d.name} value={d.name}>
           {d.nickname || d.name}
@@ -1079,6 +1046,7 @@ function SecondsInput({ value, onChange }: { value: number; onChange: (v: number
     <div className="fb-duration">
       <input
         type="number"
+        aria-label="Duration value"
         min={0}
         value={count}
         onChange={(e) => {
@@ -1087,6 +1055,7 @@ function SecondsInput({ value, onChange }: { value: number; onChange: (v: number
         }}
       />
       <select
+        aria-label="Duration unit"
         value={unit}
         onChange={(e) => {
           const next = e.target.value as Unit;

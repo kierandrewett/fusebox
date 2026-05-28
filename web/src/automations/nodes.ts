@@ -6,6 +6,12 @@ export interface SocketSpec {
   variant?: "default" | "yes" | "no";
 }
 
+/** A named data field that a node exposes for downstream IF blocks. */
+export interface DataOutputSpec {
+  key: string;
+  label: string;
+}
+
 export interface NodeTemplate {
   kind: NodeKind;
   label: string;
@@ -16,12 +22,17 @@ export interface NodeTemplate {
   /** Output sockets. Empty for terminal actions. Most nodes have a single
    *  "OK" output. IfCondition has two — yes/no. */
   outputs: SocketSpec[];
+  /** Data outputs the IF block can branch on. Every node exposes "value"
+   *  (the boolean pulse); http_request additionally exposes the response
+   *  body, status_code, and succeeded flag. */
+  dataOutputs: DataOutputSpec[];
   /** Hide from the palette but still render in the editor for legacy data. */
   hidden?: boolean;
 }
 
 const SINGLE_OK: SocketSpec[] = [{ key: "out", label: "OK", variant: "default" }];
 const NO_OUTPUT: SocketSpec[] = [];
+const DEFAULT_DATA_OUTPUTS: DataOutputSpec[] = [{ key: "value", label: "Value (true/false)" }];
 
 export const NODE_TEMPLATES: NodeTemplate[] = [
   {
@@ -31,6 +42,7 @@ export const NODE_TEMPLATES: NodeTemplate[] = [
     description: "Emits a pulse on a cron schedule (5-field).",
     hasInput: false,
     outputs: SINGLE_OK,
+    dataOutputs: DEFAULT_DATA_OUTPUTS,
     defaultConfig: () => ({ kind: "cron_trigger", cron_trigger: { cron: "0 8 * * *" } }),
   },
   {
@@ -40,6 +52,7 @@ export const NODE_TEMPLATES: NodeTemplate[] = [
     description: "Alternates on/off pulses at a fixed cadence.",
     hasInput: false,
     outputs: SINGLE_OK,
+    dataOutputs: DEFAULT_DATA_OUTPUTS,
     defaultConfig: () => ({
       kind: "interval_trigger",
       interval_trigger: {
@@ -57,6 +70,7 @@ export const NODE_TEMPLATES: NodeTemplate[] = [
     description: "Fires when a device goes on/off/online/offline.",
     hasInput: false,
     outputs: SINGLE_OK,
+    dataOutputs: DEFAULT_DATA_OUTPUTS,
     defaultConfig: () => ({
       kind: "device_event_trigger",
       device_event_trigger: { device_name: "", event: "on" },
@@ -67,9 +81,15 @@ export const NODE_TEMPLATES: NodeTemplate[] = [
     label: "HTTP request",
     category: "action",
     description:
-      "Sends an HTTP request when triggered, then records whether the response matched.",
+      "Sends an HTTP request when triggered, then records the response. Pair with an If block to branch on body or status.",
     hasInput: true,
     outputs: SINGLE_OK,
+    dataOutputs: [
+      { key: "value", label: "Matched (true/false)" },
+      { key: "body", label: "Response body" },
+      { key: "status_code", label: "Status code" },
+      { key: "succeeded", label: "Succeeded (true/false)" },
+    ],
     defaultConfig: () => ({
       kind: "http_request",
       http_request: {
@@ -78,29 +98,6 @@ export const NODE_TEMPLATES: NodeTemplate[] = [
         headers: {},
         body: null,
         status_match: "200-299",
-        body_contains: null,
-      },
-    }),
-  },
-  {
-    kind: "http_probe",
-    label: "HTTP probe (legacy)",
-    category: "trigger",
-    description: "Legacy auto-polling probe. Use HTTP request + Interval instead.",
-    hasInput: false,
-    outputs: SINGLE_OK,
-    hidden: true,
-    defaultConfig: () => ({
-      kind: "http_probe",
-      http_probe: {
-        url: "",
-        method: "GET",
-        headers: {},
-        body: null,
-        status_match: "200-299",
-        body_contains: null,
-        poll_seconds: 60,
-        min_stable_seconds: 0,
       },
     }),
   },
@@ -109,15 +106,16 @@ export const NODE_TEMPLATES: NodeTemplate[] = [
     label: "If",
     category: "logic",
     description:
-      "Routes the input pulse to YES or NO based on another block's last result.",
+      "Routes the input pulse to YES or NO based on a named output of the upstream block.",
     hasInput: true,
     outputs: [
       { key: "yes", label: "YES", variant: "yes" },
       { key: "no", label: "NO", variant: "no" },
     ],
+    dataOutputs: DEFAULT_DATA_OUTPUTS,
     defaultConfig: () => ({
       kind: "if_condition",
-      if_condition: { target_node: "" },
+      if_condition: { field: "value", op: "is_true", value: "" },
     }),
   },
   {
@@ -127,6 +125,7 @@ export const NODE_TEMPLATES: NodeTemplate[] = [
     description: "Outputs true when all connected inputs are true.",
     hasInput: true,
     outputs: SINGLE_OK,
+    dataOutputs: DEFAULT_DATA_OUTPUTS,
     defaultConfig: () => ({ kind: "logic_and" }),
   },
   {
@@ -136,6 +135,7 @@ export const NODE_TEMPLATES: NodeTemplate[] = [
     description: "Outputs true when any connected input is true.",
     hasInput: true,
     outputs: SINGLE_OK,
+    dataOutputs: DEFAULT_DATA_OUTPUTS,
     defaultConfig: () => ({ kind: "logic_or" }),
   },
   {
@@ -145,6 +145,7 @@ export const NODE_TEMPLATES: NodeTemplate[] = [
     description: "Inverts the connected input.",
     hasInput: true,
     outputs: SINGLE_OK,
+    dataOutputs: DEFAULT_DATA_OUTPUTS,
     defaultConfig: () => ({ kind: "logic_not" }),
   },
   {
@@ -154,6 +155,7 @@ export const NODE_TEMPLATES: NodeTemplate[] = [
     description: "Holds an input value steady for N seconds before passing it on.",
     hasInput: true,
     outputs: SINGLE_OK,
+    dataOutputs: DEFAULT_DATA_OUTPUTS,
     defaultConfig: () => ({ kind: "debounce", debounce: { hold_seconds: 30 } }),
   },
   {
@@ -163,6 +165,7 @@ export const NODE_TEMPLATES: NodeTemplate[] = [
     description: "Sets a device on/off/toggle when the input fires.",
     hasInput: true,
     outputs: NO_OUTPUT,
+    dataOutputs: DEFAULT_DATA_OUTPUTS,
     defaultConfig: () => ({
       kind: "set_device",
       set_device: { device_name: "", action: "on" },
@@ -175,6 +178,7 @@ export const NODE_TEMPLATES: NodeTemplate[] = [
     description: "Toggles a device every time the input fires.",
     hasInput: true,
     outputs: NO_OUTPUT,
+    dataOutputs: DEFAULT_DATA_OUTPUTS,
     defaultConfig: () => ({
       kind: "toggle_device",
       toggle_device: { device_name: "" },
@@ -187,6 +191,7 @@ export const NODE_TEMPLATES: NodeTemplate[] = [
     description: "Triggers a named hook when the input fires.",
     hasInput: true,
     outputs: NO_OUTPUT,
+    dataOutputs: DEFAULT_DATA_OUTPUTS,
     defaultConfig: () => ({
       kind: "fire_hook",
       fire_hook: { hook_id: "" },

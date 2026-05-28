@@ -2,7 +2,6 @@ export type NodeKind =
   | "cron_trigger"
   | "interval_trigger"
   | "device_event_trigger"
-  | "http_probe"
   | "http_request"
   | "if_condition"
   | "logic_and"
@@ -46,11 +45,15 @@ export interface HttpRequestConfig {
   headers: Record<string, string>;
   body?: string | null;
   status_match: string;
-  body_contains?: string | null;
 }
 
+export type IfOp = "is_true" | "equals" | "contains" | "in_range";
+
 export interface IfConditionConfig {
-  target_node: string;
+  /** Name of the upstream node's output to inspect (e.g. "value", "body"). */
+  field: string;
+  op: IfOp;
+  value: string;
 }
 export interface DebounceConfig {
   hold_seconds: number;
@@ -70,7 +73,6 @@ export type NodeConfig =
   | { kind: "cron_trigger"; cron_trigger: CronTriggerConfig }
   | { kind: "interval_trigger"; interval_trigger: IntervalTriggerConfig }
   | { kind: "device_event_trigger"; device_event_trigger: DeviceEventTriggerConfig }
-  | { kind: "http_probe"; http_probe: HttpProbeConfig }
   | { kind: "http_request"; http_request: HttpRequestConfig }
   | { kind: "if_condition"; if_condition: IfConditionConfig }
   | { kind: "logic_and" }

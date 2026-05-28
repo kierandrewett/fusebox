@@ -283,6 +283,14 @@ pub(crate) async fn load_persisted_state(state: &AppState) -> Result<()> {
         ));
     }
 
+    // Convert any legacy HttpProbe nodes into HttpRequest. body_contains
+    // and the polling fields are dropped — the new If block does the
+    // matching and downstream Interval triggers do the polling.
+    crate::migration::convert_http_probe_nodes(&mut persisted);
+    // Translate the old IF-block {check, value} shape to the new
+    // {field, op, value} model.
+    crate::migration::migrate_if_blocks(&mut persisted);
+
     let loaded_count = persisted.devices.len();
     let loaded_schedule_count = persisted.schedules.len();
     let loaded_condition_count = persisted.conditions.len();
