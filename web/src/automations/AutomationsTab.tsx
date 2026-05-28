@@ -1,14 +1,16 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
-import { listAutomations, updateAutomation, previewExpression, listDevices, listHooks } from "../api";
+import { listAutomations, updateAutomation, listDevices, listHooks } from "../api";
 import type { Automation, DeviceSummary, HookSummary } from "../types";
 import { createEditor, type CreateEditorResult } from "./createEditor";
 import { AutomationsSidebar } from "./AutomationsSidebar";
 import { AutomationToolbar } from "./AutomationToolbar";
 import { NodeInspector } from "./NodeInspector";
+import { CanvasContextMenu } from "./CanvasContextMenu";
 import { useAutomationFiles } from "./useAutomationFiles";
 import { useAutomationCrud } from "./useAutomationCrud";
 import { useNodeOps } from "./useNodeOps";
 import { useInspectorCtx } from "./useInspectorCtx";
+import { useEditorCtx } from "./useEditorCtx";
 
 interface Status {
   loading: boolean;
@@ -29,6 +31,7 @@ export function AutomationsTab() {
   // Rete id of the block whose settings are open in the inspector.
   // Selected canvas blocks (Rete ids). One → inspector opens; many → bulk ops.
   const [selectedNodeIds, setSelectedNodeIds] = useState<string[]>([]);
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; onNode: boolean } | null>(null);
   const [status, patchStatus] = useReducer(statusReducer, INITIAL_STATUS);
   const { loading, saving, dirty, error } = status;
   const setError = useCallback((error: string | null) => patchStatus({ error }), []);
@@ -89,6 +92,20 @@ export function AutomationsTab() {
       )
       .then(() => setDirty(true));
   }, [selectNodes, setDirty]);
+
+  const editorCtx = useEditorCtx({
+    devicesRef,
+    hooksRef,
+    variableNamesRef,
+    selectedIdRef,
+    selectedNodeIdsRef,
+    editorApiRef,
+    ctxListenersRef,
+    selectNode,
+    selectNodes,
+    deleteSelected: deleteSelectedNodes,
+    onContextMenu: setContextMenu,
+  });
 
   // Initial load
   useEffect(() => {
@@ -159,31 +176,10 @@ export function AutomationsTab() {
     const apiRef = editorApiRef;
     const readyRef = editorReadyRef;
     const pendingRef = pendingLoadRef;
-    const listenersRef = ctxListenersRef;
     let cancelled = false;
     let api: CreateEditorResult | null = null;
 
-    createEditor(container, {
-      devices: () => devicesRef.current,
-      hooks: () => hooksRef.current,
-      variableNames: () => variableNamesRef.current,
-      previewExpression: (upstreamId, expression) => {
-        const id = selectedIdRef.current;
-        if (!id) {
-          return Promise.resolve({ ok: false, error: "no automation selected", input_fields: [] });
-        }
-        return previewExpression(id, upstreamId, expression);
-      },
-      listNodes: () => apiRef.current?.listNodes() ?? [],
-      selectNode: (reteId) => selectNode(reteId),
-      selectNodes: (ids) => selectNodes(ids),
-      isSelected: (reteId) => selectedNodeIdsRef.current.includes(reteId),
-      deleteSelected: () => deleteSelectedNodes(),
-      subscribeContext: (cb) => {
-        listenersRef.current.add(cb);
-        return () => listenersRef.current.delete(cb);
-      },
-    })
+    createEditor(container, editorCtx)
       .then((created) => {
         if (cancelled) {
           created.destroy();
@@ -212,7 +208,7 @@ export function AutomationsTab() {
       apiRef.current = null;
       readyRef.current = false;
     };
-  }, [notifyCtx, setError, setDirty, selectNode, selectNodes, deleteSelectedNodes]);
+  }, [editorCtx, notifyCtx, setError, setDirty]);
 
   useEffect(() => {
     void loadIntoEditor(selectedId);
@@ -313,6 +309,16 @@ export function AutomationsTab() {
           onDirty={() => setDirty(true)}
           onClose={() => selectNode(null)}
           onDelete={handleDeleteNode}
+        />
+      ) : null}
+      {contextMenu && editorApiRef.current ? (
+        <CanvasContextMenu
+          x={contextMenu.x}
+          y={contextMenu.y}
+          onNode={contextMenu.onNode}
+          api={editorApiRef.current}
+          onDelete={deleteSelectedNodes}
+          onClose={() => setContextMenu(null)}
         />
       ) : null}
     </div>

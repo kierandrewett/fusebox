@@ -67,6 +67,12 @@ export interface CreateEditorResult {
   listNodes: () => { id: string; kind: NodeConfig["kind"]; label: string }[];
   findUpstreamKind: (targetReteId: string) => NodeConfig["kind"] | null;
   findUpstreamLogicalId: (targetReteId: string) => string | null;
+  /** Copy the current selection to the clipboard. */
+  copySelection: () => void;
+  /** Paste the clipboard (offset + selected). */
+  paste: () => Promise<void>;
+  /** Select every node. */
+  selectAll: () => void;
   onChange: (cb: () => void) => () => void;
 }
 
@@ -97,6 +103,8 @@ export interface EditorContext {
   isSelected?: (reteId: string) => boolean;
   /** Delete all currently-selected nodes (Delete key). */
   deleteSelected?: () => void;
+  /** Right-click: open the canvas context menu at the given screen point. */
+  onContextMenu?: (at: { x: number; y: number; onNode: boolean }) => void;
   /** Subscribe to changes in devices/hooks. Returns an unsubscribe. */
   subscribeContext: (cb: () => void) => () => void;
 }
@@ -229,16 +237,41 @@ export async function createEditor(
   };
   container.addEventListener("pointerdown", onBandDown);
 
-  // Delete / Backspace removes the selected node(s). Scoped to this editor's
-  // lifetime (the listener is torn down with the automation tab) and ignores
-  // keystrokes while typing in a field.
+  // Keyboard shortcuts, scoped to this editor's lifetime (torn down with the
+  // automation tab) and ignored while typing in a field.
   const onKeyDown = (e: KeyboardEvent) => {
-    if (e.key !== "Delete" && e.key !== "Backspace") return;
     const t = e.target as HTMLElement | null;
     if (t && t.closest("input, textarea, select, [contenteditable='true']")) return;
-    ctx.deleteSelected?.();
+    const meta = e.ctrlKey || e.metaKey;
+    const key = e.key.toLowerCase();
+    if (e.key === "Delete" || e.key === "Backspace") {
+      ctx.deleteSelected?.();
+    } else if (meta && key === "c") {
+      copySelection();
+    } else if (meta && key === "v") {
+      void paste();
+    } else if (meta && key === "a") {
+      e.preventDefault();
+      selectAll();
+    }
   };
   window.addEventListener("keydown", onKeyDown);
+
+  // Right-click opens a context menu. If it lands on a node that isn't part
+  // of the current selection, select just that node first.
+  const nodeIdFromElement = (el: HTMLElement): string | null => {
+    for (const [id, view] of area.nodeViews) {
+      if (view.element && view.element.contains(el)) return id;
+    }
+    return null;
+  };
+  const onContextMenu = (e: MouseEvent) => {
+    e.preventDefault();
+    const nodeId = nodeIdFromElement(e.target as HTMLElement);
+    if (nodeId && !ctx.isSelected?.(nodeId)) ctx.selectNode?.(nodeId);
+    ctx.onContextMenu?.({ x: e.clientX, y: e.clientY, onNode: !!nodeId });
+  };
+  container.addEventListener("contextmenu", onContextMenu);
 
   const listeners = new Set<() => void>();
   const notify = () => listeners.forEach((l) => l());
@@ -255,12 +288,34 @@ export async function createEditor(
     return ctx;
   });
 
+  // Track the node currently grabbed by the pointer so we can move the whole
+  // selection together when one of several selected nodes is dragged. (Clicks
+  // are turned into single-selection by NodeView's own pointerup handler, so
+  // we deliberately don't select on nodepicked — that would collapse a
+  // multi-selection the moment you start dragging it.)
+  let draggedNodeId: string | null = null;
   area.addPipe((context) => {
-    if (context.type === "nodedragged") notify();
-    // Clicking (or starting to drag) a node "picks" it — open the inspector.
-    if ((context.type as string) === "nodepicked") {
-      const id = (context as any).data?.id;
-      if (id) ctx.selectNode?.(id);
+    const type = (context as any).type as string;
+    if (type === "nodedragged") notify();
+    if (type === "nodepicked") {
+      draggedNodeId = (context as any).data?.id ?? null;
+    } else if (type === "pointerup") {
+      draggedNodeId = null;
+    } else if (type === "nodetranslated") {
+      const { id, position, previous } = (context as any).data;
+      if (id === draggedNodeId && ctx.isSelected?.(id)) {
+        const dx = position.x - previous.x;
+        const dy = position.y - previous.y;
+        if (dx !== 0 || dy !== 0) {
+          for (const n of editor.getNodes()) {
+            if (n.id === id || !ctx.isSelected?.(n.id)) continue;
+            const view = area.nodeViews.get(n.id);
+            if (view) {
+              void area.translate(n.id, { x: view.position.x + dx, y: view.position.y + dy });
+            }
+          }
+        }
+      }
     }
     return context;
   });
@@ -296,16 +351,87 @@ export async function createEditor(
     return node.id;
   };
 
+  const selectedReteIds = (): string[] =>
+    editor.getNodes().reduce<string[]>((acc, n) => {
+      if (ctx.isSelected?.(n.id)) acc.push(n.id);
+      return acc;
+    }, []);
+
+  // Copy/paste clipboard: configs + positions of the selected nodes, plus the
+  // edges wholly within the selection (referenced by index).
+  type Clipboard = {
+    nodes: { config: NodeConfig; x: number; y: number }[];
+    edges: { from: number; to: number; fromSocket: string; toSocket: string }[];
+  };
+  let clipboard: Clipboard | null = null;
+  const PASTE_OFFSET = 40;
+
+  const copySelection = () => {
+    const ids = selectedReteIds();
+    if (ids.length === 0) return;
+    const indexOf = new Map(ids.map((id, i) => [id, i] as const));
+    const nodes = ids.map((id) => {
+      const flow = editor.getNode(id) as unknown as FlowNode;
+      const pos = area.nodeViews.get(id)?.position ?? { x: 0, y: 0 };
+      return { config: structuredClone(flow.config), x: pos.x, y: pos.y };
+    });
+    const edges = editor.getConnections().reduce<Clipboard["edges"]>((acc, c: any) => {
+      if (indexOf.has(c.source) && indexOf.has(c.target)) {
+        acc.push({
+          from: indexOf.get(c.source)!,
+          to: indexOf.get(c.target)!,
+          fromSocket: c.sourceOutput ?? "out",
+          toSocket: c.targetInput ?? "in",
+        });
+      }
+      return acc;
+    }, []);
+    clipboard = { nodes, edges };
+  };
+
+  const paste = async () => {
+    if (!clipboard || clipboard.nodes.length === 0) return;
+    const snapshot = clipboard;
+    const newIds = await Promise.all(
+      snapshot.nodes.map((n) =>
+        placeNode(structuredClone(n.config), n.x + PASTE_OFFSET, n.y + PASTE_OFFSET),
+      ),
+    );
+    await Promise.all(
+      snapshot.edges.map((e) => {
+        const source = editor.getNode(newIds[e.from]);
+        const target = editor.getNode(newIds[e.to]);
+        if (!source || !target) return Promise.resolve();
+        return editor.addConnection(
+          new ClassicPreset.Connection(source, e.fromSocket, target, e.toSocket) as FlowConnection,
+        );
+      }),
+    );
+    // Cascade subsequent pastes so they don't stack on the same spot.
+    clipboard = {
+      nodes: snapshot.nodes.map((n) => ({ ...n, x: n.x + PASTE_OFFSET, y: n.y + PASTE_OFFSET })),
+      edges: snapshot.edges,
+    };
+    ctx.selectNodes?.(newIds);
+    notify();
+  };
+
+  const selectAll = () => ctx.selectNodes?.(editor.getNodes().map((n) => n.id));
+
   const result: CreateEditorResult = {
     editor,
     area,
     findUpstreamKind,
     findUpstreamLogicalId,
+    copySelection,
+    paste,
+    selectAll,
     destroy: () => {
       window.removeEventListener("keydown", onKeyDown);
       window.removeEventListener("pointermove", onBandMove);
       container.removeEventListener("pointerdown", preventAutoscroll);
       container.removeEventListener("pointerdown", onBandDown);
+      container.removeEventListener("contextmenu", onContextMenu);
       band?.el.remove();
       area.destroy();
     },
