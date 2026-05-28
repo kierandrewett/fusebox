@@ -2107,9 +2107,12 @@
   opacity: 0;
 }
 .fb-pin-label { position: relative; z-index: 1; pointer-events: none; }
-.fb-node-trigger { border-top: 3px solid var(--amber); }
-.fb-node-logic   { border-top: 3px solid #a371f7; }
-.fb-node-action  { border-top: 3px solid var(--green); }
+/* Category accent as an inset top stripe on the (rounded) header, so it
+   follows the corner radius instead of a square 3px border-top that pokes
+   past the card's rounded corners. */
+.fb-node-trigger .fb-node-head { box-shadow: inset 0 3px 0 var(--amber), inset 0 0 0 1px rgba(66, 43, 20, 0.24); }
+.fb-node-logic   .fb-node-head { box-shadow: inset 0 3px 0 #a371f7, inset 0 0 0 1px rgba(66, 43, 20, 0.24); }
+.fb-node-action  .fb-node-head { box-shadow: inset 0 3px 0 var(--green), inset 0 0 0 1px rgba(66, 43, 20, 0.24); }
 
 /* Header — brass label card on top of the breaker body. Drag from anywhere
    on it; double-click toggles expand. The chevron on the right is a
@@ -2119,6 +2122,9 @@
   align-items: center;
   gap: 12px;
   width: 100%;
+  /* Match the card's 12px radius (minus the 1px border) so the header's
+     corners nest inside the rounded card instead of poking out square. */
+  border-radius: 11px;
   padding: 10px 8px 10px 12px;
   background: linear-gradient(var(--label-start), var(--label-end));
   color: var(--ink);
