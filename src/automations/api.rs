@@ -413,6 +413,7 @@ pub(crate) fn validate_node_config(config: &AutomationNodeConfig) -> Result<()> 
         | AutomationNodeConfig::FireHook { .. }
         | AutomationNodeConfig::GetVariable { .. }
         | AutomationNodeConfig::Between { .. }
+        | AutomationNodeConfig::VariableChanged { .. }
         | AutomationNodeConfig::ImmediateTrigger => {
             // Picker may be empty while the user is still wiring things up.
         }

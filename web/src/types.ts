@@ -4,6 +4,7 @@ export type NodeKind =
   | "interval_trigger"
   | "device_event_trigger"
   | "between"
+  | "variable_changed"
   | "http_request"
   | "if_condition"
   | "logic_and"
@@ -94,6 +95,9 @@ export interface SetVariableConfig {
 export interface GetVariableConfig {
   key: string;
 }
+export interface VariableChangedConfig {
+  key: string;
+}
 export interface ExpressionConfig {
   expression: string;
 }
@@ -114,6 +118,7 @@ export type NodeConfig =
   | { kind: "interval_trigger"; interval_trigger: IntervalTriggerConfig }
   | { kind: "device_event_trigger"; device_event_trigger: DeviceEventTriggerConfig }
   | { kind: "between"; between: BetweenConfig }
+  | { kind: "variable_changed"; variable_changed: VariableChangedConfig }
   | { kind: "http_request"; http_request: HttpRequestConfig }
   | { kind: "if_condition"; if_condition: IfConditionConfig }
   | { kind: "logic_and" }

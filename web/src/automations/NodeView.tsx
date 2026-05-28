@@ -187,6 +187,10 @@ function summarizeNode(config: NodeConfig, ctx: EditorCtx): string {
       const base = `${first.start} – ${first.end}`;
       return wins.length > 1 ? `${base} +${wins.length - 1}` : base;
     }
+    case "variable_changed":
+      return config.variable_changed.key
+        ? `When $${config.variable_changed.key} changes`
+        : "Name a variable…";
     case "device_event_trigger": {
       const dev = config.device_event_trigger.device_name;
       const evt = config.device_event_trigger.event;
@@ -462,6 +466,25 @@ export function NodeBody({
           </Field>
           <p className="fb-node-hint">
             Exposes the stored value as "value". Wire into an If block to branch on it.
+          </p>
+        </>
+      );
+    case "variable_changed":
+      return (
+        <>
+          <Field label="Variable name">
+            <input
+              type="text"
+              aria-label="Variable name"
+              value={config.variable_changed.key}
+              onChange={(e) => update({ ...config, variable_changed: { key: e.target.value } })}
+              placeholder="counter"
+              spellCheck={false}
+            />
+          </Field>
+          <p className="fb-node-hint">
+            Fires once each time this variable changes. The new value is on
+            "value" — wire into an If to branch on it.
           </p>
         </>
       );

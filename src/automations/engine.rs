@@ -178,6 +178,7 @@ pub(crate) async fn evaluate_one_automation(
                 | AutomationNodeConfig::SetVariable { .. }
                 | AutomationNodeConfig::GetVariable { .. }
                 | AutomationNodeConfig::Expression { .. }
+                | AutomationNodeConfig::VariableChanged { .. }
         );
         let rising = matches!(
             (prev_state.last_value, new_output),
@@ -542,6 +543,26 @@ pub(crate) async fn evaluate_node(
                 }
             };
             (Some(in_any), next)
+        }
+        AutomationNodeConfig::VariableChanged { variable_changed } => {
+            // Pulse when the variable's value differs from what we last saw.
+            // last_body holds the previously-observed value; the first
+            // observation just records it (so an existing value isn't an
+            // "update").
+            let current = variables
+                .get(&variable_changed.key)
+                .map(expr::to_text)
+                .unwrap_or_default();
+            let changed = match prev.last_body.as_deref() {
+                Some(seen) => seen != current,
+                // First observation: fire only if the variable already has a
+                // value (it just appeared); an unset variable isn't an update.
+                None => !current.is_empty(),
+            };
+            next.last_body = Some(current.clone());
+            next.outputs.clear();
+            next.outputs.insert("value".to_string(), current);
+            (Some(changed), next)
         }
         AutomationNodeConfig::DeviceEventTrigger {
             device_event_trigger,

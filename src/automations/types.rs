@@ -29,6 +29,11 @@ pub(crate) enum AutomationNodeConfig {
     Between {
         between: BetweenCfg,
     },
+    /// Fires a pulse whenever the named variable's value changes. Exposes the
+    /// new value as `value` for downstream blocks.
+    VariableChanged {
+        variable_changed: VariableChangedCfg,
+    },
     /// Legacy: kept so old state.json files still deserialise. Auto-
     /// converted to HttpRequest at load time; new graphs never write this.
     HttpProbe {
@@ -226,6 +231,11 @@ pub(crate) struct SetVariableCfg {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct GetVariableCfg {
+    pub(crate) key: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct VariableChangedCfg {
     pub(crate) key: String,
 }
 
