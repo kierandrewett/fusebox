@@ -1602,6 +1602,7 @@
     0 2px 0 #553619;
 }
 .fb-sidebar-header button:hover { filter: brightness(1.08); }
+.fb-sidebar-actions { display: flex; gap: 6px; }
 
 .fb-auto-list {
   list-style: none;
@@ -1799,6 +1800,21 @@
 }
 .fb-save-btn:hover:not(:disabled) { filter: brightness(1.08); }
 .fb-save-btn:disabled { opacity: 0.5; cursor: not-allowed; box-shadow: none; }
+.fb-toolbar-btn {
+  padding: 6px 12px;
+  margin-right: 8px;
+  border: 1px solid rgba(0, 0, 0, 0.4);
+  border-radius: 8px;
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.06);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+.fb-toolbar-btn:hover { background: rgba(255, 255, 255, 0.12); }
 .fb-canvas-empty { color: var(--muted); font-style: italic; }
 .fb-error-bar {
   background: rgba(222, 94, 75, 0.22);

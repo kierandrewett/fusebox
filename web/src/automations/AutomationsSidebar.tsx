@@ -1,4 +1,4 @@
-import { type ReactElement } from "react";
+import { useRef, type ReactElement } from "react";
 import type { Automation, NodeConfig } from "../types";
 import { NODE_TEMPLATES } from "./nodes";
 
@@ -7,6 +7,7 @@ interface Props {
   selectedId: string | null;
   onSelect: (id: string) => void;
   onAdd: () => void;
+  onImport: (file: File) => void;
   onToggleEnabled: (id: string, enabled: boolean) => void;
   onDelete: (id: string) => void;
   onAddNode: (config: NodeConfig) => void;
@@ -18,19 +19,42 @@ export function AutomationsSidebar({
   selectedId,
   onSelect,
   onAdd,
+  onImport,
   onToggleEnabled,
   onDelete,
   onAddNode,
   canAddNodes,
 }: Props) {
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
   return (
     <aside className="fb-sidebar">
       <div className="fb-sidebar-section">
         <header className="fb-sidebar-header">
           <h3>Automations</h3>
-          <button type="button" onClick={onAdd}>
-            + New
-          </button>
+          <div className="fb-sidebar-actions">
+            <button
+              type="button"
+              title="Import an automation from a JSON file"
+              onClick={() => fileInputRef.current?.click()}
+            >
+              Import
+            </button>
+            <button type="button" onClick={onAdd}>
+              + New
+            </button>
+          </div>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="application/json,.json"
+            aria-label="Import automation file"
+            hidden
+            onChange={(e) => {
+              const file = e.target.files?.[0];
+              if (file) onImport(file);
+              e.target.value = "";
+            }}
+          />
         </header>
         <ul className="fb-auto-list">
           {automations.length === 0 && (

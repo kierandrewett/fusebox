@@ -20,7 +20,8 @@ use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
 use crate::automations::api::{
-    create_automation, delete_automation, list_automations, update_automation,
+    create_automation, delete_automation, export_automation, import_automation, list_automations,
+    update_automation,
 };
 use crate::automations::engine::run_automation_engine;
 use crate::conditions::{
@@ -98,6 +99,8 @@ async fn main() -> Result<()> {
             "/api/automations",
             get(list_automations).post(create_automation),
         )
+        .route("/api/automations/import", post(import_automation))
+        .route("/api/automations/{id}/export", get(export_automation))
         .route(
             "/api/automations/{id}",
             delete(delete_automation).patch(update_automation),

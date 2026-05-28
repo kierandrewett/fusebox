@@ -327,3 +327,31 @@ pub(crate) struct UpdateAutomationRequest {
 pub(crate) struct AutomationListResponse {
     pub(crate) automations: Vec<Automation>,
 }
+
+pub(crate) fn export_kind() -> String {
+    "fusebox.automation".to_string()
+}
+pub(crate) fn export_version() -> u32 {
+    1
+}
+
+/// Portable, self-contained representation of an automation for
+/// export/import. Deliberately excludes the id and runtime status, which
+/// are environment-specific. Variables travel along so seeded values survive
+/// a round-trip.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct AutomationExport {
+    #[serde(default = "export_kind")]
+    pub(crate) kind: String,
+    #[serde(default = "export_version")]
+    pub(crate) version: u32,
+    pub(crate) name: String,
+    #[serde(default = "default_true")]
+    pub(crate) enabled: bool,
+    #[serde(default)]
+    pub(crate) nodes: Vec<AutomationNode>,
+    #[serde(default)]
+    pub(crate) edges: Vec<AutomationEdge>,
+    #[serde(default)]
+    pub(crate) variables: BTreeMap<String, serde_json::Value>,
+}

@@ -9,8 +9,9 @@ use tracing::warn;
 
 use crate::api_error::AppError;
 use crate::automations::types::{
-    Automation, AutomationEdge, AutomationListResponse, AutomationNode, AutomationNodeConfig,
-    AutomationStatus, CreateAutomationRequest, UpdateAutomationRequest,
+    Automation, AutomationEdge, AutomationExport, AutomationListResponse, AutomationNode,
+    AutomationNodeConfig, AutomationStatus, CreateAutomationRequest, UpdateAutomationRequest,
+    export_kind, export_version,
 };
 use crate::conditions::{clamp_poll_seconds, parse_status_match, validate_http_method, validate_url};
 use crate::schedules::{MIN_INTERVAL_CYCLE_SECONDS, parse_cron};
@@ -132,6 +133,73 @@ pub(crate) async fn delete_automation(
         warn!(%error, "failed to persist automation deletion");
     }
     Ok(StatusCode::NO_CONTENT)
+}
+
+pub(crate) async fn export_automation(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<AutomationExport>, AppError> {
+    let automations = state.automations.read().await;
+    let automation = automations
+        .get(&id)
+        .ok_or_else(|| AppError(anyhow!("unknown automation '{}'", id)))?;
+    Ok(Json(AutomationExport {
+        kind: export_kind(),
+        version: export_version(),
+        name: automation.name.clone(),
+        enabled: automation.enabled,
+        nodes: automation.nodes.clone(),
+        edges: automation.edges.clone(),
+        variables: automation.variables.clone(),
+    }))
+}
+
+pub(crate) async fn import_automation(
+    State(state): State<AppState>,
+    Json(payload): Json<AutomationExport>,
+) -> Result<(StatusCode, Json<Automation>), AppError> {
+    if payload.kind != export_kind() {
+        return Err(AppError(anyhow!(
+            "not a Fusebox automation export (kind '{}')",
+            payload.kind
+        )));
+    }
+    if payload.version > export_version() {
+        return Err(AppError(anyhow!(
+            "export is version {} but this server only understands up to {}",
+            payload.version,
+            export_version()
+        )));
+    }
+    validate_automation_graph(&payload.nodes, &payload.edges)?;
+
+    let name = {
+        let trimmed = payload.name.trim();
+        if trimmed.is_empty() {
+            "Imported automation".to_string()
+        } else {
+            trimmed.to_string()
+        }
+    };
+    let id = new_automation_id();
+    let automation = Automation {
+        id: id.clone(),
+        name,
+        enabled: payload.enabled,
+        nodes: payload.nodes,
+        edges: payload.edges,
+        created_at_ms: now_ms(),
+        status: AutomationStatus::default(),
+        variables: payload.variables,
+    };
+    {
+        let mut automations = state.automations.write().await;
+        automations.insert(id, automation.clone());
+    }
+    if let Err(error) = save_persisted_state(&state).await {
+        warn!(%error, "failed to persist imported automation");
+    }
+    Ok((StatusCode::CREATED, Json(automation)))
 }
 
 pub(crate) fn validate_automation_graph(

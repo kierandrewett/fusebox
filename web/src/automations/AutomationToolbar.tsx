@@ -7,6 +7,7 @@ interface Props {
   onLocalRename: (id: string, name: string) => void;
   onCommitRename: (id: string, name: string) => void;
   onSave: () => void;
+  onExport: () => void;
 }
 
 export function AutomationToolbar({
@@ -16,6 +17,7 @@ export function AutomationToolbar({
   onLocalRename,
   onCommitRename,
   onSave,
+  onExport,
 }: Props) {
   return (
     <header className="fb-canvas-toolbar">
@@ -33,6 +35,14 @@ export function AutomationToolbar({
           <span className="fb-toolbar-status">
             {dirty ? "Unsaved changes" : "Saved"}
           </span>
+          <button
+            type="button"
+            onClick={onExport}
+            className="fb-toolbar-btn"
+            title="Download this automation as a JSON file"
+          >
+            Export
+          </button>
           <button
             type="button"
             onClick={onSave}

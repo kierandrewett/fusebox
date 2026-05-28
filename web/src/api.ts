@@ -37,6 +37,30 @@ export async function deleteAutomation(id: string): Promise<void> {
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
 }
 
+export interface AutomationExport {
+  kind: string;
+  version: number;
+  name: string;
+  enabled: boolean;
+  nodes: Automation["nodes"];
+  edges: Automation["edges"];
+  variables: Record<string, unknown>;
+}
+
+export async function exportAutomation(id: string): Promise<AutomationExport> {
+  const res = await fetch(`${BASE}/api/automations/${id}/export`);
+  return jsonOrThrow<AutomationExport>(res);
+}
+
+export async function importAutomation(payload: unknown): Promise<Automation> {
+  const res = await fetch(`${BASE}/api/automations/import`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  return jsonOrThrow<Automation>(res);
+}
+
 export async function listDeviceResponse(): Promise<DeviceListResponse> {
   const res = await fetch(`${BASE}/api/devices`);
   return jsonOrThrow<DeviceListResponse>(res);
