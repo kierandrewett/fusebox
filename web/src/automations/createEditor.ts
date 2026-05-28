@@ -76,8 +76,16 @@ export interface EditorContext {
    *  Returns null when nothing is connected. Used by the IF block to
    *  populate its field dropdown with the upstream's data outputs. */
   findUpstreamKind?: (targetReteId: string) => NodeConfig["kind"] | null;
+  /** Logical id of the node wired to `targetReteId`'s IN socket, for
+   *  resolving live outputs when previewing an expression. */
+  findUpstreamLogicalId?: (targetReteId: string) => string | null;
   /** Names of the current automation's variables (for $-autocomplete). */
   variableNames?: () => string[];
+  /** Evaluate an expression against the automation's live state for preview. */
+  previewExpression?: (
+    upstreamId: string | null,
+    expression: string,
+  ) => Promise<{ ok: boolean; result_text?: string; error?: string; input_fields: string[] }>;
   /** Subscribe to changes in devices/hooks. Returns an unsubscribe. */
   subscribeContext: (cb: () => void) => () => void;
 }
@@ -247,18 +255,25 @@ export async function createEditor(
   // Resolve "what kind is wired to this node's IN socket" using direct
   // access to the editor's connections. The IF block uses this to populate
   // its field dropdown with the upstream's data outputs.
-  const findUpstreamKind = (targetReteId: string): NodeConfig["kind"] | null => {
-    const conn = editor.getConnections().find(
+  const upstreamConnection = (targetReteId: string) =>
+    editor.getConnections().find(
       (c: any) => c.target === targetReteId && (c.targetInput ?? "in") === "in",
     );
+  const findUpstreamKind = (targetReteId: string): NodeConfig["kind"] | null => {
+    const conn = upstreamConnection(targetReteId);
     if (!conn) return null;
     const source = editor.getNode(conn.source);
     if (!source) return null;
     return (source as unknown as FlowNode).config.kind;
   };
+  const findUpstreamLogicalId = (targetReteId: string): string | null => {
+    const conn = upstreamConnection(targetReteId);
+    if (!conn) return null;
+    return reverseLookup(idMap, conn.source) ?? conn.source;
+  };
 
   // Make context accessible to nodes for device/hook pickers
-  const enrichedCtx: EditorContext = { ...ctx, findUpstreamKind };
+  const enrichedCtx: EditorContext = { ...ctx, findUpstreamKind, findUpstreamLogicalId };
   (container as any).__fuseboxCtx = enrichedCtx;
   (container as any).__fuseboxEditor = result;
 

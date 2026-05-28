@@ -2346,6 +2346,32 @@
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 10px;
 }
+.fb-expr-preview { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
+.fb-expr-preview-btn { align-self: flex-start; }
+.fb-expr-preview-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.fb-expr-preview-result {
+  margin: 0;
+  padding: 8px;
+  max-height: 180px;
+  overflow: auto;
+  background: rgba(0, 0, 0, 0.3);
+  border: 1px solid rgba(98, 214, 209, 0.35);
+  border-radius: 6px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--text);
+}
+.fb-expr-preview-error {
+  padding: 6px 8px;
+  background: rgba(240, 107, 92, 0.12);
+  border: 1px solid rgba(240, 107, 92, 0.4);
+  border-radius: 6px;
+  font-size: 10px;
+  color: var(--red, #f06b5c);
+}
 
 /* Rete connection lines: brass accent */
 .fb-canvas svg path[data-type="connection"],

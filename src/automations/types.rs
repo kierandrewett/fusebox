@@ -328,6 +328,31 @@ pub(crate) struct AutomationListResponse {
     pub(crate) automations: Vec<Automation>,
 }
 
+/// Request to evaluate an expression against an automation's live state, for
+/// the editor's preview feature. `upstream_id` is the logical id of the node
+/// wired to IN, whose recorded outputs become the `input` dictionary.
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct PreviewRequest {
+    #[serde(default)]
+    pub(crate) upstream_id: Option<String>,
+    #[serde(default)]
+    pub(crate) expression: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct PreviewResponse {
+    pub(crate) ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) result: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) result_text: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) error: Option<String>,
+    /// Field keys present on `input` right now (what the upstream produced).
+    #[serde(default)]
+    pub(crate) input_fields: Vec<String>,
+}
+
 pub(crate) fn export_kind() -> String {
     "fusebox.automation".to_string()
 }

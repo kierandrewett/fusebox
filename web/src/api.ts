@@ -61,6 +61,27 @@ export async function importAutomation(payload: unknown): Promise<Automation> {
   return jsonOrThrow<Automation>(res);
 }
 
+export interface PreviewResponse {
+  ok: boolean;
+  result?: unknown;
+  result_text?: string;
+  error?: string;
+  input_fields: string[];
+}
+
+export async function previewExpression(
+  automationId: string,
+  upstreamId: string | null,
+  expression: string,
+): Promise<PreviewResponse> {
+  const res = await fetch(`${BASE}/api/automations/${automationId}/preview`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ upstream_id: upstreamId, expression }),
+  });
+  return jsonOrThrow<PreviewResponse>(res);
+}
+
 export async function listDeviceResponse(): Promise<DeviceListResponse> {
   const res = await fetch(`${BASE}/api/devices`);
   return jsonOrThrow<DeviceListResponse>(res);

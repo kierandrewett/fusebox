@@ -8,10 +8,11 @@ use axum::http::StatusCode;
 use tracing::warn;
 
 use crate::api_error::AppError;
+use crate::automations::expr::{self, EvalContext};
 use crate::automations::types::{
     Automation, AutomationEdge, AutomationExport, AutomationListResponse, AutomationNode,
-    AutomationNodeConfig, AutomationStatus, CreateAutomationRequest, UpdateAutomationRequest,
-    export_kind, export_version,
+    AutomationNodeConfig, AutomationStatus, CreateAutomationRequest, PreviewRequest,
+    PreviewResponse, UpdateAutomationRequest, export_kind, export_version,
 };
 use crate::conditions::{clamp_poll_seconds, parse_status_match, validate_http_method, validate_url};
 use crate::schedules::{MIN_INTERVAL_CYCLE_SECONDS, parse_cron};
@@ -200,6 +201,72 @@ pub(crate) async fn import_automation(
         warn!(%error, "failed to persist imported automation");
     }
     Ok((StatusCode::CREATED, Json(automation)))
+}
+
+pub(crate) async fn preview_expression(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<PreviewRequest>,
+) -> Result<Json<PreviewResponse>, AppError> {
+    if req.expression.trim().is_empty() {
+        return Ok(Json(PreviewResponse {
+            ok: false,
+            result: None,
+            result_text: None,
+            error: Some("enter an expression to preview".to_string()),
+            input_fields: Vec::new(),
+        }));
+    }
+
+    let (variables, input, input_fields) = {
+        let automations = state.automations.read().await;
+        let automation = automations
+            .get(&id)
+            .ok_or_else(|| AppError(anyhow!("unknown automation '{}'", id)))?;
+        let variables = automation.variables.clone();
+        let outputs = req
+            .upstream_id
+            .as_ref()
+            .and_then(|uid| automation.status.node_states.get(uid))
+            .map(|s| s.outputs.clone())
+            .unwrap_or_default();
+        let fields: Vec<String> = outputs.keys().cloned().collect();
+        let map: serde_json::Map<String, serde_json::Value> = outputs
+            .into_iter()
+            .map(|(k, v)| (k, serde_json::Value::String(v)))
+            .collect();
+        (variables, serde_json::Value::Object(map), fields)
+    };
+
+    let ctx = EvalContext {
+        variables: &variables,
+        input,
+    };
+    let response = match expr::evaluate(&req.expression, &ctx) {
+        Ok(value) => {
+            let result_text = match &value {
+                serde_json::Value::Object(_) | serde_json::Value::Array(_) => {
+                    serde_json::to_string_pretty(&value).unwrap_or_else(|_| expr::to_text(&value))
+                }
+                other => expr::to_text(other),
+            };
+            PreviewResponse {
+                ok: true,
+                result: Some(value),
+                result_text: Some(result_text),
+                error: None,
+                input_fields,
+            }
+        }
+        Err(error) => PreviewResponse {
+            ok: false,
+            result: None,
+            result_text: None,
+            error: Some(error),
+            input_fields,
+        },
+    };
+    Ok(Json(response))
 }
 
 pub(crate) fn validate_automation_graph(

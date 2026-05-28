@@ -19,12 +19,21 @@ interface Props {
   emit: (event: any) => void;
 }
 
+interface PreviewResult {
+  ok: boolean;
+  result_text?: string;
+  error?: string;
+  input_fields: string[];
+}
+
 interface EditorCtx {
   devices: () => { name: string; nickname: string }[];
   hooks: () => { id: string; name: string }[];
   listNodes?: () => { id: string; kind: string; label: string }[];
   findUpstreamKind?: (targetReteId: string) => NodeKind | null;
+  findUpstreamLogicalId?: (targetReteId: string) => string | null;
   variableNames?: () => string[];
+  previewExpression?: (upstreamId: string | null, expression: string) => Promise<PreviewResult>;
   subscribeContext?: (cb: () => void) => () => void;
 }
 
@@ -1037,6 +1046,22 @@ function ExpressionBody({
     : [];
   const variableNames = ctx.variableNames?.() ?? [];
 
+  const [preview, setPreview] = useState<PreviewResult | null>(null);
+  const [previewing, setPreviewing] = useState(false);
+
+  const runPreview = async () => {
+    if (!ctx.previewExpression) return;
+    setPreviewing(true);
+    try {
+      const upstreamId = ctx.findUpstreamLogicalId?.(nodeId) ?? null;
+      setPreview(await ctx.previewExpression(upstreamId, value));
+    } catch (e) {
+      setPreview({ ok: false, error: String(e), input_fields: [] });
+    } finally {
+      setPreviewing(false);
+    }
+  };
+
   // Insert a snippet at the end (textarea caret tracking lives in
   // ExpressionInput; chips just append a starting point to type from).
   const insert = (snippet: string) => {
@@ -1096,6 +1121,31 @@ function ExpressionBody({
           ) : null}
         </div>
       )}
+
+      <div className="fb-expr-preview">
+        <button
+          type="button"
+          className="fb-chip fb-expr-preview-btn"
+          onClick={runPreview}
+          disabled={previewing || !value.trim()}
+          title="Evaluate against the upstream block's last run"
+        >
+          {previewing ? "Running…" : "Preview"}
+        </button>
+        {preview ? (
+          preview.ok ? (
+            <pre className="fb-expr-preview-result">{preview.result_text || "(empty)"}</pre>
+          ) : (
+            <div className="fb-expr-preview-error">{preview.error}</div>
+          )
+        ) : null}
+        {preview && preview.input_fields.length === 0 && /\binput\b/.test(value) ? (
+          <p className="fb-node-hint">
+            No live data from the upstream block yet — save and let it run once
+            (trigger it) so its outputs are recorded.
+          </p>
+        ) : null}
+      </div>
 
       <p className="fb-node-hint">
         Type <code>$</code>, <code>input.</code>, or a function name for

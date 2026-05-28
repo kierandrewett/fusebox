@@ -6,6 +6,7 @@ import {
   deleteAutomation,
   exportAutomation,
   importAutomation,
+  previewExpression,
   listDevices,
   listHooks,
 } from "../api";
@@ -43,6 +44,7 @@ export function AutomationsTab() {
   const devicesRef = useRef<DeviceSummary[]>([]);
   const hooksRef = useRef<HookSummary[]>([]);
   const variableNamesRef = useRef<string[]>([]);
+  const selectedIdRef = useRef<string | null>(null);
   const editorContainerRef = useRef<HTMLDivElement | null>(null);
   const editorApiRef = useRef<CreateEditorResult | null>(null);
   const editorReadyRef = useRef(false);
@@ -85,10 +87,11 @@ export function AutomationsTab() {
     [automations, selectedId],
   );
 
-  // Keep the variable-name pool current for $-autocomplete and notify the
-  // isolated NodeViews so their dropdowns refresh.
+  // Keep the variable-name pool + selected id current for autocomplete /
+  // preview, and notify the isolated NodeViews so their pickers refresh.
   useEffect(() => {
     variableNamesRef.current = Object.keys(selected?.variables ?? {});
+    selectedIdRef.current = selected?.id ?? null;
     notifyCtx();
   }, [selected, notifyCtx]);
 
@@ -131,6 +134,13 @@ export function AutomationsTab() {
       devices: () => devicesRef.current,
       hooks: () => hooksRef.current,
       variableNames: () => variableNamesRef.current,
+      previewExpression: (upstreamId, expression) => {
+        const id = selectedIdRef.current;
+        if (!id) {
+          return Promise.resolve({ ok: false, error: "no automation selected", input_fields: [] });
+        }
+        return previewExpression(id, upstreamId, expression);
+      },
       listNodes: () => apiRef.current?.listNodes() ?? [],
       subscribeContext: (cb) => {
         listenersRef.current.add(cb);
