@@ -187,7 +187,13 @@ function summarizeNode(config: NodeConfig, ctx: EditorCtx): string {
     case "if_condition": {
       const { expression, field, op, value } = config.if_condition;
       if (expression.trim()) return truncate(expression.trim(), 32);
-      const fieldLabel = field || "value";
+      if (field.startsWith("device:")) {
+        const dev = deviceLabel(field.slice(7), ctx);
+        if (op === "is_true") return `${dev} is on`;
+      }
+      const fieldLabel = field.startsWith("device:")
+        ? `${deviceLabel(field.slice(7), ctx)} on/off`
+        : field || "value";
       switch (op) {
         case "is_true":
           return `${fieldLabel} is true`;
@@ -985,12 +991,25 @@ function IfConditionBody({
   const variableNames = ctx.variableNames?.() ?? [];
   const variableOptions: DataOutputSpec[] = variableNames.map((v) => ({ key: `$${v}`, label: `$${v}` }));
   const inputFields = availableOutputs.map((o) => o.key);
+  // Devices: `device:NAME` reads on/off state. is_true → on (YES), NO → off.
+  const deviceOptions: DataOutputSpec[] = ctx.devices().map((d) => ({
+    key: `device:${d.name}`,
+    label: `${d.nickname || d.name} (on/off)`,
+  }));
 
-  // Surface a saved field that's no longer in either list so it isn't lost.
-  const known = [...availableOutputs, ...variableOptions].some((o) => o.key === config.field);
+  // Surface a saved field that's no longer in any list so it isn't lost.
+  const known = [...availableOutputs, ...variableOptions, ...deviceOptions].some(
+    (o) => o.key === config.field,
+  );
   const extraOption: DataOutputSpec[] = known
     ? []
     : [{ key: config.field, label: `${config.field} (missing)` }];
+
+  // Picking a device defaults the comparison to "is true" (= device on).
+  const onFieldChange = (field: string) => {
+    if (field.startsWith("device:")) onChange({ ...config, field, op: "is_true" });
+    else onChange({ ...config, field });
+  };
 
   const showValue = config.op !== "is_true";
   const isNumeric = config.op === "gt" || config.op === "gte" || config.op === "lt" || config.op === "lte";
@@ -1027,7 +1046,7 @@ function IfConditionBody({
             <select
               aria-label="Field to read"
               value={config.field}
-              onChange={(e) => onChange({ ...config, field: e.target.value })}
+              onChange={(e) => onFieldChange(e.target.value)}
             >
               <optgroup label={upstreamLabel ? `From ${upstreamLabel}` : "Input"}>
                 {availableOutputs.map((o) => (
@@ -1037,6 +1056,13 @@ function IfConditionBody({
               {variableOptions.length > 0 ? (
                 <optgroup label="Variables">
                   {variableOptions.map((o) => (
+                    <option key={o.key} value={o.key}>{o.label}</option>
+                  ))}
+                </optgroup>
+              ) : null}
+              {deviceOptions.length > 0 ? (
+                <optgroup label="Devices">
+                  {deviceOptions.map((o) => (
                     <option key={o.key} value={o.key}>{o.label}</option>
                   ))}
                 </optgroup>
@@ -1075,8 +1101,9 @@ function IfConditionBody({
             </Field>
           ) : null}
           <p className="fb-node-hint">
-            Reads one field ($variable or input field) and compares it. Switch
-            to Expression to combine variables and inputs in one condition.
+            {config.field.startsWith("device:")
+              ? `"is true" → device is on (YES), off routes to NO.`
+              : "Reads one field (input, $variable, or a device's on/off state) and compares it. Switch to Expression to combine several."}
           </p>
         </>
       ) : (

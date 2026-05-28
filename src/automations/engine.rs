@@ -656,7 +656,8 @@ pub(crate) async fn evaluate_node(
                 }
                 None => None,
             };
-            let matched = evaluate_if_check(if_condition, source_state.as_ref(), variables);
+            let matched =
+                evaluate_if_check(if_condition, source_state.as_ref(), variables, device_states);
             (Some(matched), next)
         }
         AutomationNodeConfig::LogicAnd => {
@@ -926,10 +927,14 @@ pub(crate) fn evaluate_if_check(
     cfg: &IfConditionCfg,
     source: Option<&NodeRuntimeState>,
     variables: &BTreeMap<String, Value>,
+    devices: &BTreeMap<String, bool>,
 ) -> bool {
-    // A `$name` field reads an automation variable; anything else reads the
+    // Field resolution: `device:NAME` reads a device's power state
+    // ("true"/"false"), `$name` reads a variable, anything else reads the
     // wired upstream block's output.
-    let field_value: Option<String> = if let Some(name) = cfg.field.strip_prefix('$') {
+    let field_value: Option<String> = if let Some(name) = cfg.field.strip_prefix("device:") {
+        devices.get(name.trim()).map(|on| on.to_string())
+    } else if let Some(name) = cfg.field.strip_prefix('$') {
         variables.get(name).map(expr::to_text)
     } else {
         source.and_then(|s| lookup_output(s, &cfg.field))
