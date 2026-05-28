@@ -36,6 +36,17 @@ const DEFAULT_DATA_OUTPUTS: DataOutputSpec[] = [{ key: "value", label: "Value (t
 
 export const NODE_TEMPLATES: NodeTemplate[] = [
   {
+    kind: "immediate_trigger",
+    label: "Immediate",
+    category: "trigger",
+    description:
+      "Fires once when Fusebox starts. Use it to prime caches or set initial state. Runs before scheduled triggers.",
+    hasInput: false,
+    outputs: SINGLE_OK,
+    dataOutputs: DEFAULT_DATA_OUTPUTS,
+    defaultConfig: () => ({ kind: "immediate_trigger" }),
+  },
+  {
     kind: "cron_trigger",
     label: "Cron",
     category: "trigger",

@@ -82,6 +82,12 @@ pub(crate) async fn evaluate_one_automation(
             .push((e.source_node.clone(), e.source_socket.clone()));
     }
 
+    // Immediate triggers fire once at startup. On the tick they fire we clear
+    // the rising-edge baseline of everything downstream of them, so a chain
+    // like Immediate → HTTP → SetVariable actually re-runs even though those
+    // nodes have a persisted last_value from before the restart.
+    let reset_nodes = compute_immediate_reset_nodes(state, &automation).await;
+
     let mut outputs: BTreeMap<String, Option<bool>> = BTreeMap::new();
     let mut transitions: Vec<(String, AutomationNodeConfig)> = Vec::new();
     let mut node_state_updates: BTreeMap<String, NodeRuntimeState> = BTreeMap::new();
@@ -101,7 +107,7 @@ pub(crate) async fn evaluate_one_automation(
             None => continue,
         };
 
-        let prev_state = {
+        let mut prev_state = {
             let automations = state.automations.read().await;
             automations
                 .get(&automation.id)
@@ -109,6 +115,14 @@ pub(crate) async fn evaluate_one_automation(
                 .cloned()
                 .unwrap_or_default()
         };
+        if reset_nodes.contains(node_id) {
+            // Make this node look freshly-started so its rising-edge logic
+            // re-triggers from the immediate pulse.
+            prev_state.last_value = None;
+            prev_state.last_checked_at_ms = None;
+            prev_state.pending_value = None;
+            prev_state.pending_since_ms = None;
+        }
 
         // Pull each upstream node's value and source id. If the edge came
         // from a "no" socket (the IfCondition NO branch), invert the value
@@ -327,6 +341,17 @@ pub(crate) async fn evaluate_node(
     next.last_error = None;
 
     match &node.config {
+        AutomationNodeConfig::ImmediateTrigger => {
+            // Fire true exactly once per process start. last_checked_at_ms is
+            // transient (#[serde(skip)]), so it's None right after a restart
+            // and Some on every subsequent tick this process.
+            if prev.last_checked_at_ms.is_none() {
+                next.last_checked_at_ms = Some(tick_ms);
+                (Some(true), next)
+            } else {
+                (Some(false), next)
+            }
+        }
         AutomationNodeConfig::CronTrigger { cron_trigger } => {
             let parsed = match parse_cron(&cron_trigger.cron) {
                 Ok(p) => p,
@@ -664,6 +689,53 @@ async fn fetch_source_outputs(
         .map(|(k, v)| (k, Value::String(v)))
         .collect();
     Value::Object(map)
+}
+
+/// Returns the set of nodes downstream of any immediate trigger that is about
+/// to fire this tick (i.e. hasn't fired yet this process). Their rising-edge
+/// baseline is cleared so the startup pulse actually re-runs them.
+async fn compute_immediate_reset_nodes(
+    state: &AppState,
+    automation: &Automation,
+) -> std::collections::BTreeSet<String> {
+    let firing: Vec<&str> = {
+        let automations = state.automations.read().await;
+        let states = automations.get(&automation.id).map(|a| &a.status.node_states);
+        automation
+            .nodes
+            .iter()
+            .filter(|n| matches!(n.config, AutomationNodeConfig::ImmediateTrigger))
+            .filter(|n| {
+                states
+                    .and_then(|s| s.get(&n.id))
+                    .and_then(|st| st.last_checked_at_ms)
+                    .is_none()
+            })
+            .map(|n| n.id.as_str())
+            .collect()
+    };
+    if firing.is_empty() {
+        return std::collections::BTreeSet::new();
+    }
+
+    let mut adj: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    for e in &automation.edges {
+        adj.entry(e.source_node.as_str())
+            .or_default()
+            .push(e.target_node.as_str());
+    }
+    let mut reset = std::collections::BTreeSet::new();
+    let mut queue: std::collections::VecDeque<&str> = firing.into_iter().collect();
+    while let Some(node) = queue.pop_front() {
+        if let Some(targets) = adj.get(node) {
+            for &t in targets {
+                if reset.insert(t.to_string()) {
+                    queue.push_back(t);
+                }
+            }
+        }
+    }
+    reset
 }
 
 /// Write an evaluated value into a node's runtime outputs: "value" carries

@@ -10,6 +10,10 @@ use crate::state::ScheduleAction;
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub(crate) enum AutomationNodeConfig {
+    /// Fires once, on the first engine tick after Fusebox starts. Use it to
+    /// prime caches / assert initial device state at boot. Everything wired
+    /// downstream of it re-runs at startup even after a restart.
+    ImmediateTrigger,
     CronTrigger {
         cron_trigger: CronTriggerCfg,
     },

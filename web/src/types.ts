@@ -1,4 +1,5 @@
 export type NodeKind =
+  | "immediate_trigger"
   | "cron_trigger"
   | "interval_trigger"
   | "device_event_trigger"
@@ -91,6 +92,7 @@ export interface FireHookConfig {
 }
 
 export type NodeConfig =
+  | { kind: "immediate_trigger" }
   | { kind: "cron_trigger"; cron_trigger: CronTriggerConfig }
   | { kind: "interval_trigger"; interval_trigger: IntervalTriggerConfig }
   | { kind: "device_event_trigger"; device_event_trigger: DeviceEventTriggerConfig }

@@ -212,6 +212,8 @@ export function NodeView({ data, emit }: Props) {
 
 function summarizeNode(config: NodeConfig, ctx: EditorCtx): string {
   switch (config.kind) {
+    case "immediate_trigger":
+      return "On startup";
     case "cron_trigger":
       return describeCron(config.cron_trigger.cron) ?? config.cron_trigger.cron;
     case "interval_trigger": {
@@ -341,6 +343,8 @@ function truncate(s: string, max: number): string {
 
 function iconFor(kind: NodeConfig["kind"]): string {
   switch (kind) {
+    case "immediate_trigger":
+      return "⚡";
     case "cron_trigger":
       return "⏰";
     case "interval_trigger":
@@ -386,6 +390,14 @@ function NodeBody({
   ctx: EditorCtx;
 }) {
   switch (config.kind) {
+    case "immediate_trigger":
+      return (
+        <p className="fb-node-hint">
+          Fires once when Fusebox starts (after a couple of seconds, so devices
+          have connected). Wire it into an HTTP request / Set variable chain to
+          prime caches, or into Set device to assert initial state.
+        </p>
+      );
     case "cron_trigger":
       return <CronBody config={config.cron_trigger} onChange={(cron_trigger) => update({ kind: "cron_trigger", cron_trigger })} />;
     case "interval_trigger":
