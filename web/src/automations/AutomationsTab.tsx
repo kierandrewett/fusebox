@@ -136,7 +136,7 @@ export function AutomationsTab() {
     [automations, selectedId],
   );
 
-  const { markDirty, loadGraph, handleSave } = useGraphPersistence({
+  const { markDirty, loadGraph, discardDraft, handleSave } = useGraphPersistence({
     editorApiRef,
     selected,
     setAutomations,
@@ -144,6 +144,12 @@ export function AutomationsTab() {
     setError,
     setDirty,
   });
+
+  const handleDiscard = useCallback(() => {
+    if (!confirm("Discard unsaved changes and reload the last saved version?")) return;
+    selectNode(null);
+    void discardDraft();
+  }, [selectNode, discardDraft]);
 
   // Keep the variable-name pool + selected id current for autocomplete /
   // preview, and notify the isolated NodeViews so their pickers refresh.
@@ -273,6 +279,7 @@ export function AutomationsTab() {
           onLocalRename={handleRenameLocal}
           onCommitRename={handleRename}
           onSave={handleSave}
+          onDiscard={handleDiscard}
           onExport={handleExport}
         />
         {error ? <div className="fb-error-bar">{error}</div> : null}

@@ -57,6 +57,15 @@ export function useGraphPersistence({
     [editorApiRef, setDirty],
   );
 
+  // Throw away the local draft and reload the editor from the server's
+  // last-saved graph. Clearing the draft first means loadGraph won't restore
+  // it, so dirty drops back to false.
+  const discardDraft = useCallback(async () => {
+    if (!selected) return;
+    clearDraft(selected.id);
+    await loadGraph(selected.id, selected.nodes, selected.edges);
+  }, [selected, loadGraph]);
+
   const handleSave = useCallback(async () => {
     if (!selected) return;
     const api = editorApiRef.current;
@@ -79,5 +88,5 @@ export function useGraphPersistence({
     }
   }, [selected, editorApiRef, setAutomations, setSaving, setError, setDirty]);
 
-  return { markDirty, loadGraph, handleSave };
+  return { markDirty, loadGraph, discardDraft, handleSave };
 }

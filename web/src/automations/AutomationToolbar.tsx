@@ -7,6 +7,7 @@ interface Props {
   onLocalRename: (id: string, name: string) => void;
   onCommitRename: (id: string, name: string) => void;
   onSave: () => void;
+  onDiscard: () => void;
   onExport: () => void;
 }
 
@@ -17,6 +18,7 @@ export function AutomationToolbar({
   onLocalRename,
   onCommitRename,
   onSave,
+  onDiscard,
   onExport,
 }: Props) {
   return (
@@ -35,6 +37,15 @@ export function AutomationToolbar({
           <span className="fb-toolbar-status">
             {dirty ? "Unsaved changes" : "Saved"}
           </span>
+          <button
+            type="button"
+            onClick={onDiscard}
+            disabled={!dirty || saving}
+            className="fb-toolbar-btn"
+            title="Discard unsaved changes and reload the last saved version"
+          >
+            Discard
+          </button>
           <button
             type="button"
             onClick={onExport}
