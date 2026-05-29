@@ -1,6 +1,16 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useSyncExternalStore } from "react";
 import type { Chart as ChartType, ChartConfiguration } from "chart.js";
 import type { UsageHistoryResponse } from "../types";
+
+// Subscribe to light/dark theme toggles so the chart can re-read its colours.
+function subscribeTheme(onChange: () => void): () => void {
+  const observer = new MutationObserver(onChange);
+  observer.observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
+  return () => observer.disconnect();
+}
+function getTheme(): string {
+  return document.documentElement.dataset.theme ?? "light";
+}
 
 // Heavy library — loaded lazily so it doesn't block the initial bundle.
 let chartCtorPromise: Promise<typeof ChartType> | null = null;
@@ -46,6 +56,8 @@ interface Props {
 export function UsageChart({ history, range, onRangeChange }: Props) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const chartRef = useRef<ChartType | null>(null);
+  // Re-read chart colours from the active theme's CSS variables when it toggles.
+  const theme = useSyncExternalStore(subscribeTheme, getTheme);
 
   const hasData = !!history && history.totals.length > 0;
 
@@ -59,6 +71,17 @@ export function UsageChart({ history, range, onRangeChange }: Props) {
 
     let cancelled = false;
     const unit = (history as any).unit ?? "W";
+    // Theme-aware colours, so the legend/ticks are legible on both the cream
+    // and the dark backgrounds (they were a fixed cream before — invisible in
+    // light mode).
+    const css = getComputedStyle(document.documentElement);
+    const textColor = css.getPropertyValue("--text").trim() || "#e5d8b6";
+    const mutedColor = css.getPropertyValue("--muted").trim() || "#9b907d";
+    const gridColor = "rgba(128, 128, 128, 0.16)";
+    // Clamp the x-axis to the data's actual extent so the line fills the plot
+    // edge-to-edge — Chart.js otherwise pads out to "nice" tick bounds, which
+    // left empty gaps on the left and right.
+    const [xMin, xMax] = dataExtent(history);
     const config: ChartConfiguration = {
       type: "line",
       data: {
@@ -67,18 +90,22 @@ export function UsageChart({ history, range, onRangeChange }: Props) {
             label: "Total",
             data: history.totals.map((p) => ({ x: p.timestamp_ms, y: p.value })),
             borderColor: "#c19b55",
-            backgroundColor: "rgba(193, 155, 85, 0.18)",
-            tension: 0.25,
+            backgroundColor: "rgba(193, 155, 85, 0.16)",
+            borderWidth: 2,
+            tension: 0.3,
             fill: true,
             pointRadius: 0,
+            pointHoverRadius: 3,
           },
           ...history.series.map((s, i) => ({
             label: s.device_name,
             data: s.points.map((p) => ({ x: p.timestamp_ms, y: p.value })),
             borderColor: PALETTE[i % PALETTE.length],
             backgroundColor: "transparent",
-            tension: 0.25,
+            borderWidth: 1.5,
+            tension: 0.3,
             pointRadius: 0,
+            pointHoverRadius: 3,
           })),
         ],
       },
@@ -86,26 +113,40 @@ export function UsageChart({ history, range, onRangeChange }: Props) {
         responsive: true,
         maintainAspectRatio: false,
         parsing: false,
+        interaction: { mode: "index", intersect: false },
         scales: {
           x: {
             type: "linear",
-            ticks: { color: "rgba(229,216,182,0.6)", maxTicksLimit: 8, callback: (v) => formatTick(Number(v)) },
-            grid: { color: "rgba(229,216,182,0.08)" },
+            bounds: "data",
+            min: xMin,
+            max: xMax,
+            ticks: {
+              color: mutedColor,
+              maxTicksLimit: 8,
+              maxRotation: 0,
+              autoSkip: true,
+              callback: (v) => formatTick(Number(v)),
+            },
+            grid: { color: gridColor, drawTicks: false },
+            border: { color: gridColor },
           },
           y: {
             beginAtZero: true,
-            ticks: { color: "rgba(229,216,182,0.6)", callback: (v) => `${v} ${unit}` },
-            grid: { color: "rgba(229,216,182,0.08)" },
+            ticks: { color: mutedColor, maxTicksLimit: 6, callback: (v) => `${v} ${unit}` },
+            grid: { color: gridColor, drawTicks: false },
+            border: { display: false },
           },
         },
         plugins: {
           legend: {
             labels: {
-              color: "rgba(229,216,182,0.7)",
+              color: textColor,
               usePointStyle: true,
               pointStyle: "line",
-              boxWidth: 22,
+              boxWidth: 20,
               boxHeight: 2,
+              padding: 14,
+              font: { size: 11 },
             },
           },
           tooltip: {
@@ -137,7 +178,7 @@ export function UsageChart({ history, range, onRangeChange }: Props) {
       chartRef.current?.destroy();
       chartRef.current = null;
     };
-  }, [history]);
+  }, [history, theme]);
 
   const rangeLabel = (history as any)?.range_label ?? `${range} usage`;
 
@@ -169,6 +210,20 @@ export function UsageChart({ history, range, onRangeChange }: Props) {
 }
 
 const PALETTE = ["#e5b75b", "#7bb7ff", "#f06b5c", "#c99cff", "#62d6d1", "#ff9d66", "#b6e36a", "#f38ad3"];
+
+/** Earliest and latest timestamp across all plotted points, so the x-axis can
+ *  be clamped to the data (no empty padding on the left/right). */
+function dataExtent(history: UsageHistoryResponse): [number | undefined, number | undefined] {
+  let min = Infinity;
+  let max = -Infinity;
+  const consider = (ms: number) => {
+    if (ms < min) min = ms;
+    if (ms > max) max = ms;
+  };
+  for (const p of history.totals) consider(p.timestamp_ms);
+  for (const s of history.series) for (const p of s.points) consider(p.timestamp_ms);
+  return Number.isFinite(min) ? [min, max] : [undefined, undefined];
+}
 
 function formatTick(ms: number): string {
   const d = new Date(ms);
