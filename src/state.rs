@@ -23,6 +23,15 @@ use tracing::{info, warn};
 
 pub(crate) const STATE_VERSION: u32 = 2;
 
+/// A cached HTTP outcome for simulation runs (live flow + forecast).
+#[derive(Debug, Clone)]
+pub(crate) struct CachedHttp {
+    pub(crate) passing: bool,
+    pub(crate) status_code: Option<u16>,
+    pub(crate) body: Option<String>,
+    pub(crate) error: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct AppState {
     pub(crate) controller: TapoController,
@@ -36,6 +45,10 @@ pub(crate) struct AppState {
     pub(crate) hooks: Arc<RwLock<BTreeMap<String, HookConfig>>>,
     pub(crate) automations: Arc<RwLock<BTreeMap<String, Automation>>>,
     pub(crate) http_client: reqwest::Client,
+    /// Cache of HTTP responses for live/forecast simulation, keyed by
+    /// method+url+body with a short TTL, so continuously running the flow
+    /// preview doesn't re-hit endpoints on every poll.
+    pub(crate) sim_http_cache: Arc<RwLock<BTreeMap<String, (u128, CachedHttp)>>>,
     pub(crate) discovery_timeout_seconds: u64,
     pub(crate) discovery_targets: Vec<String>,
     pub(crate) refresh_seconds: u64,
@@ -188,6 +201,7 @@ impl AppState {
             hooks: Arc::new(RwLock::new(BTreeMap::new())),
             automations: Arc::new(RwLock::new(BTreeMap::new())),
             http_client,
+            sim_http_cache: Arc::new(RwLock::new(BTreeMap::new())),
             discovery_timeout_seconds: settings.discovery_timeout_seconds,
             discovery_targets: settings.discovery_targets.clone(),
             refresh_seconds: settings.refresh_seconds,

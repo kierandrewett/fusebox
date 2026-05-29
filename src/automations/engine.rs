@@ -17,7 +17,7 @@ use crate::conditions::{ConditionConfig, parse_status_match, probe_condition_onc
 use crate::hooks::{HookEvent, HookSource, HookTemplateContext, fire_hook};
 use crate::devices::reconcile::{reconcile_device, set_schedule_intent};
 use crate::schedules::parse_cron;
-use crate::state::{AppState, ScheduleAction, save_persisted_state};
+use crate::state::{AppState, CachedHttp, ScheduleAction, save_persisted_state};
 use crate::time::now_ms;
 
 pub(crate) async fn run_automation_engine(state: AppState) {
@@ -668,12 +668,6 @@ pub(crate) async fn evaluate_node(
             if !rising {
                 return (prev.last_value, next);
             }
-            if simulate {
-                // Forecast: replay the snapshot rather than fetching. `next`
-                // already carries the snapshot outputs (cloned from prev);
-                // treat it as having matched so downstream paths are explored.
-                return (Some(prev.last_value.unwrap_or(true)), next);
-            }
             if http_request.url.is_empty() {
                 next.last_error = Some("URL not configured".to_string());
                 return (Some(false), next);
@@ -705,6 +699,54 @@ pub(crate) async fn evaluate_node(
                 pending_value: None,
                 pending_since_ms: None,
             };
+
+            // Simulation (live flow / forecast): fetch at most once per TTL and
+            // replay a cache, so continuous polling doesn't hammer the endpoint.
+            if simulate {
+                const TTL_MS: u128 = 20_000;
+                let key = format!(
+                    "{} {} {}",
+                    probe.method,
+                    probe.url,
+                    probe.body.clone().unwrap_or_default()
+                );
+                let hit = {
+                    let cache = state.sim_http_cache.read().await;
+                    cache
+                        .get(&key)
+                        .filter(|(at, _)| tick_ms.saturating_sub(*at) < TTL_MS)
+                        .map(|(_, c)| c.clone())
+                };
+                let cached = match hit {
+                    Some(c) => c,
+                    None => {
+                        let outcome = probe_condition_once(&state.http_client, &probe).await;
+                        let c = CachedHttp {
+                            passing: outcome.passing,
+                            status_code: outcome.status_code,
+                            body: outcome.body,
+                            error: outcome.error,
+                        };
+                        state.sim_http_cache.write().await.insert(key, (tick_ms, c.clone()));
+                        c
+                    }
+                };
+                next.last_checked_at_ms = Some(tick_ms);
+                next.last_status_code = cached.status_code;
+                next.last_body = cached.body.clone();
+                next.outputs.clear();
+                next.outputs.insert("value".to_string(), cached.passing.to_string());
+                next.outputs.insert("succeeded".to_string(), cached.passing.to_string());
+                if let Some(body) = cached.body.as_ref() {
+                    next.outputs.insert("body".to_string(), body.clone());
+                }
+                if let Some(code) = cached.status_code {
+                    next.outputs.insert("status_code".to_string(), code.to_string());
+                }
+                next.last_error = cached.error;
+                return (Some(cached.passing), next);
+            }
+
             let outcome = probe_condition_once(&state.http_client, &probe).await;
             next.last_checked_at_ms = Some(tick_ms);
             next.last_status_code = outcome.status_code;
