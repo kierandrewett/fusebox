@@ -3,6 +3,7 @@ import { previewExpression, runNode } from "../api";
 import type { DeviceSummary, HookSummary } from "../types";
 import type { CreateEditorResult } from "./createEditor";
 import type { EditorCtx } from "./NodeView";
+import { mergeVariableNames } from "./variableNames";
 
 interface Refs {
   devicesRef: RefObject<DeviceSummary[]>;
@@ -25,7 +26,8 @@ export function useInspectorCtx({
   return {
     devices: () => devicesRef.current ?? [],
     hooks: () => hooksRef.current ?? [],
-    variableNames: () => variableNamesRef.current ?? [],
+    variableNames: () =>
+      mergeVariableNames(variableNamesRef.current, editorApiRef.current?.variableKeys()),
     listNodes: () => editorApiRef.current?.listNodes() ?? [],
     findUpstreamKind: (rid) => editorApiRef.current?.findUpstreamKind(rid) ?? null,
     findUpstreamLogicalId: (rid) => editorApiRef.current?.findUpstreamLogicalId(rid) ?? null,

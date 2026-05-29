@@ -65,6 +65,9 @@ export interface CreateEditorResult {
   removeNode: (nodeId: string) => Promise<void>;
   /** Snapshot of currently-loaded nodes for picker dropdowns (IF block). */
   listNodes: () => { id: string; kind: NodeConfig["kind"]; label: string }[];
+  /** Variable names referenced by variable blocks in the live graph, so
+   *  autocomplete can suggest a variable as soon as it's used anywhere. */
+  variableKeys: () => string[];
   findUpstreamKind: (targetReteId: string) => NodeConfig["kind"] | null;
   findUpstreamLogicalId: (targetReteId: string) => string | null;
   /** Map a Rete node id to the logical id used in serialize()/the backend. */
@@ -527,6 +530,22 @@ export async function createEditor(
         result.push({ id: logical, kind: flow.config.kind, label: flow.label });
       }
       return result;
+    },
+    variableKeys() {
+      const keys = new Set<string>();
+      for (const n of editor.getNodes()) {
+        const cfg = (n as unknown as FlowNode).config;
+        const key =
+          cfg.kind === "set_variable"
+            ? cfg.set_variable.key
+            : cfg.kind === "get_variable"
+              ? cfg.get_variable.key
+              : cfg.kind === "variable_changed"
+                ? cfg.variable_changed.key
+                : "";
+        if (key.trim()) keys.add(key.trim());
+      }
+      return [...keys];
     },
     async removeNode(nodeId) {
       // Remove any connections touching this node first; Rete throws if

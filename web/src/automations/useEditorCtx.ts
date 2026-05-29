@@ -2,6 +2,7 @@ import { useMemo, type RefObject } from "react";
 import { previewExpression } from "../api";
 import type { DeviceSummary, HookSummary } from "../types";
 import type { CreateEditorResult, EditorContext } from "./createEditor";
+import { mergeVariableNames } from "./variableNames";
 
 interface Args {
   devicesRef: RefObject<DeviceSummary[]>;
@@ -36,7 +37,8 @@ export function useEditorCtx({
     () => ({
       devices: () => devicesRef.current ?? [],
       hooks: () => hooksRef.current ?? [],
-      variableNames: () => variableNamesRef.current ?? [],
+      variableNames: () =>
+        mergeVariableNames(variableNamesRef.current, editorApiRef.current?.variableKeys()),
       listNodes: () => editorApiRef.current?.listNodes() ?? [],
       previewExpression: (upstreamId, expression) => {
         const id = selectedIdRef.current;
