@@ -27,6 +27,7 @@ export function RunPanel({ nodeId, ctx }: Props) {
       const res = await ctx.runNode!(nodeId);
       if (res.ok) {
         setResults(res.nodes);
+        ctx.showRun?.(res.nodes);
       } else {
         setResults(null);
         setError(res.error ?? "run failed");

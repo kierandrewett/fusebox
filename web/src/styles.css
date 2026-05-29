@@ -2666,6 +2666,19 @@
   min-width: 0;
 }
 
+/* Canvas node highlight after a test run: light up the path it took. */
+.fb-node.fb-run-idle { opacity: 0.4; }
+.fb-node.fb-run-on {
+  box-shadow: 0 0 0 2px rgba(120, 200, 120, 0.9), 0 0 16px rgba(120, 200, 120, 0.5);
+}
+.fb-node.fb-run-off {
+  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.35);
+  opacity: 0.85;
+}
+.fb-node.fb-run-error {
+  box-shadow: 0 0 0 2px rgba(240, 107, 92, 0.9), 0 0 16px rgba(240, 107, 92, 0.45);
+}
+
 /* Rete connection lines: brass accent */
 .fb-canvas svg path[data-type="connection"],
 .fb-canvas svg path.connection { stroke: var(--brass); stroke-width: 2; opacity: 0.85; }

@@ -34,6 +34,14 @@ export function useNodeOps({ editorApiRef, selected, selectNode, setDirty, setEr
     }
   };
 
+  // Accept palette drags over the canvas.
+  const handleCanvasDragOver = (e: React.DragEvent) => {
+    if (e.dataTransfer.types.includes("application/fusebox-node")) {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = "copy";
+    }
+  };
+
   // Drag-drop from the palette: place the block where it was dropped.
   const handleCanvasDrop = (e: React.DragEvent) => {
     const kind = e.dataTransfer.getData("application/fusebox-node");
@@ -64,5 +72,5 @@ export function useNodeOps({ editorApiRef, selected, selectNode, setDirty, setEr
     }
   };
 
-  return { handleAddNode, handleCanvasDrop, handleDeleteNode };
+  return { handleAddNode, handleCanvasDragOver, handleCanvasDrop, handleDeleteNode };
 }

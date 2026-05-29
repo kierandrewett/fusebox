@@ -11,7 +11,7 @@ import type {
   NodeKind,
   ScheduleAction,
 } from "../types";
-import type { RunNodeResponse } from "../api";
+import type { RunNodeResponse, RunNodeResult } from "../api";
 import { templateFor, iconFor, type DataOutputSpec } from "./nodes";
 import { ExpressionInput } from "./ExpressionInput";
 import { SuggestInput } from "./SuggestInput";
@@ -40,6 +40,11 @@ export interface EditorCtx {
   previewExpression?: (upstreamId: string | null, expression: string) => Promise<PreviewResult>;
   /** Dry-run this node and everything upstream of it (by Rete id). */
   runNode?: (reteId: string) => Promise<RunNodeResponse>;
+  /** Publish a run's results so the canvas can highlight the path it took. */
+  showRun?: (results: RunNodeResult[]) => void;
+  /** This node's state in the last test run: on/off/error if it took part,
+   *  "idle" if a run is active but this node wasn't in it, null otherwise. */
+  runStateFor?: (reteId: string) => "on" | "off" | "error" | "idle" | null;
   /** Open the inspector for this node (by Rete id). */
   selectNode?: (reteId: string) => void;
   /** Whether this node is currently selected, for the highlight. */
@@ -97,11 +102,12 @@ export function NodeView({ data, emit }: Props) {
 
   const summary = summarizeNode(data.config, ctx);
   const selected = ctx.isSelected?.(data.id) ?? false;
+  const runState = ctx.runStateFor?.(data.id) ?? null;
 
   return (
     <div
       ref={setContainer}
-      className={`fb-node fb-node-${tpl.category} fb-node-${data.config.kind} compact ${selected ? "selected" : ""}`}
+      className={`fb-node fb-node-${tpl.category} fb-node-${data.config.kind} compact ${selected ? "selected" : ""} ${runState ? `fb-run-${runState}` : ""}`}
       style={{ width: data.width }}
       data-context-menu="ignore"
       onPointerDown={onPointerDown}

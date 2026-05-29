@@ -1,5 +1,5 @@
 import type { RefObject } from "react";
-import { previewExpression, runNode } from "../api";
+import { previewExpression, runNode, type RunNodeResult } from "../api";
 import type { DeviceSummary, HookSummary } from "../types";
 import type { CreateEditorResult } from "./createEditor";
 import type { EditorCtx } from "./NodeView";
@@ -11,6 +11,7 @@ interface Refs {
   variableNamesRef: RefObject<string[]>;
   selectedIdRef: RefObject<string | null>;
   editorApiRef: RefObject<CreateEditorResult | null>;
+  showRun: (results: RunNodeResult[]) => void;
 }
 
 /** The EditorCtx the inspector's NodeBody uses: reads device/hook/variable
@@ -22,6 +23,7 @@ export function useInspectorCtx({
   variableNamesRef,
   selectedIdRef,
   editorApiRef,
+  showRun,
 }: Refs): EditorCtx {
   return {
     devices: () => devicesRef.current ?? [],
@@ -47,5 +49,6 @@ export function useInspectorCtx({
       const graph = api.serialize();
       return runNode(id, api.logicalIdFor(reteId), graph.nodes, graph.edges);
     },
+    showRun,
   };
 }

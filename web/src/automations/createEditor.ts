@@ -106,6 +106,8 @@ export interface EditorContext {
   selectNodes?: (reteIds: string[]) => void;
   /** Whether a node is currently selected, for the canvas highlight. */
   isSelected?: (reteId: string) => boolean;
+  /** A node's state in the last test run (on/off/error/idle), or null. */
+  runStateFor?: (reteId: string) => "on" | "off" | "error" | "idle" | null;
   /** Delete all currently-selected nodes (Delete key). */
   deleteSelected?: () => void;
   /** Right-click: open the canvas context menu at the given screen point. */

@@ -12,6 +12,7 @@ interface Args {
   selectedNodeIdsRef: RefObject<string[]>;
   editorApiRef: RefObject<CreateEditorResult | null>;
   ctxListenersRef: RefObject<Set<() => void>>;
+  runHighlightRef: RefObject<Map<string, "on" | "off" | "error">>;
   selectNode: (reteId: string | null) => void;
   selectNodes: (ids: string[]) => void;
   deleteSelected: () => void;
@@ -28,6 +29,7 @@ export function useEditorCtx({
   selectedNodeIdsRef,
   editorApiRef,
   ctxListenersRef,
+  runHighlightRef,
   selectNode,
   selectNodes,
   deleteSelected,
@@ -50,6 +52,12 @@ export function useEditorCtx({
       selectNode,
       selectNodes,
       isSelected: (reteId) => selectedNodeIdsRef.current?.includes(reteId) ?? false,
+      runStateFor: (reteId) => {
+        const map = runHighlightRef.current;
+        if (!map || map.size === 0) return null;
+        const logical = editorApiRef.current?.logicalIdFor(reteId);
+        return (logical && map.get(logical)) || "idle";
+      },
       deleteSelected,
       onContextMenu,
       subscribeContext: (cb) => {
@@ -68,6 +76,7 @@ export function useEditorCtx({
       selectedNodeIdsRef,
       editorApiRef,
       ctxListenersRef,
+      runHighlightRef,
       selectNode,
       selectNodes,
       deleteSelected,

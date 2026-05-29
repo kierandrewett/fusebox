@@ -12,6 +12,7 @@ import { useNodeOps } from "./useNodeOps";
 import { useInspectorCtx } from "./useInspectorCtx";
 import { useEditorCtx } from "./useEditorCtx";
 import { useGraphPersistence } from "./useGraphPersistence";
+import { useRunHighlight } from "./useRunHighlight";
 
 interface Status {
   loading: boolean;
@@ -65,6 +66,9 @@ export function AutomationsTab() {
     for (const cb of ctxListenersRef.current) cb();
   }, []);
 
+  // Canvas highlight of the last test run's path.
+  const { runHighlightRef, showRun, clearRun } = useRunHighlight(notifyCtx);
+
   // Update the selection and re-highlight the canvas (the isolated NodeViews
   // re-read it via notifyCtx).
   const selectNodes = useCallback(
@@ -102,6 +106,7 @@ export function AutomationsTab() {
     selectedNodeIdsRef,
     editorApiRef,
     ctxListenersRef,
+    runHighlightRef,
     selectNode,
     selectNodes,
     deleteSelected: deleteSelectedNodes,
@@ -172,11 +177,13 @@ export function AutomationsTab() {
         pendingLoadRef.current = { id };
         return;
       }
-      // Swapping automations invalidates the old node ids — close the inspector.
+      // Swapping automations invalidates the old node ids — close the inspector
+      // and drop any test-run highlight from the previous graph.
       selectNode(null);
+      clearRun();
       await loadGraph(id, target?.nodes ?? [], target?.edges ?? []);
     },
-    [automations, loadGraph, selectNode],
+    [automations, loadGraph, selectNode, clearRun],
   );
   const loadIntoEditorRef = useRef(loadIntoEditor);
   loadIntoEditorRef.current = loadIntoEditor;
@@ -205,6 +212,8 @@ export function AutomationsTab() {
         readyRef.current = true;
         created.onChange(() => {
           markDirty();
+          // Editing the graph makes the last run's highlight stale.
+          clearRun();
           notifyCtx();
         });
         const pending = pendingRef.current;
@@ -223,7 +232,7 @@ export function AutomationsTab() {
       apiRef.current = null;
       readyRef.current = false;
     };
-  }, [editorCtx, notifyCtx, setError, markDirty]);
+  }, [editorCtx, notifyCtx, setError, markDirty, clearRun]);
 
   useEffect(() => {
     void loadIntoEditor(selectedId);
@@ -232,7 +241,7 @@ export function AutomationsTab() {
   const { handleAdd, handleDelete, handleRename, handleToggleEnabled, handleRenameLocal } =
     useAutomationCrud({ selectedId, setAutomations, setSelectedId, setError });
 
-  const { handleAddNode, handleCanvasDrop, handleDeleteNode } = useNodeOps({
+  const { handleAddNode, handleCanvasDragOver, handleCanvasDrop, handleDeleteNode } = useNodeOps({
     editorApiRef,
     selected,
     selectNode,
@@ -246,6 +255,7 @@ export function AutomationsTab() {
     variableNamesRef,
     selectedIdRef,
     editorApiRef,
+    showRun,
   });
 
   const { handleExport, handleImport } = useAutomationFiles({
@@ -286,12 +296,7 @@ export function AutomationsTab() {
         <div
           className="fb-canvas"
           ref={editorContainerRef}
-          onDragOver={(e) => {
-            if (e.dataTransfer.types.includes("application/fusebox-node")) {
-              e.preventDefault();
-              e.dataTransfer.dropEffect = "copy";
-            }
-          }}
+          onDragOver={handleCanvasDragOver}
           onDrop={handleCanvasDrop}
         />
       </main>
