@@ -2591,42 +2591,28 @@
   color: var(--red, #f06b5c);
 }
 
-/* Test-run (dry run) panel in the inspector */
+/* Live values panel in the inspector (the always-on flow run) */
 .fb-run-panel {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 4px;
   margin-top: 12px;
   padding-top: 12px;
   border-top: 1px solid rgba(255, 255, 255, 0.08);
 }
-.fb-run-btn { align-self: flex-start; margin-right: 0; }
-.fb-run-results {
-  list-style: none;
-  margin: 4px 0 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-.fb-run-results li {
-  padding: 7px 9px;
-  background: rgba(0, 0, 0, 0.28);
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  border-left: 3px solid rgba(255, 255, 255, 0.18);
-  border-radius: 6px;
-}
-.fb-run-results li.target {
-  border-left-color: var(--brass, #e5b75b);
-  background: rgba(229, 183, 91, 0.08);
-}
-.fb-run-row-head {
+.fb-run-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
 }
-.fb-run-label { font-size: 12px; font-weight: 600; }
+.fb-run-title {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
 .fb-run-flag {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 10px;

@@ -1233,6 +1233,20 @@ pub(crate) async fn execute_action(
     }
 }
 
+/// Trigger blocks that fire at a moment rather than gating on a condition. In
+/// the live flow view these are treated as firing so the path below them is
+/// visible (Between is a condition gate, so it is NOT included here).
+fn is_forced_trigger(config: &AutomationNodeConfig) -> bool {
+    matches!(
+        config,
+        AutomationNodeConfig::ImmediateTrigger
+            | AutomationNodeConfig::CronTrigger { .. }
+            | AutomationNodeConfig::IntervalTrigger { .. }
+            | AutomationNodeConfig::DeviceEventTrigger { .. }
+            | AutomationNodeConfig::VariableChanged { .. }
+    )
+}
+
 /// `target` plus all of its transitive upstream ancestors.
 fn upstream_closure(target: &str, edges: &[AutomationEdge]) -> std::collections::BTreeSet<String> {
     let mut closure = std::collections::BTreeSet::new();
@@ -1382,27 +1396,32 @@ fn node_title(config: &AutomationNodeConfig) -> String {
     }
 }
 
-/// Dry-run the target node and everything upstream of it: evaluate the
-/// upstream closure in topological order, performing real reads (HTTP
-/// requests run) but no side effects (devices aren't switched, hooks aren't
-/// fired — action nodes report their intent instead). Nothing is persisted.
-/// Each node's rising-edge baseline is reset so the run behaves like a fresh
-/// trigger (so HTTP fetches and triggers fire), and downstream nodes read
-/// this run's freshly-computed outputs rather than the persisted ones.
+/// Dry-run the graph with no side effects (devices aren't switched, hooks
+/// aren't fired). `target` None runs the whole graph (the always-on live flow
+/// view); Some runs that node and everything upstream of it. Each node's
+/// rising-edge baseline is reset so it behaves like a fresh trigger, and
+/// downstream nodes read this run's freshly-computed outputs. When `simulate`,
+/// HTTP blocks replay their snapshot instead of fetching and the pure trigger
+/// blocks are treated as firing, so the path the current conditions resolve to
+/// lights up. Nothing is persisted.
 pub(crate) async fn dry_run_node(
     state: &AppState,
     automation: &Automation,
-    target_id: &str,
+    target: Option<&str>,
+    simulate: bool,
 ) -> Result<Vec<RunNodeResult>, String> {
-    if !automation.nodes.iter().any(|n| n.id == target_id) {
-        return Err(format!("node '{target_id}' is not in the graph"));
-    }
-    let closure = upstream_closure(target_id, &automation.edges);
-    let order: Vec<String> = topo_sort_nodes(&automation.nodes, &automation.edges)
-        .ok_or_else(|| "the graph has a cycle".to_string())?
-        .into_iter()
-        .filter(|id| closure.contains(id))
-        .collect();
+    let full_order = topo_sort_nodes(&automation.nodes, &automation.edges)
+        .ok_or_else(|| "the graph has a cycle".to_string())?;
+    let order: Vec<String> = match target {
+        Some(target_id) => {
+            if !automation.nodes.iter().any(|n| n.id == target_id) {
+                return Err(format!("node '{target_id}' is not in the graph"));
+            }
+            let closure = upstream_closure(target_id, &automation.edges);
+            full_order.into_iter().filter(|id| closure.contains(id)).collect()
+        }
+        None => full_order,
+    };
 
     let mut incoming: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
     for e in &automation.edges {
@@ -1465,9 +1484,18 @@ pub(crate) async fn dry_run_node(
             previous_tick_ms,
             tick_ms,
             Some(&fresh),
-            false,
+            simulate,
         )
         .await;
+
+        // In the live view, treat pure triggers as firing so the downstream
+        // path is visible; conditions (Between/If/expressions) still reflect
+        // current state and decide where it routes.
+        let new_output = if simulate && is_forced_trigger(&node.config) {
+            Some(true)
+        } else {
+            new_output
+        };
 
         outputs.insert(node_id.clone(), new_output);
 

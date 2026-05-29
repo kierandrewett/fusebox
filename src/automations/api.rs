@@ -312,8 +312,9 @@ pub(crate) async fn run_node(
         }
     };
 
+    let target = req.node_id.as_deref().filter(|s| !s.is_empty());
     let response =
-        match crate::automations::engine::dry_run_node(&state, &automation, &req.node_id).await {
+        match crate::automations::engine::dry_run_node(&state, &automation, target, req.live).await {
             Ok(nodes) => RunNodeResponse { ok: true, nodes, error: None },
             Err(error) => RunNodeResponse { ok: false, nodes: Vec::new(), error: Some(error) },
         };

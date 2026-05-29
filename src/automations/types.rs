@@ -422,11 +422,17 @@ pub(crate) struct PreviewResponse {
     pub(crate) input_fields: Vec<String>,
 }
 
-/// Request to dry-run a node and everything upstream of it. The graph is sent
-/// in the body so unsaved editor changes can be tested without saving first.
+/// Request to dry-run the graph. The graph is sent in the body so unsaved
+/// editor changes are reflected. With no `node_id`, the whole graph runs
+/// (used by the always-on live flow view); with one, just that node and its
+/// upstream. `live` replays HTTP snapshots instead of fetching and treats
+/// triggers as firing, so the current resolved path lights up.
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct RunNodeRequest {
-    pub(crate) node_id: String,
+    #[serde(default)]
+    pub(crate) node_id: Option<String>,
+    #[serde(default)]
+    pub(crate) live: bool,
     #[serde(default)]
     pub(crate) nodes: Vec<AutomationNode>,
     #[serde(default)]

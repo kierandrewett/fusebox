@@ -1,5 +1,4 @@
-import { useState } from "react";
-import type { RunNodeResult } from "../api";
+import { useSyncExternalStore } from "react";
 import type { EditorCtx } from "./NodeView";
 
 interface Props {
@@ -8,77 +7,50 @@ interface Props {
   ctx: EditorCtx;
 }
 
-const TRUNCATE = 200;
+const TRUNCATE = 300;
 
-/** A "Test run" button that dry-runs the selected block plus everything
- *  upstream of it, then lists each block's computed value, outputs, and (for
- *  action blocks) the side effect it would have performed. */
+/** Live values for the selected block, read from the always-on background flow
+ *  run and refreshed whenever it updates (like a debugger's inspector). */
 export function RunPanel({ nodeId, ctx }: Props) {
-  const [running, setRunning] = useState(false);
-  const [results, setResults] = useState<RunNodeResult[] | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  // Subscribe to the editor context so this re-renders when the background run
+  // publishes new results. The result object is stable between runs, so
+  // useSyncExternalStore won't tear or loop.
+  const result = useSyncExternalStore(
+    (cb) => ctx.subscribeContext?.(cb) ?? (() => {}),
+    () => ctx.liveResultFor?.(nodeId) ?? null,
+  );
 
-  if (!ctx.runNode) return null;
-
-  const run = async () => {
-    setRunning(true);
-    setError(null);
-    try {
-      const res = await ctx.runNode!(nodeId);
-      if (res.ok) {
-        setResults(res.nodes);
-        ctx.showRun?.(res.nodes);
-      } else {
-        setResults(null);
-        setError(res.error ?? "run failed");
-      }
-    } catch (e) {
-      setResults(null);
-      setError(String(e));
-    } finally {
-      setRunning(false);
-    }
-  };
+  if (!ctx.liveResultFor) return null;
 
   return (
     <div className="fb-run-panel">
-      <button type="button" className="fb-toolbar-btn fb-run-btn" onClick={run} disabled={running}>
-        {running ? "Running…" : "Test run"}
-      </button>
-      <p className="fb-node-hint">
-        Dry run: evaluates this block and everything upstream. HTTP requests run for real; devices
-        and hooks are not touched.
-      </p>
-      {error ? <div className="fb-expr-preview-error">{error}</div> : null}
-      {results ? (
-        <ol className="fb-run-results">
-          {results.map((r, i) => {
-            // The selected node is the sink of the closure, so it's last.
-            const isTarget = i === results.length - 1;
-            const cls = r.error ? "err" : r.value ? "on" : "off";
-            return (
-              <li key={r.node_id} className={isTarget ? "target" : ""}>
-                <div className="fb-run-row-head">
-                  <span className="fb-run-label">{r.title}</span>
-                  <span className={`fb-run-flag ${cls}`}>
-                    {r.value === undefined ? "—" : String(r.value)}
-                  </span>
-                </div>
-                {r.action ? <div className="fb-run-action">{r.action}</div> : null}
-                {r.error ? <div className="fb-run-node-error">{r.error}</div> : null}
-                {Object.entries(r.outputs).map(([k, v]) => (
-                  <div key={k} className="fb-run-output">
-                    <span className="fb-run-output-key">{k}</span>
-                    <span className="fb-run-output-val">
-                      {v.length > TRUNCATE ? `${v.slice(0, TRUNCATE)}…` : v}
-                    </span>
-                  </div>
-                ))}
-              </li>
-            );
-          })}
-        </ol>
-      ) : null}
+      <div className="fb-run-head">
+        <span className="fb-run-title">Live value</span>
+        {result ? (
+          <span className={`fb-run-flag ${result.error ? "err" : result.value ? "on" : "off"}`}>
+            {result.value === undefined ? "—" : String(result.value)}
+          </span>
+        ) : null}
+      </div>
+      {!result ? (
+        <p className="fb-node-hint">
+          Waiting for the flow to run. Triggers are treated as firing, so this shows where the
+          current conditions route. Devices and hooks are never touched.
+        </p>
+      ) : (
+        <>
+          {result.action ? <div className="fb-run-action">{result.action}</div> : null}
+          {result.error ? <div className="fb-run-node-error">{result.error}</div> : null}
+          {Object.entries(result.outputs).map(([k, v]) => (
+            <div key={k} className="fb-run-output">
+              <span className="fb-run-output-key">{k}</span>
+              <span className="fb-run-output-val">
+                {v.length > TRUNCATE ? `${v.slice(0, TRUNCATE)}…` : v}
+              </span>
+            </div>
+          ))}
+        </>
+      )}
     </div>
   );
 }

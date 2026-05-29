@@ -99,14 +99,15 @@ export interface RunNodeResponse {
 
 export async function runNode(
   automationId: string,
-  nodeId: string,
+  nodeId: string | null,
   nodes: AutomationNode[],
   edges: AutomationEdge[],
+  live = false,
 ): Promise<RunNodeResponse> {
   const res = await fetch(`${BASE}/api/automations/${automationId}/run-node`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ node_id: nodeId, nodes, edges }),
+    body: JSON.stringify({ node_id: nodeId || null, live, nodes, edges }),
   });
   return jsonOrThrow<RunNodeResponse>(res);
 }

@@ -1,5 +1,5 @@
 import type { RefObject } from "react";
-import { previewExpression, runNode, type RunNodeResult } from "../api";
+import { previewExpression, type RunNodeResult } from "../api";
 import type { DeviceSummary, HookSummary } from "../types";
 import type { CreateEditorResult } from "./createEditor";
 import type { EditorCtx } from "./NodeView";
@@ -11,7 +11,7 @@ interface Refs {
   variableNamesRef: RefObject<string[]>;
   selectedIdRef: RefObject<string | null>;
   editorApiRef: RefObject<CreateEditorResult | null>;
-  showRun: (results: RunNodeResult[]) => void;
+  liveResultsRef: RefObject<Map<string, RunNodeResult>>;
 }
 
 /** The EditorCtx the inspector's NodeBody uses: reads device/hook/variable
@@ -23,7 +23,7 @@ export function useInspectorCtx({
   variableNamesRef,
   selectedIdRef,
   editorApiRef,
-  showRun,
+  liveResultsRef,
 }: Refs): EditorCtx {
   return {
     devices: () => devicesRef.current ?? [],
@@ -40,15 +40,11 @@ export function useInspectorCtx({
       }
       return previewExpression(id, upstreamId, expression);
     },
-    runNode: (reteId) => {
-      const id = selectedIdRef.current;
+    liveResultFor: (reteId) => {
       const api = editorApiRef.current;
-      if (!id || !api) {
-        return Promise.resolve({ ok: false, nodes: [], error: "no automation selected" });
-      }
-      const graph = api.serialize();
-      return runNode(id, api.logicalIdFor(reteId), graph.nodes, graph.edges);
+      const map = liveResultsRef.current;
+      if (!api || !map) return null;
+      return map.get(api.logicalIdFor(reteId)) ?? null;
     },
-    showRun,
   };
 }

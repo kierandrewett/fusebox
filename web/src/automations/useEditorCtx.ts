@@ -1,5 +1,5 @@
 import { useMemo, type RefObject } from "react";
-import { previewExpression } from "../api";
+import { previewExpression, type RunNodeResult } from "../api";
 import type { DeviceSummary, HookSummary } from "../types";
 import type { CreateEditorResult, EditorContext } from "./createEditor";
 import { mergeVariableNames } from "./variableNames";
@@ -12,7 +12,7 @@ interface Args {
   selectedNodeIdsRef: RefObject<string[]>;
   editorApiRef: RefObject<CreateEditorResult | null>;
   ctxListenersRef: RefObject<Set<() => void>>;
-  runHighlightRef: RefObject<Map<string, "on" | "off" | "error">>;
+  liveResultsRef: RefObject<Map<string, RunNodeResult>>;
   selectNode: (reteId: string | null) => void;
   selectNodes: (ids: string[]) => void;
   deleteSelected: () => void;
@@ -29,7 +29,7 @@ export function useEditorCtx({
   selectedNodeIdsRef,
   editorApiRef,
   ctxListenersRef,
-  runHighlightRef,
+  liveResultsRef,
   selectNode,
   selectNodes,
   deleteSelected,
@@ -53,10 +53,13 @@ export function useEditorCtx({
       selectNodes,
       isSelected: (reteId) => selectedNodeIdsRef.current?.includes(reteId) ?? false,
       runStateFor: (reteId) => {
-        const map = runHighlightRef.current;
+        const map = liveResultsRef.current;
         if (!map || map.size === 0) return null;
         const logical = editorApiRef.current?.logicalIdFor(reteId);
-        return (logical && map.get(logical)) || "idle";
+        const result = logical ? map.get(logical) : undefined;
+        if (!result) return "idle";
+        if (result.error) return "error";
+        return result.value ? "on" : "off";
       },
       deleteSelected,
       onContextMenu,
@@ -76,7 +79,7 @@ export function useEditorCtx({
       selectedNodeIdsRef,
       editorApiRef,
       ctxListenersRef,
-      runHighlightRef,
+      liveResultsRef,
       selectNode,
       selectNodes,
       deleteSelected,

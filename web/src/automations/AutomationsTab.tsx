@@ -12,7 +12,7 @@ import { useNodeOps } from "./useNodeOps";
 import { useInspectorCtx } from "./useInspectorCtx";
 import { useEditorCtx } from "./useEditorCtx";
 import { useGraphPersistence } from "./useGraphPersistence";
-import { useRunHighlight } from "./useRunHighlight";
+import { useLiveFlow } from "./useLiveFlow";
 
 interface Status {
   loading: boolean;
@@ -66,8 +66,9 @@ export function AutomationsTab() {
     for (const cb of ctxListenersRef.current) cb();
   }, []);
 
-  // Canvas highlight of the last test run's path.
-  const { runHighlightRef, showRun, clearRun } = useRunHighlight(notifyCtx);
+  // Always-on background flow run; results feed the canvas highlight + the
+  // inspector's live values.
+  const { liveResultsRef, refreshLive } = useLiveFlow({ selectedId, selectedIdRef, editorApiRef, editorReadyRef, notifyCtx });
 
   // Update the selection and re-highlight the canvas (the isolated NodeViews
   // re-read it via notifyCtx).
@@ -106,7 +107,7 @@ export function AutomationsTab() {
     selectedNodeIdsRef,
     editorApiRef,
     ctxListenersRef,
-    runHighlightRef,
+    liveResultsRef,
     selectNode,
     selectNodes,
     deleteSelected: deleteSelectedNodes,
@@ -177,13 +178,13 @@ export function AutomationsTab() {
         pendingLoadRef.current = { id };
         return;
       }
-      // Swapping automations invalidates the old node ids — close the inspector
-      // and drop any test-run highlight from the previous graph.
+      // Swapping automations invalidates the old node ids — close the inspector.
       selectNode(null);
-      clearRun();
       await loadGraph(id, target?.nodes ?? [], target?.edges ?? []);
+      // Light up the new graph's current flow immediately.
+      void refreshLive();
     },
-    [automations, loadGraph, selectNode, clearRun],
+    [automations, loadGraph, selectNode, refreshLive],
   );
   const loadIntoEditorRef = useRef(loadIntoEditor);
   loadIntoEditorRef.current = loadIntoEditor;
@@ -212,8 +213,8 @@ export function AutomationsTab() {
         readyRef.current = true;
         created.onChange(() => {
           markDirty();
-          // Editing the graph makes the last run's highlight stale.
-          clearRun();
+          // Re-run the live flow so the highlight reflects the edited graph.
+          void refreshLive();
           notifyCtx();
         });
         const pending = pendingRef.current;
@@ -232,7 +233,7 @@ export function AutomationsTab() {
       apiRef.current = null;
       readyRef.current = false;
     };
-  }, [editorCtx, notifyCtx, setError, markDirty, clearRun]);
+  }, [editorCtx, notifyCtx, setError, markDirty, refreshLive]);
 
   useEffect(() => {
     void loadIntoEditor(selectedId);
@@ -255,7 +256,7 @@ export function AutomationsTab() {
     variableNamesRef,
     selectedIdRef,
     editorApiRef,
-    showRun,
+    liveResultsRef,
   });
 
   const { handleExport, handleImport } = useAutomationFiles({

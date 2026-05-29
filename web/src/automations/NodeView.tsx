@@ -11,7 +11,7 @@ import type {
   NodeKind,
   ScheduleAction,
 } from "../types";
-import type { RunNodeResponse, RunNodeResult } from "../api";
+import type { RunNodeResult } from "../api";
 import { templateFor, iconFor, type DataOutputSpec } from "./nodes";
 import { ExpressionInput } from "./ExpressionInput";
 import { SuggestInput } from "./SuggestInput";
@@ -38,12 +38,10 @@ export interface EditorCtx {
   findUpstreamLogicalId?: (targetReteId: string) => string | null;
   variableNames?: () => string[];
   previewExpression?: (upstreamId: string | null, expression: string) => Promise<PreviewResult>;
-  /** Dry-run this node and everything upstream of it (by Rete id). */
-  runNode?: (reteId: string) => Promise<RunNodeResponse>;
-  /** Publish a run's results so the canvas can highlight the path it took. */
-  showRun?: (results: RunNodeResult[]) => void;
-  /** This node's state in the last test run: on/off/error if it took part,
-   *  "idle" if a run is active but this node wasn't in it, null otherwise. */
+  /** This node's latest result from the always-on background flow run. */
+  liveResultFor?: (reteId: string) => RunNodeResult | null;
+  /** This node's state in the live flow: on/off/error if it took part,
+   *  "idle" if the flow ran but this node wasn't reached, null otherwise. */
   runStateFor?: (reteId: string) => "on" | "off" | "error" | "idle" | null;
   /** Open the inspector for this node (by Rete id). */
   selectNode?: (reteId: string) => void;
