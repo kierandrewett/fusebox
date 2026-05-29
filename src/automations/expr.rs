@@ -950,9 +950,11 @@ fn call_function(name: &str, args: &[Value]) -> Result<Value, String> {
         "trunc" => Ok(num(to_number(&arg(0)).trunc())),
         "sqrt" => Ok(num(to_number(&arg(0)).sqrt())),
         "pow" => Ok(num(to_number(&arg(0)).powf(to_number(&arg(1))))),
-        "min" => Ok(num(args.iter().map(to_number).fold(f64::INFINITY, f64::min))),
+        // min/max accept either varargs — min(a, b, c) — or a single array —
+        // min($temps) — so they work directly on a collected list.
+        "min" => Ok(num(number_args(args).into_iter().fold(f64::INFINITY, f64::min))),
         "max" => Ok(num(
-            args.iter().map(to_number).fold(f64::NEG_INFINITY, f64::max),
+            number_args(args).into_iter().fold(f64::NEG_INFINITY, f64::max),
         )),
         "random" => Ok(num(simple_random())),
         // --- Encoding ---
@@ -1069,6 +1071,57 @@ fn call_function(name: &str, args: &[Value]) -> Result<Value, String> {
             let hi = to_number(&arg(2));
             Ok(num(n.max(lo).min(hi)))
         }
+        // --- Array ---
+        "sum" => Ok(num(as_array(&arg(0))
+            .iter()
+            .map(to_number)
+            .filter(|n| !n.is_nan())
+            .sum())),
+        "avg" | "mean" => {
+            let nums: Vec<f64> =
+                as_array(&arg(0)).iter().map(to_number).filter(|n| !n.is_nan()).collect();
+            if nums.is_empty() {
+                Ok(Value::Null)
+            } else {
+                Ok(num(nums.iter().sum::<f64>() / nums.len() as f64))
+            }
+        }
+        "first" => Ok(as_array(&arg(0)).into_iter().next().unwrap_or(Value::Null)),
+        "last" => Ok(as_array(&arg(0)).pop().unwrap_or(Value::Null)),
+        "reverse" => {
+            let mut arr = as_array(&arg(0));
+            arr.reverse();
+            Ok(Value::Array(arr))
+        }
+        "sort" => {
+            let mut arr = as_array(&arg(0));
+            let numeric = arr
+                .iter()
+                .all(|v| matches!(v, Value::Number(_)) || !to_number(v).is_nan());
+            if numeric {
+                arr.sort_by(|a, b| {
+                    to_number(a).partial_cmp(&to_number(b)).unwrap_or(std::cmp::Ordering::Equal)
+                });
+            } else {
+                arr.sort_by(|a, b| to_text(a).cmp(&to_text(b)));
+            }
+            Ok(Value::Array(arr))
+        }
+        "slice" => {
+            let arr = as_array(&arg(0));
+            let start = (to_number(&arg(1)).max(0.0) as usize).min(arr.len());
+            let end = if args.len() >= 3 {
+                (to_number(&arg(2)).max(0.0) as usize).min(arr.len())
+            } else {
+                arr.len()
+            };
+            if end <= start {
+                Ok(Value::Array(vec![]))
+            } else {
+                Ok(Value::Array(arr[start..end].to_vec()))
+            }
+        }
+        // --- Dictionary ---
         "keys" => match arg(0) {
             Value::Object(o) => Ok(Value::Array(
                 o.keys().map(|k| Value::String(k.clone())).collect(),
@@ -1080,8 +1133,54 @@ fn call_function(name: &str, args: &[Value]) -> Result<Value, String> {
             Value::Array(a) => Ok(Value::Array(a)),
             _ => Ok(Value::Array(vec![])),
         },
+        "entries" => match arg(0) {
+            Value::Object(o) => Ok(Value::Array(
+                o.into_iter()
+                    .map(|(k, v)| Value::Array(vec![Value::String(k), v]))
+                    .collect(),
+            )),
+            _ => Ok(Value::Array(vec![])),
+        },
+        "merge" => {
+            let mut out = match arg(0) {
+                Value::Object(o) => o,
+                _ => serde_json::Map::new(),
+            };
+            if let Value::Object(b) = arg(1) {
+                for (k, v) in b {
+                    out.insert(k, v);
+                }
+            }
+            Ok(Value::Object(out))
+        }
+        // Safe access into a dictionary/array with an optional fallback.
+        "get" => {
+            let found = index_value(&arg(0), &arg(1));
+            if found.is_null() && args.len() >= 3 {
+                Ok(arg(2))
+            } else {
+                Ok(found)
+            }
+        }
         other => Err(format!("unknown function '{other}'")),
     }
+}
+
+/// The elements of an array value; an empty list for anything else.
+fn as_array(v: &Value) -> Vec<Value> {
+    match v {
+        Value::Array(a) => a.clone(),
+        _ => Vec::new(),
+    }
+}
+
+/// Numbers for min/max: the elements of a single array argument, or each
+/// argument coerced to a number when called varargs-style.
+fn number_args(args: &[Value]) -> Vec<f64> {
+    if let [Value::Array(a)] = args {
+        return a.iter().map(to_number).collect();
+    }
+    args.iter().map(to_number).collect()
 }
 
 fn value_len(v: &Value) -> usize {
@@ -1227,6 +1326,35 @@ mod tests {
         assert_eq!(run("len(time())"), serde_json::json!(5)); // HH:MM
         // An explicit epoch-ms argument decomposes a given instant.
         assert_eq!(run("year(0) >= 1969"), Value::Bool(true));
+    }
+
+    #[test]
+    fn array_and_dict_functions() {
+        // Mirrors the weather use case: an array of hourly temperatures.
+        let vars = ctx_with(
+            vec![("t", serde_json::json!([18.6, 17.2, 21.2, 15.4]))],
+            Value::Null,
+        );
+        let run = |s: &str| eval_str(s, &vars, Value::Null);
+        assert_eq!(run("max($t)"), serde_json::json!(21.2));
+        assert_eq!(run("min($t)"), serde_json::json!(15.4));
+        assert_eq!(run("$t[2]"), serde_json::json!(21.2)); // current-hour style index
+        assert_eq!(run("len($t)"), serde_json::json!(4));
+        assert_eq!(run("first($t)"), serde_json::json!(18.6));
+        assert_eq!(run("last($t)"), serde_json::json!(15.4));
+        assert_eq!(run("round(avg($t), 2)"), serde_json::json!(18.1));
+        assert_eq!(run("sum([1, 2, 3])"), serde_json::json!(6));
+        assert_eq!(run("max(1, 2, 3)"), serde_json::json!(3)); // varargs still work
+        assert_eq!(run("sort([3, 1, 2])"), serde_json::json!([1, 2, 3]));
+        assert_eq!(run("reverse([1, 2, 3])"), serde_json::json!([3, 2, 1]));
+        assert_eq!(run("slice([1, 2, 3, 4], 1, 3)"), serde_json::json!([2, 3]));
+
+        let dvars = ctx_with(vec![("d", serde_json::json!({"a": 1, "b": 2}))], Value::Null);
+        let drun = |s: &str| eval_str(s, &dvars, Value::Null);
+        assert_eq!(drun(r#"get($d, "a")"#), serde_json::json!(1));
+        assert_eq!(drun(r#"get($d, "z", 99)"#), serde_json::json!(99));
+        assert_eq!(drun("keys($d)"), serde_json::json!(["a", "b"]));
+        assert_eq!(drun("len(entries($d))"), serde_json::json!(2));
     }
 
     #[test]
