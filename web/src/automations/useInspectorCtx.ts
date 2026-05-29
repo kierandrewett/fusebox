@@ -33,6 +33,13 @@ export function useInspectorCtx({
     listNodes: () => editorApiRef.current?.listNodes() ?? [],
     findUpstreamKind: (rid) => editorApiRef.current?.findUpstreamKind(rid) ?? null,
     findUpstreamLogicalId: (rid) => editorApiRef.current?.findUpstreamLogicalId(rid) ?? null,
+    upstreamFields: (rid) => {
+      const api = editorApiRef.current;
+      const map = liveResultsRef.current;
+      const upstream = api?.findUpstreamLogicalId(rid);
+      const result = api && map && upstream ? map.get(upstream) : undefined;
+      return result ? Object.keys(result.outputs) : [];
+    },
     previewExpression: (upstreamId, expression) => {
       const id = selectedIdRef.current;
       if (!id) {

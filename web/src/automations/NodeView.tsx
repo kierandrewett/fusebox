@@ -36,6 +36,9 @@ export interface EditorCtx {
   listNodes?: () => { id: string; kind: string; label: string }[];
   findUpstreamKind?: (targetReteId: string) => NodeKind | null;
   findUpstreamLogicalId?: (targetReteId: string) => string | null;
+  /** Output field names actually available on the wired upstream right now
+   *  (carried forward through the chain), for the input.* chips. */
+  upstreamFields?: (targetReteId: string) => string[];
   variableNames?: () => string[];
   previewExpression?: (upstreamId: string | null, expression: string) => Promise<PreviewResult>;
   /** This node's latest result from the always-on background flow run. */
@@ -1269,9 +1272,16 @@ function ExpressionBody({
 }) {
   const upstreamKind = ctx.findUpstreamKind?.(nodeId) ?? null;
   const upstreamLabel = upstreamKind ? templateFor(upstreamKind).label : null;
-  const inputFields = upstreamKind
-    ? templateFor(upstreamKind).dataOutputs.map((o) => o.key)
-    : [];
+  // Prefer the fields actually present on the upstream now (carried forward
+  // through the chain, e.g. an HTTP body several blocks up); fall back to the
+  // upstream kind's declared outputs before the flow has run.
+  const liveFields = ctx.upstreamFields?.(nodeId) ?? [];
+  const inputFields =
+    liveFields.length > 0
+      ? liveFields
+      : upstreamKind
+        ? templateFor(upstreamKind).dataOutputs.map((o) => o.key)
+        : [];
   const variableNames = ctx.variableNames?.() ?? [];
 
   const [preview, setPreview] = useState<PreviewResult | null>(null);

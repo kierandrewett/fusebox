@@ -201,6 +201,7 @@ pub(crate) async fn evaluate_one_automation(
                 merged.outputs.insert("value".to_string(), v.to_string());
             }
         }
+        carry_upstream_outputs(&mut merged, &input_values, &node_state_updates);
         node_state_updates.insert(node_id.clone(), merged);
     }
 
@@ -508,6 +509,27 @@ pub(crate) async fn simulate_forecast(
 pub(crate) struct IncomingInput {
     pub(crate) source_node: String,
     pub(crate) value: Option<bool>,
+}
+
+/// Carry an upstream node's data outputs (body, status_code, …) forward onto
+/// this node's outputs without overwriting its own, so e.g. `input.body` from
+/// an HTTP block stays readable several blocks down a chain — outputs behave
+/// like variables. "value" is each node's own pulse, so it's never carried.
+fn carry_upstream_outputs(
+    merged: &mut NodeRuntimeState,
+    inputs: &[IncomingInput],
+    states: &BTreeMap<String, NodeRuntimeState>,
+) {
+    for input in inputs {
+        if let Some(src) = states.get(&input.source_node) {
+            for (key, value) in &src.outputs {
+                if key == "value" {
+                    continue;
+                }
+                merged.outputs.entry(key.clone()).or_insert_with(|| value.clone());
+            }
+        }
+    }
 }
 
 pub(crate) async fn evaluate_node(
@@ -1556,12 +1578,15 @@ pub(crate) async fn dry_run_node(
                 | AutomationNodeConfig::VariableChanged { .. }
         );
 
-        let mut out_map = new_state.outputs.clone();
+        let mut merged = new_state;
+        merged.last_value = new_output;
         if !manages_own_value {
             if let Some(v) = new_output {
-                out_map.insert("value".to_string(), v.to_string());
+                merged.outputs.insert("value".to_string(), v.to_string());
             }
         }
+        carry_upstream_outputs(&mut merged, &input_values, &fresh);
+
         let fired = new_output == Some(true);
         let action = if is_action && fired {
             describe_action(state, &node.config).await
@@ -1573,13 +1598,13 @@ pub(crate) async fn dry_run_node(
             node_id: node_id.clone(),
             title: node_title(&node.config),
             value: new_output,
-            outputs: out_map,
-            error: new_state.last_error.clone(),
+            outputs: merged.outputs.clone(),
+            error: merged.last_error.clone(),
             fired,
             action,
         });
 
-        fresh.insert(node_id.clone(), new_state);
+        fresh.insert(node_id.clone(), merged);
     }
 
     Ok(results)
