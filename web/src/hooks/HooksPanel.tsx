@@ -1,6 +1,7 @@
 import { useState, useSyncExternalStore } from "react";
 import { createHook, deleteHook, testHook, updateHook } from "../api";
 import type { Hook } from "../types";
+import { formatRelative } from "../format";
 import { HookModal } from "./HookModal";
 import { getErrorSnapshot, getSnapshot, reloadHooks, subscribe } from "./hookStore";
 
@@ -40,26 +41,75 @@ export function HooksPanel() {
           <ul className="hook-list">
             {hooks.map((hook) => (
               <li key={hook.id} className={`hook-item ${hook.enabled ? "" : "disabled"}`}>
+                <button
+                  type="button"
+                  className={`hook-dot ${hook.enabled ? "on" : "off"}`}
+                  title={hook.enabled ? "Enabled — click to disable" : "Disabled — click to enable"}
+                  aria-label={hook.enabled ? "Disable hook" : "Enable hook"}
+                  onClick={() =>
+                    void updateHook(hook.id, { enabled: !hook.enabled }).then(() => reloadHooks())
+                  }
+                />
                 <div className="hook-body">
-                  <span className="hook-name">{hook.name}</span>
-                  <span className="hook-target">{hook.method} {hook.url}</span>
-                  <span className="hook-meta">
-                    {hook.event_filter?.length ? hook.event_filter.join(", ") : "all events"}
-                    {hook.device_filter?.length ? ` · ${hook.device_filter.join(", ")}` : " · all devices"}
-                  </span>
+                  <div className="hook-row">
+                    <span className="hook-name">{hook.name}</span>
+                    <span className={`hook-method m-${hook.method.toLowerCase()}`}>{hook.method}</span>
+                  </div>
+                  <span className="hook-url">{hook.url}</span>
+                  <div className="hook-tags">
+                    <span className="hook-tag">
+                      {hook.event_filter?.length ? hook.event_filter.join(" / ") : "all events"}
+                    </span>
+                    <span className="hook-tag">
+                      {hook.device_filter?.length ? hook.device_filter.join(" / ") : "all devices"}
+                    </span>
+                  </div>
+                  <div className="hook-status">
+                    {hook.last_error ? (
+                      <span className="hook-result bad" title={hook.last_error}>
+                        failed{hook.last_status_code ? ` · ${hook.last_status_code}` : ""}
+                      </span>
+                    ) : hook.last_fired_at_ms ? (
+                      <span
+                        className={`hook-result ${
+                          hook.last_status_code && hook.last_status_code < 400 ? "ok" : "bad"
+                        }`}
+                      >
+                        {hook.last_status_code ?? "sent"}
+                      </span>
+                    ) : (
+                      <span className="hook-result idle">never fired</span>
+                    )}
+                    {hook.last_fired_at_ms ? (
+                      <span className="hook-when">
+                        {hook.last_event ? `${hook.last_event} · ` : ""}
+                        {formatRelative(hook.last_fired_at_ms)}
+                      </span>
+                    ) : null}
+                  </div>
                 </div>
                 <div className="hook-actions">
-                  <button type="button" title="Edit" onClick={() => setEditing(hook)}>✎</button>
-                  <button type="button" title="Test" onClick={() => void testHook(hook.id).then(() => reloadHooks())}>▶</button>
+                  <button type="button" title="Edit" aria-label="Edit hook" onClick={() => setEditing(hook)}>
+                    Edit
+                  </button>
+                  <button
+                    type="button"
+                    title="Send a test request"
+                    aria-label="Test hook"
+                    onClick={() => void testHook(hook.id).then(() => reloadHooks())}
+                  >
+                    Test
+                  </button>
                   <button
                     type="button"
                     className="hook-delete"
                     title="Delete"
+                    aria-label="Delete hook"
                     onClick={() => {
                       if (confirm(`Delete hook "${hook.name}"?`)) void deleteHook(hook.id).then(() => reloadHooks());
                     }}
                   >
-                    ×
+                    Delete
                   </button>
                 </div>
               </li>

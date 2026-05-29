@@ -1402,81 +1402,164 @@
             margin: 0;
             padding: 0;
             display: grid;
-            gap: 6px;
+            gap: 8px;
         }
 
         .hook-item {
             display: grid;
-            grid-template-columns: 1fr auto;
+            grid-template-columns: auto 1fr auto;
             align-items: start;
-            gap: 8px;
-            padding: 8px 10px;
-            border-radius: 8px;
-            background: rgba(255, 255, 255, 0.04);
+            gap: 10px;
+            padding: 11px 12px;
+            border-radius: 10px;
+            border: 1px solid rgba(255, 255, 255, 0.07);
+            border-left: 3px solid var(--green);
+            background:
+                linear-gradient(160deg, rgba(255, 255, 255, 0.05), transparent 60%),
+                rgba(0, 0, 0, 0.22);
+            box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
             font-size: 12px;
+            transition: border-color 0.15s, background 0.15s;
         }
+        .hook-item:hover { border-color: rgba(255, 255, 255, 0.14); }
 
         .hook-item.disabled {
-            opacity: 0.55;
+            border-left-color: rgba(255, 255, 255, 0.15);
+            opacity: 0.6;
         }
+
+        /* Enabled indicator / quick toggle */
+        .hook-dot {
+            margin-top: 4px;
+            width: 11px;
+            height: 11px;
+            padding: 0;
+            border: 0;
+            border-radius: 50%;
+            cursor: pointer;
+            background: rgba(255, 255, 255, 0.18);
+        }
+        .hook-dot.on {
+            background: var(--green);
+            box-shadow: 0 0 7px var(--green), inset 0 0 0 1px rgba(0, 0, 0, 0.35);
+        }
+        .hook-dot.off { background: rgba(255, 255, 255, 0.18); }
 
         .hook-body {
             min-width: 0;
             display: grid;
-            gap: 2px;
+            gap: 5px;
+        }
+
+        .hook-row {
+            display: flex;
+            align-items: center;
+            gap: 8px;
         }
 
         .hook-name {
-            font-weight: 600;
+            font-weight: 700;
+            color: var(--text);
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .hook-method {
+            flex-shrink: 0;
+            font-size: 9px;
+            font-weight: 700;
+            letter-spacing: 0.06em;
+            padding: 2px 6px;
+            border-radius: 5px;
+            background: rgba(255, 255, 255, 0.1);
             color: var(--text);
         }
+        .hook-method.m-get { background: rgba(98, 181, 214, 0.22); color: #9bd3e6; }
+        .hook-method.m-post { background: rgba(120, 200, 120, 0.22); color: #9be39b; }
+        .hook-method.m-put,
+        .hook-method.m-patch { background: rgba(229, 183, 91, 0.22); color: var(--amber); }
+        .hook-method.m-delete { background: rgba(240, 107, 92, 0.22); color: #f0a79c; }
 
-        .hook-target {
+        .hook-url {
             color: var(--muted);
             font-size: 10px;
             overflow-wrap: anywhere;
             word-break: break-word;
         }
 
-        .hook-meta {
-            color: var(--muted);
-            font-size: 10px;
-            overflow-wrap: anywhere;
-            word-break: break-word;
+        .hook-tags {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 4px;
         }
+        .hook-tag {
+            font-size: 9px;
+            padding: 1px 7px;
+            border-radius: 999px;
+            background: rgba(255, 255, 255, 0.06);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            color: var(--muted);
+        }
+
+        .hook-status {
+            display: flex;
+            align-items: center;
+            gap: 7px;
+            margin-top: 1px;
+        }
+        .hook-result {
+            font-family: var(--font-data);
+            font-size: 9px;
+            font-weight: 700;
+            padding: 1px 7px;
+            border-radius: 999px;
+        }
+        .hook-result.ok { background: rgba(120, 200, 120, 0.2); color: #9be39b; }
+        .hook-result.bad { background: rgba(240, 107, 92, 0.2); color: #f0a79c; }
+        .hook-result.idle { background: rgba(255, 255, 255, 0.06); color: var(--muted); }
+        .hook-when { font-size: 10px; color: var(--muted); }
 
         .hook-actions {
             display: inline-flex;
-            gap: 2px;
+            gap: 4px;
         }
 
         .hook-actions button {
-            padding: 0;
-            width: 22px;
-            height: 22px;
-            border: 0;
-            border-radius: 4px;
-            background: transparent;
+            padding: 4px 9px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 6px;
+            background: rgba(255, 255, 255, 0.05);
             color: var(--muted);
-            font-size: 13px;
-            line-height: 1;
+            font: inherit;
+            font-size: 10px;
+            font-weight: 600;
+            letter-spacing: 0.03em;
             cursor: pointer;
+            transition: color 0.12s, background 0.12s, border-color 0.12s;
         }
 
         .hook-actions button:hover {
             color: var(--text);
-            background: rgba(0, 0, 0, 0.3);
+            background: rgba(255, 255, 255, 0.1);
+            border-color: rgba(255, 255, 255, 0.2);
         }
 
         .hook-actions .hook-delete:hover {
             color: var(--red);
+            border-color: rgba(240, 107, 92, 0.5);
+            background: rgba(240, 107, 92, 0.12);
         }
 
         .hooks-empty {
             margin: 0;
+            padding: 18px 12px;
+            text-align: center;
             font-size: 11px;
             color: var(--muted);
             font-style: italic;
+            border: 1px dashed rgba(255, 255, 255, 0.12);
+            border-radius: 10px;
         }
 
         .schedule-modal-panel textarea {
@@ -2652,18 +2735,23 @@
   min-width: 0;
 }
 
-/* Canvas node highlight after a test run: light up the path it took. */
-.fb-node.fb-run-idle { opacity: 0.4; }
+/* Live flow highlight: the active path stands out because everything off it
+   is dimmed, with a quiet ring on active blocks — calmer than glowing every
+   node, especially in dark mode. Outline (not box-shadow) keeps the card's
+   depth shadow intact and coexists with the brass selection ring. */
 .fb-node.fb-run-on {
-  box-shadow: 0 0 0 2px rgba(120, 200, 120, 0.9), 0 0 16px rgba(120, 200, 120, 0.5);
+  outline: 1.5px solid rgba(113, 224, 155, 0.7);
+  outline-offset: -1px;
 }
-.fb-node.fb-run-off {
-  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.35);
-  opacity: 0.85;
-}
+.fb-node.fb-run-off { opacity: 0.6; }
+.fb-node.fb-run-idle { opacity: 0.32; }
 .fb-node.fb-run-error {
-  box-shadow: 0 0 0 2px rgba(240, 107, 92, 0.9), 0 0 16px rgba(240, 107, 92, 0.45);
+  outline: 1.5px solid rgba(240, 107, 92, 0.85);
+  outline-offset: -1px;
 }
+/* Fade the connections into dimmed blocks so the live path reads cleanly. */
+.fb-node.fb-run-idle,
+.fb-node.fb-run-off { transition: opacity 0.2s ease; }
 
 /* Rete connection lines: brass accent */
 .fb-canvas svg path[data-type="connection"],
@@ -2673,6 +2761,24 @@ html[data-theme="dark"] .fb-status-dot.on { box-shadow: inset 0 0 0 1px rgba(0,0
 html[data-theme="dark"] .fb-automations { background:
     linear-gradient(160deg, rgba(255, 255, 255, 0.04), transparent 32%),
     linear-gradient(var(--breaker-top), var(--bakelite));
+}
+
+/* Dark-mode flowchart depth: a slightly richer canvas with a soft vignette so
+   the near-black backdrop reads as a surface, plus a touch more separation on
+   the node cards against it. */
+html[data-theme="dark"] .fb-canvas {
+  background:
+    radial-gradient(circle, rgba(255, 255, 255, 0.05) 1px, transparent 1px) 0 0/22px 22px,
+    radial-gradient(circle at 50% 0%, rgba(229, 183, 91, 0.06), transparent 70%),
+    radial-gradient(circle at 50% 120%, rgba(0, 0, 0, 0.5), transparent 60%),
+    linear-gradient(180deg, #0c0d10, #070809);
+}
+html[data-theme="dark"] .fb-node {
+  border-color: #000;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.06),
+    inset 0 -14px 32px rgba(0, 0, 0, 0.5),
+    0 14px 30px rgba(0, 0, 0, 0.6);
 }
 
 /* React app helpers — minimal additions on top of the cabinet styles above */
