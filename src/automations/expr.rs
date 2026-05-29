@@ -829,14 +829,34 @@ pub(crate) fn time_in_window(now: u32, start: u32, end: u32) -> bool {
 
 /// Minutes since local midnight, right now.
 fn local_now_minutes() -> u32 {
-    use chrono::{DateTime, Local, Timelike};
-    use std::time::{Duration, UNIX_EPOCH};
-    let now =
-        DateTime::<Local>::from(UNIX_EPOCH + Duration::from_millis(crate::time::now_ms() as u64));
+    use chrono::Timelike;
+    let now = local_dt(&[], 0);
     now.hour() * 60 + now.minute()
 }
 
+const WEEKDAY_NAMES: [&str; 7] = [
+    "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday",
+];
+const MONTH_NAMES: [&str; 12] = [
+    "January", "February", "March", "April", "May", "June", "July", "August", "September",
+    "October", "November", "December",
+];
+
+/// Resolve a date/time argument to a local `DateTime`. `args[idx]`, when
+/// present and non-null, is treated as epoch milliseconds (so date functions
+/// can decompose a timestamp from an API); otherwise "now" is used.
+fn local_dt(args: &[Value], idx: usize) -> chrono::DateTime<chrono::Local> {
+    use chrono::{DateTime, Local};
+    use std::time::{Duration, UNIX_EPOCH};
+    let ms = match args.get(idx) {
+        Some(v) if !v.is_null() => to_number(v).max(0.0) as u64,
+        _ => crate::time::now_ms() as u64,
+    };
+    DateTime::<Local>::from(UNIX_EPOCH + Duration::from_millis(ms))
+}
+
 fn call_function(name: &str, args: &[Value]) -> Result<Value, String> {
+    use chrono::{Datelike, Timelike};
     let arg = |i: usize| args.get(i).cloned().unwrap_or(Value::Null);
     match name {
         // --- JSON ---
@@ -916,7 +936,15 @@ fn call_function(name: &str, args: &[Value]) -> Result<Value, String> {
         }
         // --- Math ---
         "abs" => Ok(num(to_number(&arg(0)).abs())),
-        "round" => Ok(num(to_number(&arg(0)).round())),
+        "round" => {
+            let n = to_number(&arg(0));
+            if args.len() >= 2 {
+                let f = 10f64.powi(to_number(&arg(1)).max(0.0) as i32);
+                Ok(num((n * f).round() / f))
+            } else {
+                Ok(num(n.round()))
+            }
+        }
         "floor" => Ok(num(to_number(&arg(0)).floor())),
         "ceil" => Ok(num(to_number(&arg(0)).ceil())),
         "trunc" => Ok(num(to_number(&arg(0)).trunc())),
@@ -970,6 +998,76 @@ fn call_function(name: &str, args: &[Value]) -> Result<Value, String> {
                 _ => Err(r#"between: expected start and end as "HH:MM", e.g. between("07:30", "01:00")"#
                     .to_string()),
             }
+        }
+        // --- Date / time (local; each takes an optional epoch-ms argument,
+        // defaulting to now, so you can also decompose a timestamp) ---
+        "year" => Ok(num(local_dt(args, 0).year() as f64)),
+        "month" => Ok(num(local_dt(args, 0).month() as f64)),
+        "day" => Ok(num(local_dt(args, 0).day() as f64)),
+        "hour" => Ok(num(local_dt(args, 0).hour() as f64)),
+        "minute" => Ok(num(local_dt(args, 0).minute() as f64)),
+        "second" => Ok(num(local_dt(args, 0).second() as f64)),
+        // 0 = Sunday .. 6 = Saturday, for easy numeric comparison.
+        "weekday" => Ok(num(local_dt(args, 0).weekday().num_days_from_sunday() as f64)),
+        "weekdayName" => {
+            let i = local_dt(args, 0).weekday().num_days_from_sunday() as usize;
+            Ok(Value::String(WEEKDAY_NAMES[i].to_string()))
+        }
+        "monthName" => {
+            let i = (local_dt(args, 0).month0() as usize).min(11);
+            Ok(Value::String(MONTH_NAMES[i].to_string()))
+        }
+        "isWeekend" => {
+            let i = local_dt(args, 0).weekday().num_days_from_sunday();
+            Ok(Value::Bool(i == 0 || i == 6))
+        }
+        "date" => {
+            let d = local_dt(args, 0);
+            Ok(Value::String(format!("{:04}-{:02}-{:02}", d.year(), d.month(), d.day())))
+        }
+        "time" => {
+            let d = local_dt(args, 0);
+            Ok(Value::String(format!("{:02}:{:02}", d.hour(), d.minute())))
+        }
+        // --- More string helpers ---
+        "startsWith" => Ok(Value::Bool(to_text(&arg(0)).starts_with(&to_text(&arg(1))))),
+        "endsWith" => Ok(Value::Bool(to_text(&arg(0)).ends_with(&to_text(&arg(1))))),
+        "capitalize" => {
+            let s = to_text(&arg(0));
+            let mut chars = s.chars();
+            Ok(Value::String(match chars.next() {
+                Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+                None => String::new(),
+            }))
+        }
+        "repeat" => {
+            let s = to_text(&arg(0));
+            let n = to_number(&arg(1)).max(0.0) as usize;
+            Ok(Value::String(s.repeat(n)))
+        }
+        "padStart" => {
+            let s = to_text(&arg(0));
+            let target = to_number(&arg(1)).max(0.0) as usize;
+            let pad = match args.get(2) {
+                Some(v) if !to_text(v).is_empty() => to_text(v),
+                _ => " ".to_string(),
+            };
+            let len = s.chars().count();
+            if len >= target {
+                Ok(Value::String(s))
+            } else {
+                let pad_chars: Vec<char> = pad.chars().collect();
+                let prefix: String =
+                    (0..target - len).map(|i| pad_chars[i % pad_chars.len()]).collect();
+                Ok(Value::String(prefix + &s))
+            }
+        }
+        // --- More number helpers ---
+        "clamp" => {
+            let n = to_number(&arg(0));
+            let lo = to_number(&arg(1));
+            let hi = to_number(&arg(2));
+            Ok(num(n.max(lo).min(hi)))
         }
         "keys" => match arg(0) {
             Value::Object(o) => Ok(Value::Array(
@@ -1103,6 +1201,32 @@ mod tests {
         let devices = BTreeMap::new();
         let ctx = EvalContext { variables: &vars, input: Value::Null, devices: &devices };
         assert!(evaluate(r#"between("nope", "01:00")"#, &ctx).is_err());
+    }
+
+    #[test]
+    fn utility_functions() {
+        let vars = BTreeMap::new();
+        let run = |s: &str| eval_str(s, &vars, Value::Null);
+        // Strings
+        assert_eq!(run(r#"startsWith("hello", "he")"#), Value::Bool(true));
+        assert_eq!(run(r#"endsWith("hello", "xo")"#), Value::Bool(false));
+        assert_eq!(run(r#"capitalize("hello")"#), Value::String("Hello".to_string()));
+        assert_eq!(run(r#"repeat("ab", 3)"#), Value::String("ababab".to_string()));
+        assert_eq!(run(r#"padStart("7", 3, "0")"#), Value::String("007".to_string()));
+        // Numbers
+        assert_eq!(run("clamp(15, 0, 10)"), serde_json::json!(10));
+        assert_eq!(run("clamp(-5, 0, 10)"), serde_json::json!(0));
+        assert_eq!(run("round(3.14159, 2)"), serde_json::json!(3.14));
+        assert_eq!(run("round(3.7)"), serde_json::json!(4));
+        // Date/time: assert TZ-independent invariants only.
+        let wd = to_number(&run("weekday()"));
+        assert!((0.0..=6.0).contains(&wd));
+        let mo = to_number(&run("month()"));
+        assert!((1.0..=12.0).contains(&mo));
+        assert_eq!(run("len(date())"), serde_json::json!(10)); // YYYY-MM-DD
+        assert_eq!(run("len(time())"), serde_json::json!(5)); // HH:MM
+        // An explicit epoch-ms argument decomposes a given instant.
+        assert_eq!(run("year(0) >= 1969"), Value::Bool(true));
     }
 
     #[test]
