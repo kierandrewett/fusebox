@@ -9,3 +9,7 @@ target
 *.log
 compose.yml
 docker-compose.yml
+# Built/installed in the web stage, not copied from the host.
+web/node_modules
+web/dist
+web/tsconfig.tsbuildinfo
