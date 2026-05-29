@@ -806,6 +806,36 @@ fn index_value(base: &Value, idx: &Value) -> Value {
 
 // ---------------- Functions ----------------
 
+/// Parse "HH:MM" into minutes since midnight (0..=1439). None if malformed.
+pub(crate) fn parse_hhmm(s: &str) -> Option<u32> {
+    let (h, m) = s.trim().split_once(':')?;
+    let h: u32 = h.trim().parse().ok()?;
+    let m: u32 = m.trim().parse().ok()?;
+    if h > 23 || m > 59 {
+        return None;
+    }
+    Some(h * 60 + m)
+}
+
+/// Whether `now` (minutes since midnight) is within [start, end]. A window
+/// where start > end wraps past midnight (e.g. 07:30 → 01:00).
+pub(crate) fn time_in_window(now: u32, start: u32, end: u32) -> bool {
+    if start <= end {
+        now >= start && now <= end
+    } else {
+        now >= start || now <= end
+    }
+}
+
+/// Minutes since local midnight, right now.
+fn local_now_minutes() -> u32 {
+    use chrono::{DateTime, Local, Timelike};
+    use std::time::{Duration, UNIX_EPOCH};
+    let now =
+        DateTime::<Local>::from(UNIX_EPOCH + Duration::from_millis(crate::time::now_ms() as u64));
+    now.hour() * 60 + now.minute()
+}
+
 fn call_function(name: &str, args: &[Value]) -> Result<Value, String> {
     let arg = |i: usize| args.get(i).cloned().unwrap_or(Value::Null);
     match name {
@@ -929,6 +959,18 @@ fn call_function(name: &str, args: &[Value]) -> Result<Value, String> {
             .cloned()
             .unwrap_or(Value::Null)),
         "now" => Ok(num(crate::time::now_ms() as f64)),
+        // between("07:30", "01:00") — true while the local clock is inside the
+        // window. start > end wraps past midnight. Lets an If express a time
+        // window inline instead of needing a separate Between block.
+        "between" => {
+            let start = parse_hhmm(&to_text(&arg(0)));
+            let end = parse_hhmm(&to_text(&arg(1)));
+            match (start, end) {
+                (Some(s), Some(e)) => Ok(Value::Bool(time_in_window(local_now_minutes(), s, e))),
+                _ => Err(r#"between: expected start and end as "HH:MM", e.g. between("07:30", "01:00")"#
+                    .to_string()),
+            }
+        }
         "keys" => match arg(0) {
             Value::Object(o) => Ok(Value::Array(
                 o.keys().map(|k| Value::String(k.clone())).collect(),
@@ -1044,6 +1086,23 @@ mod tests {
         assert_eq!(run("deviceOn(\"fan\")"), Value::Bool(false));
         assert_eq!(run("deviceState(\"fan\")"), Value::String("off".to_string()));
         assert_eq!(run("deviceState(\"missing\")"), Value::String("unknown".to_string()));
+    }
+
+    #[test]
+    fn between_function() {
+        let vars = BTreeMap::new();
+        // A full-day window covers every minute, so it's always true.
+        assert_eq!(eval_str(r#"between("00:00", "23:59")"#, &vars, Value::Null), Value::Bool(true));
+        // Combines with || just like the user wants: time window OR a variable.
+        let vars2 = ctx_with(vec![("active", Value::Bool(true))], Value::Null);
+        assert_eq!(
+            eval_str(r#"between("03:00", "03:01") || $active"#, &vars2, Value::Null),
+            Value::Bool(true)
+        );
+        // Malformed times are an error, not a silent false.
+        let devices = BTreeMap::new();
+        let ctx = EvalContext { variables: &vars, input: Value::Null, devices: &devices };
+        assert!(evaluate(r#"between("nope", "01:00")"#, &ctx).is_err());
     }
 
     #[test]

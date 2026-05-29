@@ -1,5 +1,6 @@
 import { createAutomation, deleteAutomation, updateAutomation } from "../api";
 import type { Automation } from "../types";
+import { clearDraft } from "./drafts";
 
 interface Options {
   selectedId: string | null;
@@ -25,6 +26,7 @@ export function useAutomationCrud({ selectedId, setAutomations, setSelectedId, s
     if (!confirm("Delete this automation?")) return;
     try {
       await deleteAutomation(id);
+      clearDraft(id);
       setAutomations((prev) => prev.filter((a) => a.id !== id));
       if (selectedId === id) setSelectedId(null);
     } catch (e) {

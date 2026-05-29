@@ -529,16 +529,16 @@ pub(crate) async fn evaluate_node(
             let in_any = if !between.windows.is_empty() {
                 between.windows.iter().any(|w| {
                     let day_ok = w.days.is_empty() || w.days.contains(&now_dow);
-                    let time_ok = match (parse_hhmm(&w.start), parse_hhmm(&w.end)) {
-                        (Some(s), Some(e)) => time_in_window(now_min, s, e),
+                    let time_ok = match (expr::parse_hhmm(&w.start), expr::parse_hhmm(&w.end)) {
+                        (Some(s), Some(e)) => expr::time_in_window(now_min, s, e),
                         _ => false,
                     };
                     day_ok && time_ok
                 })
             } else {
                 // Legacy single window (all days).
-                match (parse_hhmm(&between.start), parse_hhmm(&between.end)) {
-                    (Some(s), Some(e)) => time_in_window(now_min, s, e),
+                match (expr::parse_hhmm(&between.start), expr::parse_hhmm(&between.end)) {
+                    (Some(s), Some(e)) => expr::time_in_window(now_min, s, e),
                     _ => false,
                 }
             };
@@ -967,26 +967,6 @@ fn write_value_outputs(next: &mut NodeRuntimeState, value: &Value) {
 }
 
 /// Parse an "HH:MM" time-of-day into minutes since midnight (0..1439).
-pub(crate) fn parse_hhmm(s: &str) -> Option<u32> {
-    let (h, m) = s.trim().split_once(':')?;
-    let h: u32 = h.trim().parse().ok()?;
-    let m: u32 = m.trim().parse().ok()?;
-    if h > 23 || m > 59 {
-        return None;
-    }
-    Some(h * 60 + m)
-}
-
-/// Whether `now` (minutes since midnight) is within [start, end]. A window
-/// where start > end wraps past midnight (e.g. 07:30 → 01:00).
-pub(crate) fn time_in_window(now: u32, start: u32, end: u32) -> bool {
-    if start <= end {
-        now >= start && now <= end
-    } else {
-        now >= start || now <= end
-    }
-}
-
 /// Evaluate an IF block's predicate. Reads `cfg.field` from the source
 /// node's `outputs` map and applies `cfg.op` against `cfg.value`.
 pub(crate) fn evaluate_if_check(
@@ -1177,7 +1157,7 @@ pub(crate) async fn execute_action(
 
 #[cfg(test)]
 mod between_tests {
-    use super::{parse_hhmm, time_in_window};
+    use crate::automations::expr::{parse_hhmm, time_in_window};
 
     #[test]
     fn parses_hhmm() {

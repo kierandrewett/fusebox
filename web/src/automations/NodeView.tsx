@@ -13,6 +13,7 @@ import type {
 } from "../types";
 import { templateFor, iconFor, type DataOutputSpec } from "./nodes";
 import { ExpressionInput } from "./ExpressionInput";
+import { SuggestInput } from "./SuggestInput";
 
 const { RefSocket } = Presets.classic;
 
@@ -429,15 +430,12 @@ export function NodeBody({
       return (
         <>
           <Field label="Variable name">
-            <input
-              type="text"
-              aria-label="Variable name"
+            <SuggestInput
+              ariaLabel="Variable name"
               value={config.set_variable.key}
-              onChange={(e) =>
-                update({ ...config, set_variable: { ...config.set_variable, key: e.target.value } })
-              }
+              onChange={(key) => update({ ...config, set_variable: { ...config.set_variable, key } })}
+              suggestions={ctx.variableNames?.() ?? []}
               placeholder="counter"
-              spellCheck={false}
             />
           </Field>
           <ExpressionBody
@@ -455,13 +453,12 @@ export function NodeBody({
       return (
         <>
           <Field label="Variable name">
-            <input
-              type="text"
-              aria-label="Variable name"
+            <SuggestInput
+              ariaLabel="Variable name"
               value={config.get_variable.key}
-              onChange={(e) => update({ ...config, get_variable: { key: e.target.value } })}
+              onChange={(key) => update({ ...config, get_variable: { key } })}
+              suggestions={ctx.variableNames?.() ?? []}
               placeholder="counter"
-              spellCheck={false}
             />
           </Field>
           <p className="fb-node-hint">
@@ -473,18 +470,17 @@ export function NodeBody({
       return (
         <>
           <Field label="Variable name">
-            <input
-              type="text"
-              aria-label="Variable name"
+            <SuggestInput
+              ariaLabel="Variable name"
               value={config.variable_changed.key}
-              onChange={(e) => update({ ...config, variable_changed: { key: e.target.value } })}
+              onChange={(key) => update({ ...config, variable_changed: { key } })}
+              suggestions={ctx.variableNames?.() ?? []}
               placeholder="counter"
-              spellCheck={false}
             />
           </Field>
           <p className="fb-node-hint">
             Fires once each time this variable changes. The new value is on
-            "value" — wire into an If to branch on it.
+            "value", so you can wire into an If to branch on it.
           </p>
         </>
       );

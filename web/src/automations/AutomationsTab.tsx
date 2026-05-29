@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
-import { listAutomations, updateAutomation, listDevices, listHooks } from "../api";
+import { listAutomations, listDevices, listHooks } from "../api";
 import type { Automation, DeviceSummary, HookSummary } from "../types";
 import { createEditor, type CreateEditorResult } from "./createEditor";
 import { AutomationsSidebar } from "./AutomationsSidebar";
@@ -11,6 +11,7 @@ import { useAutomationCrud } from "./useAutomationCrud";
 import { useNodeOps } from "./useNodeOps";
 import { useInspectorCtx } from "./useInspectorCtx";
 import { useEditorCtx } from "./useEditorCtx";
+import { useGraphPersistence } from "./useGraphPersistence";
 
 interface Status {
   loading: boolean;
@@ -135,6 +136,15 @@ export function AutomationsTab() {
     [automations, selectedId],
   );
 
+  const { markDirty, loadGraph, handleSave } = useGraphPersistence({
+    editorApiRef,
+    selected,
+    setAutomations,
+    setSaving,
+    setError,
+    setDirty,
+  });
+
   // Keep the variable-name pool + selected id current for autocomplete /
   // preview, and notify the isolated NodeViews so their pickers refresh.
   useEffect(() => {
@@ -158,10 +168,9 @@ export function AutomationsTab() {
       }
       // Swapping automations invalidates the old node ids — close the inspector.
       selectNode(null);
-      await api.load(target?.nodes ?? [], target?.edges ?? []);
-      setDirty(false);
+      await loadGraph(id, target?.nodes ?? [], target?.edges ?? []);
     },
-    [automations, setDirty, selectNode],
+    [automations, loadGraph, selectNode],
   );
   const loadIntoEditorRef = useRef(loadIntoEditor);
   loadIntoEditorRef.current = loadIntoEditor;
@@ -189,7 +198,7 @@ export function AutomationsTab() {
         apiRef.current = created;
         readyRef.current = true;
         created.onChange(() => {
-          setDirty(true);
+          markDirty();
           notifyCtx();
         });
         const pending = pendingRef.current;
@@ -208,7 +217,7 @@ export function AutomationsTab() {
       apiRef.current = null;
       readyRef.current = false;
     };
-  }, [editorCtx, notifyCtx, setError, setDirty]);
+  }, [editorCtx, notifyCtx, setError, markDirty]);
 
   useEffect(() => {
     void loadIntoEditor(selectedId);
@@ -216,27 +225,6 @@ export function AutomationsTab() {
 
   const { handleAdd, handleDelete, handleRename, handleToggleEnabled, handleRenameLocal } =
     useAutomationCrud({ selectedId, setAutomations, setSelectedId, setError });
-
-  const handleSave = async () => {
-    if (!selected) return;
-    const api = editorApiRef.current;
-    if (!api) return;
-    setSaving(true);
-    setError(null);
-    try {
-      const graph = api.serialize();
-      const updated = await updateAutomation(selected.id, {
-        nodes: graph.nodes,
-        edges: graph.edges,
-      });
-      setAutomations((prev) => prev.map((a) => (a.id === selected.id ? updated : a)));
-      setDirty(false);
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setSaving(false);
-    }
-  };
 
   const { handleAddNode, handleCanvasDrop, handleDeleteNode } = useNodeOps({
     editorApiRef,
@@ -306,7 +294,7 @@ export function AutomationsTab() {
           nodeId={inspectorNodeId}
           api={editorApiRef.current}
           ctx={inspectorCtx}
-          onDirty={() => setDirty(true)}
+          onDirty={markDirty}
           onClose={() => selectNode(null)}
           onDelete={handleDeleteNode}
         />
