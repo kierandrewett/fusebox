@@ -1,4 +1,4 @@
-import type { Automation, Device, DeviceListResponse, DeviceSummary, Hook, HookSummary, UsageHistoryResponse } from "./types";
+import type { Automation, AutomationEdge, AutomationNode, Device, DeviceListResponse, DeviceSummary, Hook, HookSummary, UsageHistoryResponse } from "./types";
 
 const BASE = "";
 
@@ -80,6 +80,35 @@ export async function previewExpression(
     body: JSON.stringify({ upstream_id: upstreamId, expression }),
   });
   return jsonOrThrow<PreviewResponse>(res);
+}
+
+export interface RunNodeResult {
+  node_id: string;
+  title: string;
+  value?: boolean;
+  outputs: Record<string, string>;
+  error?: string;
+  fired: boolean;
+  action?: string;
+}
+export interface RunNodeResponse {
+  ok: boolean;
+  nodes: RunNodeResult[];
+  error?: string;
+}
+
+export async function runNode(
+  automationId: string,
+  nodeId: string,
+  nodes: AutomationNode[],
+  edges: AutomationEdge[],
+): Promise<RunNodeResponse> {
+  const res = await fetch(`${BASE}/api/automations/${automationId}/run-node`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ node_id: nodeId, nodes, edges }),
+  });
+  return jsonOrThrow<RunNodeResponse>(res);
 }
 
 export async function listDeviceResponse(): Promise<DeviceListResponse> {

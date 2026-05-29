@@ -13,7 +13,8 @@ use crate::automations::expr::{self, EvalContext};
 use crate::automations::types::{
     Automation, AutomationEdge, AutomationExport, AutomationListResponse, AutomationNode,
     AutomationNodeConfig, AutomationStatus, CreateAutomationRequest, ForecastResponse,
-    PreviewRequest, PreviewResponse, UpdateAutomationRequest, export_kind, export_version,
+    PreviewRequest, PreviewResponse, RunNodeRequest, RunNodeResponse, UpdateAutomationRequest,
+    export_kind, export_version,
 };
 use crate::conditions::{clamp_poll_seconds, parse_status_match, validate_http_method, validate_url};
 use crate::schedules::{MIN_INTERVAL_CYCLE_SECONDS, parse_cron};
@@ -284,6 +285,39 @@ pub(crate) async fn preview_expression(
             input_fields,
         },
     };
+    Ok(Json(response))
+}
+
+pub(crate) async fn run_node(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<RunNodeRequest>,
+) -> Result<Json<RunNodeResponse>, AppError> {
+    // Build a transient automation from the graph in the request (so unsaved
+    // editor changes can be tested) while reusing the persisted variables and
+    // runtime state as the baseline.
+    let automation = {
+        let automations = state.automations.read().await;
+        let saved = automations
+            .get(&id)
+            .ok_or_else(|| AppError(anyhow!("unknown automation '{}'", id)))?;
+        Automation {
+            id: saved.id.clone(),
+            name: saved.name.clone(),
+            enabled: saved.enabled,
+            nodes: req.nodes,
+            edges: req.edges,
+            created_at_ms: saved.created_at_ms,
+            status: saved.status.clone(),
+            variables: saved.variables.clone(),
+        }
+    };
+
+    let response =
+        match crate::automations::engine::dry_run_node(&state, &automation, &req.node_id).await {
+            Ok(nodes) => RunNodeResponse { ok: true, nodes, error: None },
+            Err(error) => RunNodeResponse { ok: false, nodes: Vec::new(), error: Some(error) },
+        };
     Ok(Json(response))
 }
 

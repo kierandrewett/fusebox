@@ -2,6 +2,7 @@ import { useState } from "react";
 import type { NodeConfig } from "../types";
 import type { CreateEditorResult, FlowNode } from "./createEditor";
 import { NodeBody, type EditorCtx } from "./NodeView";
+import { RunPanel } from "./RunPanel";
 import { templateFor, iconFor } from "./nodes";
 
 interface Props {
@@ -58,6 +59,7 @@ export function NodeInspector({ nodeId, api, ctx, onDirty, onClose, onDelete }: 
       </header>
       <div className="fb-inspector-body">
         <NodeBody nodeId={nodeId} config={config} update={update} ctx={ctx} />
+        <RunPanel nodeId={nodeId} ctx={ctx} />
       </div>
       <footer className="fb-inspector-foot">
         <button type="button" className="fb-node-delete" onClick={() => onDelete(nodeId)}>

@@ -67,6 +67,8 @@ export interface CreateEditorResult {
   listNodes: () => { id: string; kind: NodeConfig["kind"]; label: string }[];
   findUpstreamKind: (targetReteId: string) => NodeConfig["kind"] | null;
   findUpstreamLogicalId: (targetReteId: string) => string | null;
+  /** Map a Rete node id to the logical id used in serialize()/the backend. */
+  logicalIdFor: (reteId: string) => string;
   /** Copy the current selection to the clipboard. */
   copySelection: () => void;
   /** Paste the clipboard (offset + selected). */
@@ -340,6 +342,7 @@ export async function createEditor(
     if (!conn) return null;
     return reverseLookup(idMap, conn.source) ?? conn.source;
   };
+  const logicalIdFor = (reteId: string): string => reverseLookup(idMap, reteId) ?? reteId;
 
   // Add a node at the given area-space position. Returns the Rete id.
   const placeNode = async (config: NodeConfig, x: number, y: number): Promise<string> => {
@@ -423,6 +426,7 @@ export async function createEditor(
     area,
     findUpstreamKind,
     findUpstreamLogicalId,
+    logicalIdFor,
     copySelection,
     paste,
     selectAll,

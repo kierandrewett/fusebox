@@ -1,5 +1,5 @@
 import type { RefObject } from "react";
-import { previewExpression } from "../api";
+import { previewExpression, runNode } from "../api";
 import type { DeviceSummary, HookSummary } from "../types";
 import type { CreateEditorResult } from "./createEditor";
 import type { EditorCtx } from "./NodeView";
@@ -35,6 +35,15 @@ export function useInspectorCtx({
         return Promise.resolve({ ok: false, error: "no automation selected", input_fields: [] });
       }
       return previewExpression(id, upstreamId, expression);
+    },
+    runNode: (reteId) => {
+      const id = selectedIdRef.current;
+      const api = editorApiRef.current;
+      if (!id || !api) {
+        return Promise.resolve({ ok: false, nodes: [], error: "no automation selected" });
+      }
+      const graph = api.serialize();
+      return runNode(id, api.logicalIdFor(reteId), graph.nodes, graph.edges);
     },
   };
 }

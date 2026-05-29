@@ -11,6 +11,7 @@ import type {
   NodeKind,
   ScheduleAction,
 } from "../types";
+import type { RunNodeResponse } from "../api";
 import { templateFor, iconFor, type DataOutputSpec } from "./nodes";
 import { ExpressionInput } from "./ExpressionInput";
 import { SuggestInput } from "./SuggestInput";
@@ -37,6 +38,8 @@ export interface EditorCtx {
   findUpstreamLogicalId?: (targetReteId: string) => string | null;
   variableNames?: () => string[];
   previewExpression?: (upstreamId: string | null, expression: string) => Promise<PreviewResult>;
+  /** Dry-run this node and everything upstream of it (by Rete id). */
+  runNode?: (reteId: string) => Promise<RunNodeResponse>;
   /** Open the inspector for this node (by Rete id). */
   selectNode?: (reteId: string) => void;
   /** Whether this node is currently selected, for the highlight. */

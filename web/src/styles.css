@@ -2591,6 +2591,81 @@
   color: var(--red, #f06b5c);
 }
 
+/* Test-run (dry run) panel in the inspector */
+.fb-run-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+.fb-run-btn { align-self: flex-start; margin-right: 0; }
+.fb-run-results {
+  list-style: none;
+  margin: 4px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.fb-run-results li {
+  padding: 7px 9px;
+  background: rgba(0, 0, 0, 0.28);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-left: 3px solid rgba(255, 255, 255, 0.18);
+  border-radius: 6px;
+}
+.fb-run-results li.target {
+  border-left-color: var(--brass, #e5b75b);
+  background: rgba(229, 183, 91, 0.08);
+}
+.fb-run-row-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.fb-run-label { font-size: 12px; font-weight: 600; }
+.fb-run-flag {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10px;
+  font-weight: 700;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--muted);
+}
+.fb-run-flag.on { background: rgba(120, 200, 120, 0.2); color: #9be39b; }
+.fb-run-flag.off { background: rgba(255, 255, 255, 0.06); color: var(--muted); }
+.fb-run-flag.err { background: rgba(240, 107, 92, 0.2); color: #f0a79c; }
+.fb-run-action {
+  margin-top: 4px;
+  font-size: 11px;
+  font-style: italic;
+  color: var(--brass, #e5b75b);
+}
+.fb-run-node-error {
+  margin-top: 4px;
+  font-size: 10px;
+  color: var(--red, #f06b5c);
+}
+.fb-run-output {
+  display: flex;
+  gap: 6px;
+  margin-top: 4px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10px;
+  line-height: 1.4;
+}
+.fb-run-output-key { color: var(--muted); flex-shrink: 0; }
+.fb-run-output-val {
+  color: var(--text);
+  white-space: pre-wrap;
+  word-break: break-word;
+  min-width: 0;
+}
+
 /* Rete connection lines: brass accent */
 .fb-canvas svg path[data-type="connection"],
 .fb-canvas svg path.connection { stroke: var(--brass); stroke-width: 2; opacity: 0.85; }

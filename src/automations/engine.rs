@@ -11,7 +11,7 @@ use serde_json::Value;
 use crate::automations::expr::{self, EvalContext};
 use crate::automations::types::{
     Automation, AutomationEdge, AutomationNode, AutomationNodeConfig, ForecastEvent,
-    IfConditionCfg, IfOp, IntervalTriggerCfg, NodeRuntimeState,
+    IfConditionCfg, IfOp, IntervalTriggerCfg, NodeRuntimeState, RunNodeResult,
 };
 use crate::conditions::{ConditionConfig, parse_status_match, probe_condition_once, status_matches};
 use crate::hooks::{HookEvent, HookSource, HookTemplateContext, fire_hook};
@@ -158,6 +158,7 @@ pub(crate) async fn evaluate_one_automation(
             &device_states,
             previous_tick_ms,
             tick_ms,
+            None,
         )
         .await;
 
@@ -465,6 +466,10 @@ pub(crate) async fn evaluate_node(
     device_states: &BTreeMap<String, bool>,
     previous_tick_ms: u128,
     tick_ms: u128,
+    // During a dry run, freshly-computed upstream node states so a node reads
+    // this run's outputs (body, status_code, …) instead of the persisted,
+    // previous-tick values. `None` in the live engine.
+    overrides: Option<&BTreeMap<String, NodeRuntimeState>>,
 ) -> (Option<bool>, NodeRuntimeState) {
     let mut next = prev.clone();
     next.last_error = None;
@@ -673,7 +678,7 @@ pub(crate) async fn evaluate_node(
             // Expression mode: evaluate a full boolean expression with access
             // to both $variables and input.* (the wired upstream's outputs).
             if !if_condition.expression.trim().is_empty() {
-                let input = fetch_source_outputs(state, automation_id, inputs).await;
+                let input = fetch_source_outputs(state, automation_id, inputs, overrides).await;
                 let matched = {
                     let ctx = EvalContext {
                         variables,
@@ -692,13 +697,16 @@ pub(crate) async fn evaluate_node(
             }
             // Builder mode: read one field ($var or input.field) and compare.
             let source_state: Option<NodeRuntimeState> = match inputs.first() {
-                Some(input) => {
-                    let automations = state.automations.read().await;
-                    automations
-                        .get(automation_id)
-                        .and_then(|a| a.status.node_states.get(&input.source_node))
-                        .cloned()
-                }
+                Some(input) => match overrides.and_then(|o| o.get(&input.source_node)) {
+                    Some(s) => Some(s.clone()),
+                    None => {
+                        let automations = state.automations.read().await;
+                        automations
+                            .get(automation_id)
+                            .and_then(|a| a.status.node_states.get(&input.source_node))
+                            .cloned()
+                    }
+                },
                 None => None,
             };
             let matched =
@@ -782,7 +790,7 @@ pub(crate) async fn evaluate_node(
             if !rising {
                 return (prev.last_value, next);
             }
-            let input = fetch_source_outputs(state, automation_id, inputs).await;
+            let input = fetch_source_outputs(state, automation_id, inputs, overrides).await;
             let result = {
                 let ctx = EvalContext {
                     variables,
@@ -814,7 +822,7 @@ pub(crate) async fn evaluate_node(
                 next.last_error = Some("variable key is empty".to_string());
                 return (Some(false), next);
             }
-            let input = fetch_source_outputs(state, automation_id, inputs).await;
+            let input = fetch_source_outputs(state, automation_id, inputs, overrides).await;
             let result = {
                 let ctx = EvalContext {
                     variables,
@@ -882,18 +890,22 @@ async fn fetch_source_outputs(
     state: &AppState,
     automation_id: &str,
     inputs: &[IncomingInput],
+    overrides: Option<&BTreeMap<String, NodeRuntimeState>>,
 ) -> Value {
     let source_id = match inputs.first() {
         Some(input) => &input.source_node,
         None => return Value::Object(Default::default()),
     };
-    let outputs = {
-        let automations = state.automations.read().await;
-        automations
-            .get(automation_id)
-            .and_then(|a| a.status.node_states.get(source_id))
-            .map(|s| s.outputs.clone())
-            .unwrap_or_default()
+    let outputs = match overrides.and_then(|o| o.get(source_id)) {
+        Some(s) => s.outputs.clone(),
+        None => {
+            let automations = state.automations.read().await;
+            automations
+                .get(automation_id)
+                .and_then(|a| a.status.node_states.get(source_id))
+                .map(|s| s.outputs.clone())
+                .unwrap_or_default()
+        }
     };
     let map: serde_json::Map<String, Value> = outputs
         .into_iter()
@@ -1153,6 +1165,287 @@ pub(crate) async fn execute_action(
         }
         _ => Ok(None),
     }
+}
+
+/// `target` plus all of its transitive upstream ancestors.
+fn upstream_closure(target: &str, edges: &[AutomationEdge]) -> std::collections::BTreeSet<String> {
+    let mut closure = std::collections::BTreeSet::new();
+    let mut stack = vec![target.to_string()];
+    while let Some(id) = stack.pop() {
+        if !closure.insert(id.clone()) {
+            continue;
+        }
+        for e in edges {
+            if e.target_node == id {
+                stack.push(e.source_node.clone());
+            }
+        }
+    }
+    closure
+}
+
+/// Human description of the side effect an action node would perform. Used
+/// only to report intent in a dry run; performs no side effect.
+async fn describe_action(state: &AppState, config: &AutomationNodeConfig) -> Option<String> {
+    match config {
+        AutomationNodeConfig::SetDevice { set_device } => {
+            if set_device.device_name.is_empty() {
+                return Some("set a device (none chosen)".to_string());
+            }
+            let verb = match set_device.action {
+                ScheduleAction::On => "on",
+                ScheduleAction::Off => "off",
+                ScheduleAction::Toggle => "toggle",
+            };
+            Some(format!("would set {} {}", set_device.device_name, verb))
+        }
+        AutomationNodeConfig::ToggleDevice { toggle_device } => {
+            if toggle_device.device_name.is_empty() {
+                return Some("toggle a device (none chosen)".to_string());
+            }
+            Some(format!("would toggle {}", toggle_device.device_name))
+        }
+        AutomationNodeConfig::FireHook { fire_hook } => {
+            if fire_hook.hook_id.is_empty() {
+                return Some("fire a hook (none chosen)".to_string());
+            }
+            let name = {
+                let hooks = state.hooks.read().await;
+                hooks.get(&fire_hook.hook_id).map(|h| h.name.clone())
+            };
+            Some(format!(
+                "would fire hook {}",
+                name.unwrap_or_else(|| fire_hook.hook_id.clone())
+            ))
+        }
+        _ => None,
+    }
+}
+
+/// A short, distinguishing label for a block in the run panel, so two
+/// "Set variable" blocks are told apart by the variable they touch.
+fn node_title(config: &AutomationNodeConfig) -> String {
+    use AutomationNodeConfig as C;
+    let trunc = |s: &str, n: usize| -> String {
+        let s = s.trim();
+        if s.chars().count() > n {
+            format!("{}…", s.chars().take(n).collect::<String>())
+        } else {
+            s.to_string()
+        }
+    };
+    match config {
+        C::ImmediateTrigger => "Immediate".to_string(),
+        C::CronTrigger { cron_trigger } => format!("Cron · {}", cron_trigger.cron),
+        C::IntervalTrigger { .. } => "Interval".to_string(),
+        C::DeviceEventTrigger { device_event_trigger } => {
+            if device_event_trigger.device_name.is_empty() {
+                "Device event".to_string()
+            } else {
+                format!("Device · {}", device_event_trigger.device_name)
+            }
+        }
+        C::Between { .. } => "Between".to_string(),
+        C::VariableChanged { variable_changed } => {
+            if variable_changed.key.is_empty() {
+                "Variable changed".to_string()
+            } else {
+                format!("{} changed", variable_changed.key)
+            }
+        }
+        C::HttpProbe { .. } => "HTTP probe".to_string(),
+        C::HttpRequest { http_request } => {
+            if http_request.url.is_empty() {
+                "HTTP request".to_string()
+            } else {
+                format!("HTTP {} {}", http_request.method, trunc(&http_request.url, 40))
+            }
+        }
+        C::IfCondition { if_condition } => {
+            if !if_condition.expression.trim().is_empty() {
+                format!("If {}", trunc(&if_condition.expression, 32))
+            } else {
+                "If".to_string()
+            }
+        }
+        C::LogicAnd => "AND".to_string(),
+        C::LogicOr => "OR".to_string(),
+        C::LogicNot => "NOT".to_string(),
+        C::Debounce { debounce } => format!("Debounce {}s", debounce.hold_seconds),
+        C::SetVariable { set_variable } => {
+            if set_variable.key.is_empty() {
+                "Set variable".to_string()
+            } else {
+                format!("Set ${}", set_variable.key)
+            }
+        }
+        C::GetVariable { get_variable } => {
+            if get_variable.key.is_empty() {
+                "Get variable".to_string()
+            } else {
+                format!("Get ${}", get_variable.key)
+            }
+        }
+        C::Expression { expression } => {
+            if expression.expression.trim().is_empty() {
+                "Expression".to_string()
+            } else {
+                trunc(&expression.expression, 36)
+            }
+        }
+        C::SetDevice { set_device } => {
+            let verb = match set_device.action {
+                ScheduleAction::On => "on",
+                ScheduleAction::Off => "off",
+                ScheduleAction::Toggle => "toggle",
+            };
+            if set_device.device_name.is_empty() {
+                "Set device".to_string()
+            } else {
+                format!("{} → {}", set_device.device_name, verb)
+            }
+        }
+        C::ToggleDevice { toggle_device } => {
+            if toggle_device.device_name.is_empty() {
+                "Toggle device".to_string()
+            } else {
+                format!("Toggle {}", toggle_device.device_name)
+            }
+        }
+        C::FireHook { .. } => "Fire hook".to_string(),
+    }
+}
+
+/// Dry-run the target node and everything upstream of it: evaluate the
+/// upstream closure in topological order, performing real reads (HTTP
+/// requests run) but no side effects (devices aren't switched, hooks aren't
+/// fired — action nodes report their intent instead). Nothing is persisted.
+/// Each node's rising-edge baseline is reset so the run behaves like a fresh
+/// trigger (so HTTP fetches and triggers fire), and downstream nodes read
+/// this run's freshly-computed outputs rather than the persisted ones.
+pub(crate) async fn dry_run_node(
+    state: &AppState,
+    automation: &Automation,
+    target_id: &str,
+) -> Result<Vec<RunNodeResult>, String> {
+    if !automation.nodes.iter().any(|n| n.id == target_id) {
+        return Err(format!("node '{target_id}' is not in the graph"));
+    }
+    let closure = upstream_closure(target_id, &automation.edges);
+    let order: Vec<String> = topo_sort_nodes(&automation.nodes, &automation.edges)
+        .ok_or_else(|| "the graph has a cycle".to_string())?
+        .into_iter()
+        .filter(|id| closure.contains(id))
+        .collect();
+
+    let mut incoming: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
+    for e in &automation.edges {
+        incoming
+            .entry(e.target_node.clone())
+            .or_default()
+            .push((e.source_node.clone(), e.source_socket.clone()));
+    }
+
+    let tick_ms = now_ms();
+    let previous_tick_ms = tick_ms.saturating_sub(1000);
+    let mut variables = automation.variables.clone();
+    let device_states = collect_device_states(state).await;
+
+    let mut outputs: BTreeMap<String, Option<bool>> = BTreeMap::new();
+    let mut fresh: BTreeMap<String, NodeRuntimeState> = BTreeMap::new();
+    let mut results: Vec<RunNodeResult> = Vec::with_capacity(order.len());
+
+    for node_id in &order {
+        let Some(node) = automation.nodes.iter().find(|n| &n.id == node_id) else {
+            continue;
+        };
+
+        // Reset the rising-edge baseline so the node fires as if freshly
+        // triggered (HTTP fetches, triggers pulse) rather than being gated by
+        // whatever happened in the live engine.
+        let mut prev_state = automation
+            .status
+            .node_states
+            .get(node_id)
+            .cloned()
+            .unwrap_or_default();
+        prev_state.last_value = None;
+        prev_state.last_checked_at_ms = None;
+        prev_state.pending_value = None;
+        prev_state.pending_since_ms = None;
+
+        let input_values: Vec<IncomingInput> = incoming
+            .get(node_id)
+            .map(|sources| {
+                sources
+                    .iter()
+                    .map(|(src, socket)| {
+                        let value = outputs.get(src).copied().unwrap_or(None);
+                        let adjusted = if socket == "no" { value.map(|v| !v) } else { value };
+                        IncomingInput { source_node: src.clone(), value: adjusted }
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let (new_output, new_state) = evaluate_node(
+            state,
+            &automation.id,
+            node,
+            &input_values,
+            &prev_state,
+            &mut variables,
+            &device_states,
+            previous_tick_ms,
+            tick_ms,
+            Some(&fresh),
+        )
+        .await;
+
+        outputs.insert(node_id.clone(), new_output);
+
+        let is_action = matches!(
+            node.config,
+            AutomationNodeConfig::SetDevice { .. }
+                | AutomationNodeConfig::ToggleDevice { .. }
+                | AutomationNodeConfig::FireHook { .. }
+        );
+        let manages_own_value = matches!(
+            node.config,
+            AutomationNodeConfig::HttpRequest { .. }
+                | AutomationNodeConfig::SetVariable { .. }
+                | AutomationNodeConfig::GetVariable { .. }
+                | AutomationNodeConfig::Expression { .. }
+                | AutomationNodeConfig::VariableChanged { .. }
+        );
+
+        let mut out_map = new_state.outputs.clone();
+        if !manages_own_value {
+            if let Some(v) = new_output {
+                out_map.insert("value".to_string(), v.to_string());
+            }
+        }
+        let fired = new_output == Some(true);
+        let action = if is_action && fired {
+            describe_action(state, &node.config).await
+        } else {
+            None
+        };
+
+        results.push(RunNodeResult {
+            node_id: node_id.clone(),
+            title: node_title(&node.config),
+            value: new_output,
+            outputs: out_map,
+            error: new_state.last_error.clone(),
+            fired,
+            action,
+        });
+
+        fresh.insert(node_id.clone(), new_state);
+    }
+
+    Ok(results)
 }
 
 #[cfg(test)]

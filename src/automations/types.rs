@@ -422,6 +422,44 @@ pub(crate) struct PreviewResponse {
     pub(crate) input_fields: Vec<String>,
 }
 
+/// Request to dry-run a node and everything upstream of it. The graph is sent
+/// in the body so unsaved editor changes can be tested without saving first.
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct RunNodeRequest {
+    pub(crate) node_id: String,
+    #[serde(default)]
+    pub(crate) nodes: Vec<AutomationNode>,
+    #[serde(default)]
+    pub(crate) edges: Vec<AutomationEdge>,
+}
+
+/// One evaluated node in a dry run, in topological order (upstream first).
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct RunNodeResult {
+    pub(crate) node_id: String,
+    /// A short, distinguishing label (e.g. "Set $temp", "HTTP GET …", "If …").
+    pub(crate) title: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) value: Option<bool>,
+    pub(crate) outputs: BTreeMap<String, String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) error: Option<String>,
+    /// Whether this node emits a true pulse (and so would fire downstream).
+    pub(crate) fired: bool,
+    /// For action nodes that would fire: a description of the side effect that
+    /// a dry run intentionally does NOT perform (e.g. "would set fsociety on").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) action: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct RunNodeResponse {
+    pub(crate) ok: bool,
+    pub(crate) nodes: Vec<RunNodeResult>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) error: Option<String>,
+}
+
 pub(crate) fn export_kind() -> String {
     "fusebox.automation".to_string()
 }
