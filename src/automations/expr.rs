@@ -30,6 +30,9 @@ pub(crate) struct EvalContext<'a> {
     /// Present only for devices with a known snapshot; powers deviceOn/
     /// deviceOff/deviceState.
     pub(crate) devices: &'a BTreeMap<String, bool>,
+    /// The clock that now()/hour()/between()/date()/… resolve against. Wall
+    /// time for live evaluation; a virtual time when simulating the forecast.
+    pub(crate) now_ms: u128,
 }
 
 pub(crate) fn evaluate(src: &str, ctx: &EvalContext) -> Result<Value, String> {
@@ -589,7 +592,7 @@ fn eval(expr: &Expr, ctx: &EvalContext) -> Result<Value, String> {
                 "deviceOn" | "deviceOff" | "deviceState" => {
                     eval_device_fn(name, &values, ctx.devices)
                 }
-                _ => call_function(name, &values),
+                _ => call_function(name, &values, ctx.now_ms),
             }
         }
     }
@@ -827,10 +830,10 @@ pub(crate) fn time_in_window(now: u32, start: u32, end: u32) -> bool {
     }
 }
 
-/// Minutes since local midnight, right now.
-fn local_now_minutes() -> u32 {
+/// Minutes since local midnight, at the given clock.
+fn local_now_minutes(now_ms: u128) -> u32 {
     use chrono::Timelike;
-    let now = local_dt(&[], 0);
+    let now = local_dt(&[], 0, now_ms);
     now.hour() * 60 + now.minute()
 }
 
@@ -844,18 +847,19 @@ const MONTH_NAMES: [&str; 12] = [
 
 /// Resolve a date/time argument to a local `DateTime`. `args[idx]`, when
 /// present and non-null, is treated as epoch milliseconds (so date functions
-/// can decompose a timestamp from an API); otherwise "now" is used.
-fn local_dt(args: &[Value], idx: usize) -> chrono::DateTime<chrono::Local> {
+/// can decompose a timestamp from an API); otherwise the context clock
+/// (`now_ms`) is used.
+fn local_dt(args: &[Value], idx: usize, now_ms: u128) -> chrono::DateTime<chrono::Local> {
     use chrono::{DateTime, Local};
     use std::time::{Duration, UNIX_EPOCH};
     let ms = match args.get(idx) {
         Some(v) if !v.is_null() => to_number(v).max(0.0) as u64,
-        _ => crate::time::now_ms() as u64,
+        _ => now_ms as u64,
     };
     DateTime::<Local>::from(UNIX_EPOCH + Duration::from_millis(ms))
 }
 
-fn call_function(name: &str, args: &[Value]) -> Result<Value, String> {
+fn call_function(name: &str, args: &[Value], now_ms: u128) -> Result<Value, String> {
     use chrono::{Datelike, Timelike};
     let arg = |i: usize| args.get(i).cloned().unwrap_or(Value::Null);
     match name {
@@ -988,7 +992,7 @@ fn call_function(name: &str, args: &[Value]) -> Result<Value, String> {
             .find(|v| !v.is_null())
             .cloned()
             .unwrap_or(Value::Null)),
-        "now" => Ok(num(crate::time::now_ms() as f64)),
+        "now" => Ok(num(now_ms as f64)),
         // between("07:30", "01:00") — true while the local clock is inside the
         // window. start > end wraps past midnight. Lets an If express a time
         // window inline instead of needing a separate Between block.
@@ -996,39 +1000,42 @@ fn call_function(name: &str, args: &[Value]) -> Result<Value, String> {
             let start = parse_hhmm(&to_text(&arg(0)));
             let end = parse_hhmm(&to_text(&arg(1)));
             match (start, end) {
-                (Some(s), Some(e)) => Ok(Value::Bool(time_in_window(local_now_minutes(), s, e))),
+                (Some(s), Some(e)) => {
+                    Ok(Value::Bool(time_in_window(local_now_minutes(now_ms), s, e)))
+                }
                 _ => Err(r#"between: expected start and end as "HH:MM", e.g. between("07:30", "01:00")"#
                     .to_string()),
             }
         }
         // --- Date / time (local; each takes an optional epoch-ms argument,
-        // defaulting to now, so you can also decompose a timestamp) ---
-        "year" => Ok(num(local_dt(args, 0).year() as f64)),
-        "month" => Ok(num(local_dt(args, 0).month() as f64)),
-        "day" => Ok(num(local_dt(args, 0).day() as f64)),
-        "hour" => Ok(num(local_dt(args, 0).hour() as f64)),
-        "minute" => Ok(num(local_dt(args, 0).minute() as f64)),
-        "second" => Ok(num(local_dt(args, 0).second() as f64)),
+        // defaulting to the context clock, so you can also decompose a
+        // timestamp) ---
+        "year" => Ok(num(local_dt(args, 0, now_ms).year() as f64)),
+        "month" => Ok(num(local_dt(args, 0, now_ms).month() as f64)),
+        "day" => Ok(num(local_dt(args, 0, now_ms).day() as f64)),
+        "hour" => Ok(num(local_dt(args, 0, now_ms).hour() as f64)),
+        "minute" => Ok(num(local_dt(args, 0, now_ms).minute() as f64)),
+        "second" => Ok(num(local_dt(args, 0, now_ms).second() as f64)),
         // 0 = Sunday .. 6 = Saturday, for easy numeric comparison.
-        "weekday" => Ok(num(local_dt(args, 0).weekday().num_days_from_sunday() as f64)),
+        "weekday" => Ok(num(local_dt(args, 0, now_ms).weekday().num_days_from_sunday() as f64)),
         "weekdayName" => {
-            let i = local_dt(args, 0).weekday().num_days_from_sunday() as usize;
+            let i = local_dt(args, 0, now_ms).weekday().num_days_from_sunday() as usize;
             Ok(Value::String(WEEKDAY_NAMES[i].to_string()))
         }
         "monthName" => {
-            let i = (local_dt(args, 0).month0() as usize).min(11);
+            let i = (local_dt(args, 0, now_ms).month0() as usize).min(11);
             Ok(Value::String(MONTH_NAMES[i].to_string()))
         }
         "isWeekend" => {
-            let i = local_dt(args, 0).weekday().num_days_from_sunday();
+            let i = local_dt(args, 0, now_ms).weekday().num_days_from_sunday();
             Ok(Value::Bool(i == 0 || i == 6))
         }
         "date" => {
-            let d = local_dt(args, 0);
+            let d = local_dt(args, 0, now_ms);
             Ok(Value::String(format!("{:04}-{:02}-{:02}", d.year(), d.month(), d.day())))
         }
         "time" => {
-            let d = local_dt(args, 0);
+            let d = local_dt(args, 0, now_ms);
             Ok(Value::String(format!("{:02}:{:02}", d.hour(), d.minute())))
         }
         // --- More string helpers ---
@@ -1261,6 +1268,7 @@ mod tests {
             variables: vars,
             input,
             devices: &devices,
+            now_ms: crate::time::now_ms(),
         };
         evaluate(src, &ctx).expect("eval ok")
     }
@@ -1275,6 +1283,7 @@ mod tests {
                 variables: &vars,
                 input: Value::Null,
                 devices: &devices,
+                now_ms: crate::time::now_ms(),
             };
             evaluate(src, &ctx).expect("eval ok")
         };
@@ -1298,7 +1307,8 @@ mod tests {
         );
         // Malformed times are an error, not a silent false.
         let devices = BTreeMap::new();
-        let ctx = EvalContext { variables: &vars, input: Value::Null, devices: &devices };
+        let ctx =
+            EvalContext { variables: &vars, input: Value::Null, devices: &devices, now_ms: crate::time::now_ms() };
         assert!(evaluate(r#"between("nope", "01:00")"#, &ctx).is_err());
     }
 
@@ -1471,6 +1481,7 @@ mod tests {
             variables: &vars,
             input: Value::Null,
             devices: &devices,
+            now_ms: crate::time::now_ms(),
         };
         assert!(evaluate("bogus(1)", &ctx).is_err());
     }

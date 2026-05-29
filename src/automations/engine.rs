@@ -11,7 +11,7 @@ use serde_json::Value;
 use crate::automations::expr::{self, EvalContext};
 use crate::automations::types::{
     Automation, AutomationEdge, AutomationNode, AutomationNodeConfig, ForecastEvent,
-    IfConditionCfg, IfOp, IntervalTriggerCfg, NodeRuntimeState, RunNodeResult,
+    IfConditionCfg, IfOp, NodeRuntimeState, RunNodeResult,
 };
 use crate::conditions::{ConditionConfig, parse_status_match, probe_condition_once, status_matches};
 use crate::hooks::{HookEvent, HookSource, HookTemplateContext, fire_hook};
@@ -159,6 +159,7 @@ pub(crate) async fn evaluate_one_automation(
             previous_tick_ms,
             tick_ms,
             None,
+            false,
         )
         .await;
 
@@ -326,126 +327,179 @@ pub(crate) fn topo_sort_nodes(
     }
 }
 
-/// Predict device state changes over [now_ms, horizon_ms] from the
-/// deterministic, time-based triggers (cron + interval) that drive a device
-/// action directly. Conditional/data-dependent paths (IF, HTTP, variables)
-/// can't be predicted ahead of time and are intentionally excluded.
-pub(crate) fn forecast_device_changes(
-    automations: &BTreeMap<String, Automation>,
+/// The device + action an action node targets, if any.
+fn device_action(config: &AutomationNodeConfig) -> Option<(String, ScheduleAction)> {
+    match config {
+        AutomationNodeConfig::SetDevice { set_device } if !set_device.device_name.is_empty() => {
+            Some((set_device.device_name.clone(), set_device.action))
+        }
+        AutomationNodeConfig::ToggleDevice { toggle_device }
+            if !toggle_device.device_name.is_empty() =>
+        {
+            Some((toggle_device.device_name.clone(), ScheduleAction::Toggle))
+        }
+        _ => None,
+    }
+}
+
+/// Predict device state changes over (now_ms, horizon_ms] by fast-forwarding a
+/// virtual clock through the automation graphs. Steps every `step_ms`,
+/// evaluating each enabled automation with no side effects: time functions
+/// resolve against the virtual clock, HTTP blocks replay their last response
+/// (held constant for the horizon), and simulated device state evolves as
+/// actions would fire. Conditional/expression/variable paths are followed, so
+/// the result reflects the state the flowchart actually resolves to — not just
+/// the deterministic time triggers.
+pub(crate) async fn simulate_forecast(
+    state: &AppState,
     now_ms: u128,
     horizon_ms: u128,
+    step_ms: u128,
 ) -> Vec<ForecastEvent> {
     const MAX_EVENTS: usize = 500;
-    let now_dt = DateTime::<Local>::from(std::time::UNIX_EPOCH + Duration::from_millis(now_ms as u64));
-    let horizon_dt =
-        DateTime::<Local>::from(std::time::UNIX_EPOCH + Duration::from_millis(horizon_ms as u64));
-
-    let mut events: Vec<ForecastEvent> = Vec::new();
-    for automation in automations.values() {
-        if !automation.enabled {
-            continue;
-        }
-        for node in &automation.nodes {
-            // Direct device-action targets wired off this trigger.
-            let targets: Vec<(String, ScheduleAction)> = automation
-                .edges
-                .iter()
-                .filter(|e| e.source_node == node.id)
-                .filter_map(|e| automation.nodes.iter().find(|n| n.id == e.target_node))
-                .filter_map(|target| match &target.config {
-                    AutomationNodeConfig::SetDevice { set_device }
-                        if !set_device.device_name.is_empty() =>
-                    {
-                        Some((set_device.device_name.clone(), set_device.action))
-                    }
-                    AutomationNodeConfig::ToggleDevice { toggle_device }
-                        if !toggle_device.device_name.is_empty() =>
-                    {
-                        Some((toggle_device.device_name.clone(), ScheduleAction::Toggle))
-                    }
-                    _ => None,
-                })
-                .collect();
-            if targets.is_empty() {
-                continue;
-            }
-
-            let fire_times: Vec<u128> = match &node.config {
-                AutomationNodeConfig::CronTrigger { cron_trigger } => match parse_cron(&cron_trigger.cron) {
-                    Ok(schedule) => schedule
-                        .after(&now_dt)
-                        .take_while(|t| *t <= horizon_dt)
-                        .take(MAX_EVENTS)
-                        .map(|t| t.timestamp_millis().max(0) as u128)
-                        .collect(),
-                    Err(_) => continue,
-                },
-                AutomationNodeConfig::IntervalTrigger { interval_trigger } => {
-                    interval_rising_times(interval_trigger, now_ms, horizon_ms)
-                }
-                // Immediate already fired; device events aren't predictable.
-                _ => continue,
-            };
-
-            for at in fire_times {
-                for (device, action) in &targets {
-                    events.push(ForecastEvent {
-                        at_ms: at,
-                        device_name: device.clone(),
-                        action: *action,
-                        automation_id: automation.id.clone(),
-                        automation_name: automation.name.clone(),
-                    });
-                }
-            }
-        }
+    if step_ms == 0 || horizon_ms <= now_ms {
+        return Vec::new();
     }
+
+    // Per-automation simulation state, evolving across ticks.
+    struct SimAuto {
+        automation: Automation,
+        order: Vec<String>,
+        incoming: BTreeMap<String, Vec<(String, String)>>,
+        states: BTreeMap<String, NodeRuntimeState>,
+        variables: BTreeMap<String, Value>,
+    }
+    let mut sims: Vec<SimAuto> = {
+        let guard = state.automations.read().await;
+        guard
+            .values()
+            .filter(|a| a.enabled)
+            .filter_map(|a| {
+                let order = topo_sort_nodes(&a.nodes, &a.edges)?;
+                let mut incoming: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
+                for e in &a.edges {
+                    incoming
+                        .entry(e.target_node.clone())
+                        .or_default()
+                        .push((e.source_node.clone(), e.source_socket.clone()));
+                }
+                Some(SimAuto {
+                    states: a.status.node_states.clone(),
+                    variables: a.variables.clone(),
+                    order,
+                    incoming,
+                    automation: a.clone(),
+                })
+            })
+            .collect()
+    };
+
+    // Simulated device on/off, seeded from the live snapshot (keyed by name and
+    // nickname). Actions update the entry for their device name; deviceOn() in
+    // expressions reads from this evolving map.
+    let mut devices = collect_device_states(state).await;
+    let mut events: Vec<ForecastEvent> = Vec::new();
+
+    let mut t = now_ms + step_ms;
+    while t <= horizon_ms && events.len() < MAX_EVENTS {
+        let prev_tick = t - step_ms;
+        for sim in &mut sims {
+            let mut outputs: BTreeMap<String, Option<bool>> = BTreeMap::new();
+            let mut fresh: BTreeMap<String, NodeRuntimeState> = BTreeMap::new();
+            for node_id in &sim.order {
+                let Some(node) = sim.automation.nodes.iter().find(|n| &n.id == node_id) else {
+                    continue;
+                };
+                let prev_state = sim.states.get(node_id).cloned().unwrap_or_default();
+                let input_values: Vec<IncomingInput> = sim
+                    .incoming
+                    .get(node_id)
+                    .map(|sources| {
+                        sources
+                            .iter()
+                            .map(|(src, socket)| {
+                                let value = outputs.get(src).copied().unwrap_or(None);
+                                let adjusted =
+                                    if socket == "no" { value.map(|v| !v) } else { value };
+                                IncomingInput { source_node: src.clone(), value: adjusted }
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+
+                let (new_output, new_state) = evaluate_node(
+                    state,
+                    &sim.automation.id,
+                    node,
+                    &input_values,
+                    &prev_state,
+                    &mut sim.variables,
+                    &devices,
+                    prev_tick,
+                    t,
+                    Some(&fresh),
+                    true,
+                )
+                .await;
+
+                outputs.insert(node_id.clone(), new_output);
+
+                // Rising edge on an action → apply the change to sim state and
+                // record it (only when the device actually changes).
+                let rising = matches!(
+                    (prev_state.last_value, new_output),
+                    (None, Some(true)) | (Some(false), Some(true))
+                );
+                if rising {
+                    if let Some((device, action)) = device_action(&node.config) {
+                        let current = devices.get(&device).copied();
+                        let target = match action {
+                            ScheduleAction::On => true,
+                            ScheduleAction::Off => false,
+                            ScheduleAction::Toggle => !current.unwrap_or(false),
+                        };
+                        if current != Some(target) {
+                            devices.insert(device.clone(), target);
+                            events.push(ForecastEvent {
+                                at_ms: t,
+                                device_name: device,
+                                action: if target {
+                                    ScheduleAction::On
+                                } else {
+                                    ScheduleAction::Off
+                                },
+                                automation_id: sim.automation.id.clone(),
+                                automation_name: sim.automation.name.clone(),
+                            });
+                        }
+                    }
+                }
+
+                let manages_own_value = matches!(
+                    node.config,
+                    AutomationNodeConfig::HttpRequest { .. }
+                        | AutomationNodeConfig::SetVariable { .. }
+                        | AutomationNodeConfig::GetVariable { .. }
+                        | AutomationNodeConfig::Expression { .. }
+                        | AutomationNodeConfig::VariableChanged { .. }
+                );
+                let mut merged = new_state;
+                merged.last_value = new_output;
+                if !manages_own_value {
+                    if let Some(v) = new_output {
+                        merged.outputs.insert("value".to_string(), v.to_string());
+                    }
+                }
+                fresh.insert(node_id.clone(), merged.clone());
+                sim.states.insert(node_id.clone(), merged);
+            }
+        }
+        t += step_ms;
+    }
+
     events.sort_by_key(|e| e.at_ms);
     events.truncate(MAX_EVENTS);
     events
-}
-
-/// Rising-edge (start-of-active-window) times of an interval trigger within
-/// (now_ms, horizon_ms]. A constant interval (on or off is zero) has no
-/// recurring transitions, so it produces nothing.
-fn interval_rising_times(cfg: &IntervalTriggerCfg, now_ms: u128, horizon_ms: u128) -> Vec<u128> {
-    let total = cfg.on_seconds.saturating_add(cfg.off_seconds);
-    if total == 0 || cfg.on_seconds == 0 || cfg.off_seconds == 0 {
-        return Vec::new();
-    }
-    // For start=on/toggle the active window begins at phase 0; for start=off
-    // it begins once the on-window has elapsed.
-    let offset_s = if matches!(cfg.start_action, ScheduleAction::Off) {
-        cfg.on_seconds
-    } else {
-        0
-    };
-    let starts = cfg.starts_at_ms.unwrap_or(0) as i128;
-    let base = starts + (offset_s as i128) * 1000;
-    let period = (total as i128) * 1000;
-    let now = now_ms as i128;
-    let horizon = horizon_ms as i128;
-
-    // Jump straight to the cycle near `now` rather than counting from epoch.
-    let mut k = if now > base { (now - base) / period } else { 0 };
-    if k < 0 {
-        k = 0;
-    }
-    let mut times = Vec::new();
-    loop {
-        let t = base + k * period;
-        if t > horizon {
-            break;
-        }
-        if t > now && t >= 0 {
-            times.push(t as u128);
-        }
-        k += 1;
-        if times.len() >= 500 {
-            break;
-        }
-    }
-    times
 }
 
 /// One edge feeding into the node being evaluated, with its (possibly
@@ -470,6 +524,9 @@ pub(crate) async fn evaluate_node(
     // this run's outputs (body, status_code, …) instead of the persisted,
     // previous-tick values. `None` in the live engine.
     overrides: Option<&BTreeMap<String, NodeRuntimeState>>,
+    // Forecast simulation: don't hit the network — HTTP blocks replay their
+    // snapshot response instead of fetching.
+    simulate: bool,
 ) -> (Option<bool>, NodeRuntimeState) {
     let mut next = prev.clone();
     next.last_error = None;
@@ -611,6 +668,12 @@ pub(crate) async fn evaluate_node(
             if !rising {
                 return (prev.last_value, next);
             }
+            if simulate {
+                // Forecast: replay the snapshot rather than fetching. `next`
+                // already carries the snapshot outputs (cloned from prev);
+                // treat it as having matched so downstream paths are explored.
+                return (Some(prev.last_value.unwrap_or(true)), next);
+            }
             if http_request.url.is_empty() {
                 next.last_error = Some("URL not configured".to_string());
                 return (Some(false), next);
@@ -684,6 +747,7 @@ pub(crate) async fn evaluate_node(
                         variables,
                         input,
                         devices: device_states,
+                        now_ms: tick_ms,
                     };
                     match expr::evaluate(&if_condition.expression, &ctx) {
                         Ok(value) => expr::truthy(&value),
@@ -796,6 +860,7 @@ pub(crate) async fn evaluate_node(
                     variables,
                     input,
                     devices: device_states,
+                    now_ms: tick_ms,
                 };
                 expr::evaluate(&expression.expression, &ctx)
             };
@@ -828,6 +893,7 @@ pub(crate) async fn evaluate_node(
                     variables,
                     input,
                     devices: device_states,
+                    now_ms: tick_ms,
                 };
                 expr::evaluate(&set_variable.expression, &ctx)
             };
@@ -1399,6 +1465,7 @@ pub(crate) async fn dry_run_node(
             previous_tick_ms,
             tick_ms,
             Some(&fresh),
+            false,
         )
         .await;
 

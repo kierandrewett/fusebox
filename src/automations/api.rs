@@ -8,7 +8,7 @@ use axum::http::StatusCode;
 use tracing::warn;
 
 use crate::api_error::AppError;
-use crate::automations::engine::forecast_device_changes;
+use crate::automations::engine::simulate_forecast;
 use crate::automations::expr::{self, EvalContext};
 use crate::automations::types::{
     Automation, AutomationEdge, AutomationExport, AutomationListResponse, AutomationNode,
@@ -206,13 +206,11 @@ pub(crate) async fn import_automation(
 }
 
 pub(crate) async fn device_forecast(State(state): State<AppState>) -> Json<ForecastResponse> {
-    const HORIZON_MS: u128 = 4 * 60 * 60 * 1000;
+    const HORIZON_MS: u128 = 12 * 60 * 60 * 1000;
+    const STEP_MS: u128 = 60 * 1000;
     let now = now_ms();
     let horizon = now + HORIZON_MS;
-    let events = {
-        let automations = state.automations.read().await;
-        forecast_device_changes(&automations, now, horizon)
-    };
+    let events = simulate_forecast(&state, now, horizon, STEP_MS).await;
     Json(ForecastResponse {
         generated_at_ms: now,
         horizon_ms: horizon,
@@ -260,6 +258,7 @@ pub(crate) async fn preview_expression(
         variables: &variables,
         input,
         devices: &device_states,
+        now_ms: now_ms(),
     };
     let response = match expr::evaluate(&req.expression, &ctx) {
         Ok(value) => {
