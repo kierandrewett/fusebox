@@ -511,6 +511,30 @@ pub(crate) struct IncomingInput {
     pub(crate) value: Option<bool>,
 }
 
+/// Detect a rising-edge pulse for nodes that re-evaluate when their input
+/// transitions from low to high. Returns `(rising, hold)`:
+///   - `rising` is true when the input just rose; the caller fires.
+///   - otherwise the caller returns `(hold, next)` instead of computing.
+///
+/// The hold value collapses to `None` when the input is currently low, so the
+/// chain pulses cleanly between cron/interval triggers — without that, every
+/// gated node would stay stuck at `Some(true)` after its first fire and the
+/// next pulse would read as `(Some(true), true)` = not rising. When the input
+/// is sustained-high the hold stays at `prev.last_value`, so a sustained
+/// input doesn't cause the node to re-fire on every tick.
+fn rising_edge_with_hold(
+    prev_last_value: Option<bool>,
+    inputs: &[IncomingInput],
+) -> (bool, Option<bool>) {
+    let current_high = inputs.iter().any(|i| matches!(i.value, Some(true)));
+    let rising = matches!(
+        (prev_last_value, current_high),
+        (None, true) | (Some(false), true)
+    );
+    let hold = if current_high { prev_last_value } else { None };
+    (rising, hold)
+}
+
 /// Carry an upstream node's data outputs (body, status_code, …) forward onto
 /// this node's outputs without overwriting its own, so e.g. `input.body` from
 /// an HTTP block stays readable several blocks down a chain — outputs behave
@@ -683,12 +707,9 @@ pub(crate) async fn evaluate_node(
             // input pulse. last_value = matched status; last_body and
             // last_status_code are populated so downstream If blocks can
             // branch on the response.
-            let rising = matches!(
-                (prev.last_value, inputs.iter().any(|i| matches!(i.value, Some(true)))),
-                (None, true) | (Some(false), true)
-            );
+            let (rising, hold) = rising_edge_with_hold(prev.last_value, inputs);
             if !rising {
-                return (prev.last_value, next);
+                return (hold, next);
             }
             if http_request.url.is_empty() {
                 next.last_error = Some("URL not configured".to_string());
@@ -795,12 +816,9 @@ pub(crate) async fn evaluate_node(
         AutomationNodeConfig::IfCondition { if_condition } => {
             // Re-evaluate on the rising edge of an input pulse. The route
             // value holds afterwards so downstream pulses keep their route.
-            let rising = matches!(
-                (prev.last_value, inputs.iter().any(|i| matches!(i.value, Some(true)))),
-                (None, true) | (Some(false), true)
-            );
+            let (rising, hold) = rising_edge_with_hold(prev.last_value, inputs);
             if !rising {
-                return (prev.last_value, next);
+                return (hold, next);
             }
             // Expression mode: evaluate a full boolean expression with access
             // to both $variables and input.* (the wired upstream's outputs).
@@ -911,12 +929,9 @@ pub(crate) async fn evaluate_node(
         AutomationNodeConfig::Expression { expression } => {
             // Re-evaluate on the rising edge of an input pulse; the result
             // holds afterwards so downstream reads stay stable.
-            let rising = matches!(
-                (prev.last_value, inputs.iter().any(|i| matches!(i.value, Some(true)))),
-                (None, true) | (Some(false), true)
-            );
+            let (rising, hold) = rising_edge_with_hold(prev.last_value, inputs);
             if !rising {
-                return (prev.last_value, next);
+                return (hold, next);
             }
             let input = fetch_source_outputs(state, automation_id, inputs, overrides).await;
             let result = {
@@ -940,12 +955,9 @@ pub(crate) async fn evaluate_node(
             }
         }
         AutomationNodeConfig::SetVariable { set_variable } => {
-            let rising = matches!(
-                (prev.last_value, inputs.iter().any(|i| matches!(i.value, Some(true)))),
-                (None, true) | (Some(false), true)
-            );
+            let (rising, hold) = rising_edge_with_hold(prev.last_value, inputs);
             if !rising {
-                return (prev.last_value, next);
+                return (hold, next);
             }
             if set_variable.key.is_empty() {
                 next.last_error = Some("variable key is empty".to_string());
