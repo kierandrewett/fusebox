@@ -822,11 +822,14 @@ pub(crate) fn parse_hhmm(s: &str) -> Option<u32> {
 
 /// Whether `now` (minutes since midnight) is within [start, end]. A window
 /// where start > end wraps past midnight (e.g. 07:30 → 01:00).
+/// Whether `now` (minutes since midnight) is within [start, end). The window
+/// is half-open at the end so the end value is the closing time — at exactly
+/// `end` the window is considered closed. start > end wraps past midnight.
 pub(crate) fn time_in_window(now: u32, start: u32, end: u32) -> bool {
     if start <= end {
-        now >= start && now <= end
+        now >= start && now < end
     } else {
-        now >= start || now <= end
+        now >= start || now < end
     }
 }
 

@@ -1643,7 +1643,8 @@ mod between_tests {
         assert!(!time_in_window(480, s, e)); // 08:00 out
         assert!(!time_in_window(1080, s, e)); // 18:00 out
         assert!(time_in_window(540, s, e)); // boundary start
-        assert!(time_in_window(1020, s, e)); // boundary end
+        assert!(!time_in_window(1020, s, e)); // boundary end is exclusive
+        assert!(time_in_window(1019, s, e)); // one minute before end is still in
     }
 
     #[test]
@@ -1653,7 +1654,8 @@ mod between_tests {
         assert!(time_in_window(450, s, e)); // 07:30 in
         assert!(time_in_window(1439, s, e)); // 23:59 in
         assert!(time_in_window(0, s, e)); // 00:00 in
-        assert!(time_in_window(60, s, e)); // 01:00 in
+        assert!(!time_in_window(60, s, e)); // 01:00 is the closing time, exclusive
+        assert!(time_in_window(59, s, e)); // 00:59 still in
         assert!(!time_in_window(61, s, e)); // 01:01 out
         assert!(!time_in_window(449, s, e)); // 07:29 out
     }

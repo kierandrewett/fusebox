@@ -35,7 +35,7 @@ FROM debian:bookworm-slim AS runtime
 ARG DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends ca-certificates curl && \
+    apt-get install -y --no-install-recommends ca-certificates curl tzdata && \
     rm -rf /var/lib/apt/lists/*
 
 RUN groupadd --gid 10001 fusebox && \
