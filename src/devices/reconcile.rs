@@ -150,9 +150,9 @@ pub(crate) async fn set_schedule_intent(state: &AppState, device_name: &str, int
     let mut intents = state.device_intents.write().await;
     let entry = intents.entry(device_name.to_string()).or_default();
     entry.schedule_intent = Some(intent);
-    // Schedule firing automatically releases any manual override.
-    entry.manual_override = None;
-    entry.manual_override_until_ms = None;
+    // Don't touch manual_override here — it has its own TTL (and explicit
+    // release endpoint). Now that actions re-fire every cron tick, clearing
+    // it here would wipe the user's manual control within ~60s.
 }
 
 pub(crate) async fn set_manual_override(
