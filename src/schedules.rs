@@ -6,7 +6,7 @@ use anyhow::{Result, anyhow};
 use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
-use chrono::{DateTime, Local, Timelike};
+use chrono::{DateTime, Local};
 use cron::Schedule as CronSchedule;
 use serde::{Deserialize, Serialize};
 use tokio::time::sleep;
@@ -549,13 +549,12 @@ pub(crate) async fn run_scheduler(state: AppState) {
     let mut previous_tick = Local::now();
 
     loop {
-        let now = Local::now();
-        let seconds_into_minute = u64::from(now.second());
-        let nanos_into_second = u64::from(now.nanosecond());
-        let wait_seconds = 60u64.saturating_sub(seconds_into_minute);
-        let wait = Duration::from_secs(wait_seconds)
-            .saturating_sub(Duration::from_nanos(nanos_into_second));
-        sleep(wait).await;
+        // Tick every second rather than aligning to the minute boundary, so
+        // sub-minute cron expressions (6/7-field, with a seconds field) can
+        // fire at 1s granularity. evaluate_schedules only fires schedules
+        // whose next cron time falls in (previous_tick, now], so a 1s window
+        // still catches minute-granularity schedules exactly once.
+        sleep(Duration::from_secs(1)).await;
 
         let tick_time = Local::now();
         evaluate_schedules(&state, previous_tick, tick_time).await;

@@ -634,6 +634,12 @@
             border: 1px solid color-mix(in srgb, var(--amber) 60%, transparent);
         }
 
+        .device-mode-badge.manual .manual-actions {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
         .device-mode-badge.manual button {
             padding: 2px 8px;
             border: 1px solid color-mix(in srgb, var(--amber) 60%, transparent);

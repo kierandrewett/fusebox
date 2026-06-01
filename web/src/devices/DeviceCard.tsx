@@ -8,9 +8,10 @@ interface Props {
   onToggle: () => void;
   onSetPower: (on: boolean) => void;
   onRelease: () => void;
+  onExtend: () => void;
 }
 
-export function DeviceCard({ device, pending, onToggle, onRelease }: Props) {
+export function DeviceCard({ device, pending, onToggle, onRelease, onExtend }: Props) {
   const isOffline = device.last_error != null;
   const isOn = device.device_on === true;
   const statusClass = isOffline ? "offline" : isOn ? "on" : "off";
@@ -51,14 +52,26 @@ export function DeviceCard({ device, pending, onToggle, onRelease }: Props) {
           <span className="manual-label">
             Manual{device.manual_override_until_ms ? ` — auto ${formatRelative(device.manual_override_until_ms)}` : ""}
           </span>
-          <button
-            type="button"
-            disabled={pending}
-            onClick={onRelease}
-            title="Hand control back to schedules &amp; conditions"
-          >
-            Auto
-          </button>
+          <span className="manual-actions">
+            {device.manual_override_until_ms ? (
+              <button
+                type="button"
+                disabled={pending}
+                onClick={onExtend}
+                title="Push back the automatic revert by another hour"
+              >
+                Extend
+              </button>
+            ) : null}
+            <button
+              type="button"
+              disabled={pending}
+              onClick={onRelease}
+              title="Hand control back to schedules &amp; conditions"
+            >
+              Auto
+            </button>
+          </span>
         </div>
       ) : null}
 

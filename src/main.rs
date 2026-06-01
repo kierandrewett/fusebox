@@ -29,9 +29,9 @@ use crate::conditions::{
     update_condition,
 };
 use crate::devices::{
-    devices_websocket, initial_refresh_devices, list_devices, monitor_devices,
-    publish_device_list, release_device_override, run_override_expiry_sweeper, scan_devices,
-    scan_for_devices, set_device_power, toggle_device,
+    devices_websocket, extend_device_override, initial_refresh_devices, list_devices,
+    monitor_devices, publish_device_list, release_device_override, run_override_expiry_sweeper,
+    scan_devices, scan_for_devices, set_device_power, toggle_device,
 };
 use crate::energy::{energy_history, export_energy_workbook};
 use crate::hooks::{create_hook, delete_hook, list_hooks, test_hook, update_hook};
@@ -78,6 +78,10 @@ async fn main() -> Result<()> {
         .route(
             "/api/devices/{name}/release-override",
             post(release_device_override),
+        )
+        .route(
+            "/api/devices/{name}/extend-override",
+            post(extend_device_override),
         )
         .route("/api/schedules", get(list_schedules).post(create_schedule))
         .route(

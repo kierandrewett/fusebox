@@ -118,7 +118,7 @@ pub(crate) async fn toggle_device(
     Path(name): Path<String>,
     body: Option<Json<ToggleDeviceRequest>>,
 ) -> Result<Json<DeviceView>, AppError> {
-    let duration = body
+    let requested_duration = body
         .map(|Json(req)| req.duration_seconds)
         .unwrap_or(None)
         .unwrap_or(DEFAULT_MANUAL_OVERRIDE_SECONDS);
@@ -131,7 +131,7 @@ pub(crate) async fn toggle_device(
     let snapshot = retry_tapo_handshake(|| state.controller.read_device(&device)).await?;
     update_device_snapshot(&state, &name, snapshot, None, HookSource::Manual).await;
 
-    set_manual_override(&state, &name, target, Some(duration)).await;
+    set_manual_override(&state, &name, target, override_duration(&state, &name, requested_duration).await).await;
     if let Err(error) = save_persisted_state(&state).await {
         warn!(%error, device = %name, "failed to persist manual override");
     }
@@ -147,7 +147,7 @@ pub(crate) async fn set_device_power(
     Path(name): Path<String>,
     Json(request): Json<SetPowerRequest>,
 ) -> Result<Json<DeviceView>, AppError> {
-    let duration = request
+    let requested_duration = request
         .duration_seconds
         .unwrap_or(DEFAULT_MANUAL_OVERRIDE_SECONDS);
     let device = get_device_config(&state, &name).await?;
@@ -157,7 +157,7 @@ pub(crate) async fn set_device_power(
     let snapshot = retry_tapo_handshake(|| state.controller.read_device(&device)).await?;
     update_device_snapshot(&state, &name, snapshot, None, HookSource::Manual).await;
 
-    set_manual_override(&state, &name, request.on, Some(duration)).await;
+    set_manual_override(&state, &name, request.on, override_duration(&state, &name, requested_duration).await).await;
     if let Err(error) = save_persisted_state(&state).await {
         warn!(%error, device = %name, "failed to persist manual override");
     }
@@ -184,6 +184,52 @@ pub(crate) async fn release_device_override(
         warn!(%error, device = %name, "failed to persist override release");
     }
     reconcile_device(&state, &name, HookSource::Manual).await;
+
+    get_device_view(&state, &name)
+        .await
+        .map(Json)
+        .map_err(AppError)
+}
+
+/// Resolve the auto-revert window for a fresh manual override. Some(duration)
+/// when an automation/schedule/condition could take this device back, None
+/// (permanent manual) when nothing would — so we don't show a "auto in 1h"
+/// countdown that has nothing to revert to.
+async fn override_duration(state: &AppState, name: &str, requested: u64) -> Option<u64> {
+    if device_under_automatic_control(state, name).await {
+        Some(requested)
+    } else {
+        None
+    }
+}
+
+pub(crate) async fn extend_device_override(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    body: Option<Json<ToggleDeviceRequest>>,
+) -> Result<Json<DeviceView>, AppError> {
+    {
+        let devices = state.devices.read().await;
+        if !devices.contains_key(&name) {
+            return Err(AppError(anyhow!("unknown device '{}'", name)));
+        }
+    }
+
+    let duration = body
+        .map(|Json(req)| req.duration_seconds)
+        .unwrap_or(None)
+        .unwrap_or(DEFAULT_MANUAL_OVERRIDE_SECONDS);
+
+    if !extend_manual_override(&state, &name, duration).await {
+        return Err(AppError(anyhow!(
+            "device '{}' has no manual override to extend",
+            name
+        )));
+    }
+    if let Err(error) = save_persisted_state(&state).await {
+        warn!(%error, device = %name, "failed to persist override extension");
+    }
+    publish_device_list(&state, None).await;
 
     get_device_view(&state, &name)
         .await

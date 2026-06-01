@@ -9,6 +9,7 @@ use super::{
     device_operation_lock, get_device_config, publish_device_list, retry_tapo_handshake,
     update_device_snapshot,
 };
+use crate::automations::types::AutomationNodeConfig;
 use crate::state::{
     AppState, MAX_MANUAL_OVERRIDE_SECONDS, MIN_MANUAL_OVERRIDE_SECONDS, save_persisted_state,
 };
@@ -151,8 +152,9 @@ pub(crate) async fn set_schedule_intent(state: &AppState, device_name: &str, int
     let entry = intents.entry(device_name.to_string()).or_default();
     entry.schedule_intent = Some(intent);
     // Don't touch manual_override here — it has its own TTL (and explicit
-    // release endpoint). Now that actions re-fire every cron tick, clearing
-    // it here would wipe the user's manual control within ~60s.
+    // release endpoint). Actions re-fire on every cron/automation tick (as
+    // often as 1s), so clearing it here would wipe the user's manual control
+    // almost immediately.
 }
 
 pub(crate) async fn set_manual_override(
@@ -178,6 +180,70 @@ pub(crate) async fn clear_manual_override(state: &AppState, device_name: &str) {
         entry.manual_override = None;
         entry.manual_override_until_ms = None;
     }
+}
+
+/// Push out an existing manual override's auto-revert time by `duration_seconds`
+/// (added on top of whatever is left, capped at the maximum override window).
+/// Returns false if the device has no active manual override to extend.
+pub(crate) async fn extend_manual_override(
+    state: &AppState,
+    device_name: &str,
+    duration_seconds: u64,
+) -> bool {
+    let mut intents = state.device_intents.write().await;
+    match intents.get_mut(device_name) {
+        Some(entry) if entry.manual_override.is_some() => {
+            let now = now_ms();
+            let bounded = duration_seconds
+                .max(MIN_MANUAL_OVERRIDE_SECONDS)
+                .min(MAX_MANUAL_OVERRIDE_SECONDS);
+            // Add to whatever time is left (or to "now" if already expired /
+            // permanent), but never further out than the max window from now.
+            let base = entry.manual_override_until_ms.unwrap_or(now).max(now);
+            let max_until = now + (MAX_MANUAL_OVERRIDE_SECONDS as u128) * 1000;
+            entry.manual_override_until_ms = Some((base + (bounded as u128) * 1000).min(max_until));
+            true
+        }
+        _ => false,
+    }
+}
+
+/// Whether anything would automatically drive this device's power: an enabled
+/// schedule, an enabled condition, or an enabled automation with a SetDevice /
+/// ToggleDevice node targeting it. When nothing does, a manual override has no
+/// "auto" mode to revert to, so it should stick permanently rather than show a
+/// misleading "auto in 1h" countdown.
+pub(crate) async fn device_under_automatic_control(state: &AppState, device_name: &str) -> bool {
+    {
+        let schedules = state.schedules.read().await;
+        if schedules
+            .values()
+            .any(|s| s.enabled && s.device_name == device_name)
+        {
+            return true;
+        }
+    }
+    {
+        let conditions = state.conditions.read().await;
+        if conditions
+            .values()
+            .any(|c| c.enabled && c.device_name == device_name)
+        {
+            return true;
+        }
+    }
+    let automations = state.automations.read().await;
+    automations.values().filter(|a| a.enabled).any(|automation| {
+        automation.nodes.iter().any(|node| match &node.config {
+            AutomationNodeConfig::SetDevice { set_device } => {
+                set_device.device_name == device_name
+            }
+            AutomationNodeConfig::ToggleDevice { toggle_device } => {
+                toggle_device.device_name == device_name
+            }
+            _ => false,
+        })
+    })
 }
 
 pub(crate) async fn run_override_expiry_sweeper(state: AppState) {

@@ -160,6 +160,15 @@ export async function releaseDeviceOverride(name: string): Promise<Device> {
   return jsonOrThrow<Device>(res);
 }
 
+export async function extendDeviceOverride(name: string, durationSeconds?: number): Promise<Device> {
+  const res = await fetch(`${BASE}/api/devices/${encodeURIComponent(name)}/extend-override`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(durationSeconds != null ? { duration_seconds: durationSeconds } : {}),
+  });
+  return jsonOrThrow<Device>(res);
+}
+
 export async function energyHistory(range = "7d"): Promise<UsageHistoryResponse> {
   const res = await fetch(`${BASE}/api/energy/history.json?range=${encodeURIComponent(range)}`);
   return jsonOrThrow<UsageHistoryResponse>(res);

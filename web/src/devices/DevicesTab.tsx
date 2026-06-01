@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useReducer } from "react";
-import { energyHistory, listDeviceResponse, releaseDeviceOverride, setDevicePower, toggleDevice } from "../api";
+import { energyHistory, extendDeviceOverride, listDeviceResponse, releaseDeviceOverride, setDevicePower, toggleDevice } from "../api";
 import type { DeviceListResponse, UsageHistoryResponse } from "../types";
 import { subscribeDevices } from "../ws";
 import { DeviceCard } from "./DeviceCard";
@@ -128,6 +128,7 @@ export function DevicesTab({ registerScanSink }: Props) {
               onToggle={() => mutate(device.name, () => toggleDevice(device.name))}
               onSetPower={(on) => mutate(device.name, () => setDevicePower(device.name, on))}
               onRelease={() => mutate(device.name, () => releaseDeviceOverride(device.name))}
+              onExtend={() => mutate(device.name, () => extendDeviceOverride(device.name))}
             />
           ))
         )}
